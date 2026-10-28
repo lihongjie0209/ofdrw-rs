@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- Simple-font FirstChar/LastChar and width entries accept indirect objects,
+  with bounded numeric validation before layout. BT now permits its default
+  text origin and resets positioning for each text object while preserving
+  font parameters. Tests compare explicit and implicit positions, Type1 and
+  CID text, embedded TrueType resources, and all three language bindings.
+
 - All fourteen standard Type1 faces have built-in AFM advances when Widths
   is omitted, including consecutive text runs, TJ adjustments, character and
   word spacing. Symbol and ZapfDingbats default encodings also import.

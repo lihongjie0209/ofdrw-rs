@@ -637,6 +637,8 @@ def test_mixed_password_and_certificate_recipients(tmp_path):
     "type0-identity-tounicode.pdf",
     "type0-indirect-widths.pdf",
     "encoding-differences.pdf",
+    "simple-indirect-widths.pdf",
+    "text-default-origin.pdf",
 ])
 def test_imports_tounicode_pdf(tmp_path, name):
     source = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" /

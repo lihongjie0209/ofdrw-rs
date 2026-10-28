@@ -11,6 +11,20 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('preserve PDF positions with indirect simple widths and the default text origin', () => {
+  const direct = Document.fromPdfBytes(fs.readFileSync(fixture('type1-tounicode.pdf')));
+  try {
+    for (const name of ['simple-indirect-widths.pdf', 'text-default-origin.pdf']) {
+      const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
+      try {
+        assert.deepEqual(document.pageText(0), ['中文']);
+        assert.deepEqual(document.pageTextObjects(0), direct.pageTextObjects(0));
+        assert.deepEqual(document.pagePng(0, 72), direct.pagePng(0, 72));
+      } finally { document.close(); }
+    }
+  } finally { direct.close(); }
+});
+
 test('import standard font metrics and symbolic encodings without Widths', () => {
   for (const [name, text, advance] of [
     ['standard14-tounicode.pdf', '中文', 6.804],

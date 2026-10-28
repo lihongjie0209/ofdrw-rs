@@ -1652,7 +1652,7 @@ entries are accepted. `TR=Identity` and `TR2=Identity/Default` are also
 accepted; nonidentity transfer functions remain unsupported. Nondefault values of these graphics-state controls
 remain unsupported because they can change compositing or stroke behavior.
 Soft masks and other unsupported extended graphics-state entries return an error.
-Basic horizontal Type1 and simple TrueType text with explicit positioning is
+Basic horizontal Type1 and simple TrueType text is
 imported as OFD text, using the document's fallback font. Consecutive text
 strings, `TJ` adjustments, and `Tc`/`Tw` spacing use explicit PDF font widths
 when available, or the built-in advances of the fourteen standard Type1 faces
@@ -1695,6 +1695,18 @@ base. ToUnicode still changes extracted text without changing source glyph
 advances. These tables provide metrics, not font outlines; preview font fallback
 still applies. Data provenance and permissions are retained in the
 [font metric notice](../crates/ofdrw/assets/core14/NOTICE) and distributed packages.
+
+Simple-font `FirstChar`, `LastChar`, `Widths` arrays and numeric width entries
+may be indirect objects. A declared table must contain exactly one finite
+width per code in its 0–255 range, with at most 256 entries. Invalid numeric
+entries and unresolved or cyclic references return errors.
+
+`BT` initializes the text and line matrices to identity, so text can start at
+the default text-space origin without `Td` or `Tm`; the current graphics
+transform still applies. Each new text object resets these matrices while
+retaining font and spacing parameters. Continued strings require known font
+advances or another explicit position. This follows
+[ISO 32000-1, section 9.4.1](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
 Type0 `Identity-H` encoding names, default CID widths (`DW`), `W` arrays,
 range endpoints, per-CID width arrays and individual widths may be indirect
