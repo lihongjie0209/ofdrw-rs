@@ -1,0 +1,307 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            library: libofdrw_ffi.so
+            node_platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            library: libofdrw_ffi.so
+            node_platform: linux-arm64
+          - runner: macos-15-intel
+            library: libofdrw_ffi.dylib
+            node_platform: darwin-x64
+          - runner: macos-15
+            library: libofdrw_ffi.dylib
+            node_platform: darwin-arm64
+          - runner: windows-2025
+            library: ofdrw_ffi.dll
+            node_platform: win32-x64
+          - runner: windows-11-arm
+            library: ofdrw_ffi.dll
+            node_platform: win32-arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: ofdrw-rs
+    steps:
+      - name: Check out pinned Java OFDRW reference
+        uses: actions/checkout@v7
+        with:
+          repository: ofdrw/ofdrw
+          ref: 84e9eb260ba6fd351ecccf08a01a40305d4af635
+      - name: Check out Rust implementation
+        uses: actions/checkout@v7
+        with:
+          path: ofdrw-rs
+      - name: Install Java interoperability tests
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: cp ofdrw-rs/tests/java/*.java ofdrw-crypto/src/test/java/org/ofdrw/crypto/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Rust tests and native library
+        run: |
+          cargo fmt --all -- --check
+          python scripts/check_c_header.py
+          python scripts/check_binding_ffi_parity.py
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo build -p ofdrw-ffi --locked
+      - name: Release PDF corpus regression
+        if: matrix.runner == 'ubuntu-24.04'
+        run: cargo test --release -p ofdrw --locked imports_java_xbrl_pdf_with_rgb_page_group_in_release_mode
+      - name: Python integration tests
+        env:
+          OFDRW_LIB_PATH: ${{ github.workspace }}/ofdrw-rs/target/debug/${{ matrix.library }}
+          PYTHONPATH: ${{ github.workspace }}/ofdrw-rs/bindings/python
+        run: |
+          python -m pip install cffi pytest pytest-cov
+          python -m pytest --cov=ofdrw_rs --cov-fail-under=90 -q bindings/python/tests
+      - name: Build and smoke-test Python wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist bindings/python
+          python -c "import glob,subprocess,sys; wheels=glob.glob('dist/*-py3-none-*.whl'); assert len(wheels)==1, wheels; subprocess.check_call([sys.executable,'-m','pip','install',wheels[0]])"
+          python -c "from ofdrw_rs import Document; s=Document.open('../ofdrw-reader/src/test/resources/发票示例.ofd'); png=s.page_image_data(0,0); s.close(); d=Document.new(); d.add_text_page('wheel'); assert d.page_text_objects(0)[0]['codes'][0]['text']=='wheel'; assert d.page_png(0,25.4).startswith(b'\x89PNG'); assert d.to_pdf().startswith(b'%PDF-'); i=d.add_path_object(0,'M 0 0 L 10 10',(0,0,10,10)); assert d.page_paths(0)[0]['id']==str(i); j=d.add_image_object(0,png,'png',(0,0,10,10)); assert d.page_images(0)[0]['id']==str(j); k=d.add_text_watermark(0,'mark',(0,0,10,10)); assert d.annotations()[0]['id']==str(k); assert d.add_outline('Root')==0; assert d.outlines()[0]['title']=='Root'; d.remove_page_object(0,i); assert d.page_paths(0)==[]; assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('A\x00B',40,30); assert d.page_text(0)==['A\x00B']; i=d.page_text_objects(0)[0]['id']; d.set_page_text_code(0,i,0,'C\x00D'); assert d.page_text(0)==['C\x00D']; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('wheel copy'); assert d.duplicate_page(0)==1; assert d.page_text(1)==['wheel copy']; assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('area',100,100); d.set_page_area(0,(0,0,100,100),application_box=(20,20,60,60)); assert d.pages()[0]['application_box']==[20,20,60,60]; assert 'ofd-application-clip' in d.page_svg(0); d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.open('../ofdrw-converter/src/test/resources/y.ofd'); objects=d.page_composite_objects(0); assert objects and objects[0]['resource_id']; added=d.add_composite_object(0,objects[0]['resource_id'],(1,2,10,12),alpha=180); assert len(d.page_composite_objects(0))==len(objects)+1; d.remove_page_object(0,added); d.remove_page_object(0,objects[0]['id']); assert len(d.page_composite_objects(0))==len(objects)-1; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('base',40,40); i=d.add_composite_path_object(0,'M 0 0 L 10 0 L 10 10 C',(2,3,10,10),fill=True,stroke=False,fill_color=(255,0,0)); assert d.page_composite_objects(0)[0]['id']==str(i); assert 'fill=\"#ff0000\"' in d.page_svg(0); assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('base',40,40); i=d.add_composite_text_object(0,'Rust text',(2,3,20,8),font_id=1); assert d.page_composite_objects(0)[0]['id']==str(i); assert d.page_text(0)==['base','Rust text']; assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_blank_page(40,30); d.append_blank_page(0,20,20); assert d.page_count==2; assert d.page_text_objects(0)==[]; assert d.page_text(1)==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_blank_page(20,20); layers=d.page_layers(0); assert len(layers)==1 and layers[0]['layer_type']=='Body' and layers[0]['object_count']==0; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_blank_page(20,20); layer=d.add_page_layer(0,'Foreground'); obj=d.add_path_object(0,'M 0 0 L 10 10',(0,0,10,10)); d.move_page_object_to_layer(0,obj,layer); assert d.page_layers(0)[-1]['object_count']==1; empty=d.add_page_layer(0,'Background'); d.remove_page_layer(0,empty); assert len(d.page_layers(0))==2; assert d.validate_references()==[]; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.from_pdf_bytes(Path('crates/ofdrw/tests/fixtures/vector.pdf').read_bytes()); assert d.page_count==1 and len(d.page_paths(0))==2; assert d.validate_references()==[]; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.from_pdf_bytes(Path('crates/ofdrw/tests/fixtures/image.pdf').read_bytes()); assert d.page_count==1 and len(d.page_images(0))==1; assert d.validate_references()==[]; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.from_pdf_bytes(Path('crates/ofdrw/tests/fixtures/text.pdf').read_bytes()); assert d.page_text(0)==['Hello PDF']; assert d.validate_references()==[]; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.from_pdf_bytes(Path('crates/ofdrw/tests/fixtures/spacing.pdf').read_bytes()); assert d.page_text(0)==['AB','CD']; assert d.validate_references()==[]; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.open(Path('crates/ofdrw/tests/fixtures/versioned.ofd')); assert d.versions()[0]['id']=='v1'; assert len(d.versions()[0]['files'])==3; assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('versioned',80,50); v=d.add_version_snapshot('v1',name='First'); assert v['index']==1 and v['current']; assert len(d.versions())==1 and d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); assert d.add_flowed_text(0,'A\nB\nC',page_size=(40,22),margins=(5,5,5,5))==[0,1]; assert d.page_text(0)==['A','B']; assert d.page_text(1)==['C']; assert d.add_flowed_text(0,'A\nB',page_size=(40,22),margins=(5,5,5,5),align='right',first_line_indent=4)==[2]; assert all(abs(o['boundary'][0]+o['boundary'][2]-35)<1e-6 for o in d.page_text_objects(2)); assert d.add_flowed_text(0,'A\nB\n',page_size=(40,22),margins=(5,5,5,5),first_line_indent=4)==[3]; assert [o['boundary'][0] for o in d.page_text_objects(3)]==[9,5]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); s={'page_size':(40,22),'margins':(5,5,5,5),'first_line_indent_chars':2}; assert d.add_flowed_text(0,'A\nB',**s)==[0]; assert [o['boundary'][0] for o in d.page_text_objects(0)]==[15,5]; assert d.add_flowed_spans(0,[{'text':'A\nB','font_size':3,'letter_spacing':0.5}],**s)==[1]; assert [o['boundary'][0] for o in d.page_text_objects(1)]==[12,5]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); assert d.add_flowed_spans(0,[{'text':'AA','bold':True,'fill_color':[255,0,0],'letter_spacing':0.5,'underline':True,'underline_offset':0.5,'underline_width':0.2,'line_break_after':True},{'text':'B\nC','font_size':3,'italic':True,'keep_together':True}],page_size=(40,16),margins=(5,5,5,5))==[0,1,2]; assert d.page_text(0)==['AA']; assert d.page_text(1)==['B']; assert d.page_text(2)==['C']; assert len(d.page_paths(0))==1; assert '#ff0000' in d.page_svg(0); d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); assert d.add_flowed_text(0,' A \n B ',page_size=(40,22),margins=(5,5,5,5))==[0]; assert d.add_flowed_spans(0,[{'text':' A \n B '}],page_size=(40,22),margins=(5,5,5,5))==[1]; assert d.page_text(0)==[' A ',' B ']; assert d.page_text(1)==[' A ',' B ']; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); s=[{'text':'A'},{'text':'x\n','font_size':3},{'text':'B\n','font_size':3},{'text':'C','font_size':3}]; assert d.add_flowed_spans(0,s,page_size=(40,20),margins=(5,5,5,5))==[0,1]; assert [o['boundary'][3] for o in d.page_text_objects(0)]==[6,6,4]; assert d.page_text(1)==['C']; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); assert d.add_flowed_spans(0,[{'text':'A','weight':600,'fill':False,'stroke':True,'stroke_color':[20,40,60],'stroke_width':0.2}])==[0]; s=d.page_svg(0); assert 'font-weight=\"600\"' in s and 'fill=\"none\"' in s and 'stroke=\"#14283c\"' in s; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.new(); f=d.add_embedded_font('Kerning Test',Path('crates/ofdrw/tests/fixtures/kerning-simhei.ttf').read_bytes()); s={'page_size':(14.5,20),'margins':(5,5,5,5),'font_id':f}; assert d.add_flowed_text(0,'HW',**s)==[0]; assert d.page_text_objects(0)[0]['codes'][0]['delta_x']=='1.25'; assert d.add_flowed_spans(0,[{'text':'HW'}],**s)==[1]; assert d.page_text_objects(1)[0]['boundary'][2]==3.75; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.new(); f=d.add_embedded_font('DejaVu Serif',Path('crates/ofdrw/tests/fixtures/dejavu-serif.ttf').read_bytes()); d.add_blank_page(40,20); d.add_text_object(0,'AfiB',(5,5,30,10),6,f,shape=True); assert d.page_text(0)==['AfiB']; assert 'data-ofd-glyph=' in d.page_svg(0); assert b'CodeCount=\"2\"' in d.entry(d.pages()[0]['path']); d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.new(); f=d.add_embedded_font('DejaVu Serif',Path('crates/ofdrw/tests/fixtures/dejavu-serif.ttf').read_bytes()); p=d.add_flowed_spans(0,[{'text':'fi','fill_color':[255,0,0],'underline':True},{'text':'fi','italic':True}],page_size=(14.5,16),margins=(5,5,5,5),font_size=5,line_height=6,font_id=f,shape=True); assert p==[0,1]; assert all(d.page_text_objects(i)[0]['cg_transforms'][0]['glyph_count']==1 for i in p); assert len(d.page_paths(0))==1; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.new(); f=d.add_embedded_font('DejaVu Sans',Path('crates/ofdrw/tests/fixtures/dejavu-sans.ttf').read_bytes()); d.add_blank_page(40,20); d.add_text_object(0,'سلام',(5,5,30,10),6,f,shape=True); assert d.page_text(0)==['سلام']; assert 'data-ofd-glyph=' in d.page_svg(0); assert b'CodeCount=\"4\"' in d.entry(d.pages()[0]['path']); d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.new(); f=d.add_embedded_font('DejaVu Sans',Path('crates/ofdrw/tests/fixtures/dejavu-sans.ttf').read_bytes()); d.add_blank_page(40,20); d.add_text_object(0,'AسلامB',(5,5,30,10),6,f,shape=True); assert d.page_text(0)==['AسلامB']; assert d.page_text_objects(0)[0]['cg_transforms'][0]['glyph_count']==5; assert d.page_svg(0).count('data-ofd-glyph=')==5; assert b'CodeCount=\"6\" GlyphCount=\"5\"' in d.entry(d.pages()[0]['path']); d.close()"
+          python -c "from ofdrw_rs import Document; s=Document.open('../ofdrw-reader/src/test/resources/发票示例.ofd'); png=s.page_image_data(0,0); s.close(); d=Document.new(); d.add_text_page('base',40,40); i=d.add_composite_image_object(0,png,'png',(2,3,20,20)); assert d.page_composite_objects(0)[0]['id']==str(i); assert len(d.page_composite_images(0))==1; assert d.page_composite_image_data(0,0)==png; assert 'data:image/png;base64,' in d.page_svg(0); assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.append_path_page(0,'M 0 0 L 10 10',(0,0,10,10),40,40); assert d.page_paths(0)[0]['abbreviated_data']=='M 0 0 L 10 10'; d.close()"
+          python -c "from ofdrw_rs import Document; source=Document.open('../ofdrw-reader/src/test/resources/发票示例.ofd'); png=source.page_image_data(0,0); source.close(); d=Document.new(); d.append_image_page(0,png,'png',50,40); assert d.page_image_data(0,0)==png; d.close()"
+          python -c "from ofdrw_rs import Document; from pathlib import Path; f=Path('../ofdrw-reader/src/test/resources'); source=Document.open(f/'keyword.ofd'); data=source.font_data(0); source.close(); d=Document.open(f/'helloworld.ofd'); i=d.add_embedded_font_to_document(0,'wheel font',data); assert d.fonts()[-1]['id']==str(i); assert d.font_data(1)==data; assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; from pathlib import Path; f=Path('../ofdrw-reader/src/test/resources'); source=Document.open(f/'keyword.ofd'); data=source.font_data(0); source.close(); d=Document.open(f/'helloworld.ofd'); i=d.add_embedded_font_to_document(0,'wheel font',data); d.append_text_page_with_font(0,'chosen',i,80,60); assert d.page_text_objects(1)[0]['font_id']==str(i); assert d.validate_references()==[]; d.close()"
+          python -c "from ofdrw_rs import Document; d=Document.open('../ofdrw-reader/src/test/resources/AddAttachment.ofd'); d.add_attachment_to_document(0,'wheel note',b'content'); assert d.attachment_data(1)==b'content'; assert d.validate_references()==[]; d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; f=Path('crates/ofdrw/tests/fixtures'); d=Document.new(); d.add_text_page('signed'); k=(f/'user-private-key.bin').read_bytes(); c=(f/'user-cert.der').read_bytes(); assert d.add_digital_signature(k,'2020-04-22 16:22:44')==0; assert d.add_digital_signature(k,'2020-04-23 10:11:12')==1; assert all(d.check_digital_signature_with_certificate(i,c) and all(x['valid'] for x in d.check_signature_references(i)) for i in range(2)); d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; d=Document.new(); f=d.add_embedded_font('DejaVu Serif',Path('crates/ofdrw/tests/fixtures/dejavu-serif.ttf').read_bytes()); assert d.add_flowed_text(0,'fifi',page_size=(14.5,22),margins=(5,5,5,5),font_id=f,shape=True)==[0]; assert d.page_text(0)==['fi','fi']; assert all(x['cg_transforms'][0]['glyph_count']==1 for x in d.page_text_objects(0)); d.close()"
+          python -c "from pathlib import Path; from ofdrw_rs import Document; f=Path('crates/ofdrw/tests/fixtures'); d=Document.new(); d.add_digital_signature((f/'trust-leaf-private-key.bin').read_bytes(),'2030-01-01 00:00:00'); assert d.check_signature_direct_trust_anchor(0,(f/'trust-leaf-cert.der').read_bytes(),(f/'trust-root-cert.der').read_bytes(),1893456000); d.close()"
+      - name: Go integration tests
+        env:
+          OFDRW_LIB_PATH: ${{ github.workspace }}/ofdrw-rs/target/debug/${{ matrix.library }}
+          CGO_ENABLED: '0'
+        working-directory: ofdrw-rs/bindings/go
+        run: go test -count=1 -tags=integration ./...
+      - name: Node.js integration tests
+        working-directory: ofdrw-rs/bindings/node
+        env:
+          OFDRW_LIB_PATH: ${{ github.workspace }}/ofdrw-rs/target/debug/${{ matrix.library }}
+        run: |
+          npm ci
+          npm test
+      - name: Build distributable native library
+        run: |
+          cargo build --release -p ofdrw-ffi --locked
+          node bindings/node/scripts/native-package.js stage ${{ matrix.node_platform }} target/release/${{ matrix.library }}
+          python scripts/package_native.py ${{ matrix.node_platform }} target/release/${{ matrix.library }} dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ofdrw-release-${{ matrix.node_platform }}
+          path: |
+            ofdrw-rs/dist/*.whl
+            ofdrw-rs/dist/ofdrw-native-*.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ofdrw-native-${{ matrix.node_platform }}
+          path: ofdrw-rs/bindings/node/native/
+          if-no-files-found: error
+
+  node-package:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: ofdrw-rs
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ofdrw-native-*
+          merge-multiple: true
+          path: ofdrw-rs/bindings/node/native
+      - name: Pack and install Node.js distribution
+        working-directory: ofdrw-rs/bindings/node
+        run: |
+          npm ci
+          package_file=$(npm pack --pack-destination "$RUNNER_TEMP" --silent)
+          mkdir "$RUNNER_TEMP/ofdrw-node-smoke"
+          cd "$RUNNER_TEMP/ofdrw-node-smoke"
+          npm install "$RUNNER_TEMP/$package_file"
+          env -u OFDRW_LIB_PATH node -e "const {Document}=require('ofdrw-rs'); const d=Document.create(); d.addTextPage('packed'); if(d.pageText(0)[0]!=='packed') process.exitCode=1; d.close()"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ofdrw-node-package
+          path: ${{ runner.temp }}/ofdrw-rs-*.tgz
+          if-no-files-found: error
+
+  coverage:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ofdrw-rs
+    steps:
+      - name: Check out pinned Java OFDRW reference
+        uses: actions/checkout@v7
+        with:
+          repository: ofdrw/ofdrw
+          ref: 84e9eb260ba6fd351ecccf08a01a40305d4af635
+      - name: Check out Rust implementation
+        uses: actions/checkout@v7
+        with:
+          path: ofdrw-rs
+      - name: Install Java interoperability tests
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: cp ofdrw-rs/tests/java/*.java ofdrw-crypto/src/test/java/org/ofdrw/crypto/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+      - name: Rust coverage per crate
+        run: bash scripts/check-rust-coverage.sh
+      - name: Go coverage
+        working-directory: ofdrw-rs/bindings/go
+        env:
+          OFDRW_LIB_PATH: ${{ github.workspace }}/ofdrw-rs/target/debug/libofdrw_ffi.so
+          CGO_ENABLED: '0'
+        run: |
+          cd ../..
+          cargo build -p ofdrw-ffi --locked
+          cd bindings/go
+          go test -count=1 -tags=integration -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | awk '/^total:/{gsub("%", "", $3); if ($3 < 87) exit 1}'
+
+  java-interop:
+    runs-on: ubuntu-24.04
+    env:
+      OFDRW_RUST_INTEROP_DIR: ${{ github.workspace }}/.ci-interop
+    steps:
+      - name: Check out pinned Java OFDRW reference
+        uses: actions/checkout@v7
+        with:
+          repository: ofdrw/ofdrw
+          ref: 84e9eb260ba6fd351ecccf08a01a40305d4af635
+      - name: Check out Rust implementation
+        uses: actions/checkout@v7
+        with:
+          path: ofdrw-rs
+      - name: Install Java interoperability tests
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: cp ofdrw-rs/tests/java/*.java ofdrw-crypto/src/test/java/org/ofdrw/crypto/
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Java reads and verifies Rust-generated OFD
+        run: bash ofdrw-rs/scripts/java-interop.sh
+      - name: Generate fresh Rust crypto packages for Java tests
+        run: |
+          mkdir -p "$OFDRW_RUST_INTEROP_DIR"
+          openssl x509 -in ofdrw-crypto/src/test/resources/sign_cert.pem -outform DER -out "$OFDRW_RUST_INTEROP_DIR/sign-cert.der"
+          cargo run --quiet --manifest-path ofdrw-rs/Cargo.toml -p ofdrw --example encrypt_password -- ofdrw-crypto/src/test/resources/hello.ofd "$OFDRW_RUST_INTEROP_DIR/rust-password-encrypted.ofd"
+          cargo run --quiet --manifest-path ofdrw-rs/Cargo.toml -p ofdrw --example encrypt_certificate -- ofdrw-crypto/src/test/resources/hello.ofd "$OFDRW_RUST_INTEROP_DIR/sign-cert.der" "$OFDRW_RUST_INTEROP_DIR/rust-cert-encrypted.ofd"
+          cargo run --quiet --manifest-path ofdrw-rs/Cargo.toml -p ofdrw --example encrypt_mixed -- ofdrw-crypto/src/test/resources/hello.ofd "$OFDRW_RUST_INTEROP_DIR/sign-cert.der" "$OFDRW_RUST_INTEROP_DIR/rust-mixed-encrypted.ofd"
+          cargo run --quiet --manifest-path ofdrw-rs/Cargo.toml -p ofdrw --example protect_integrity -- "$OFDRW_RUST_INTEROP_DIR/rust-integrity.ofd"
+      - name: Java decrypts Rust password-encrypted OFD
+        run: mvn -q -pl ofdrw-crypto -am -DskipTests=false -Dtest=RustPasswordInteropTest -Dsurefire.failIfNoSpecifiedTests=false test
+      - name: Java decrypts Rust certificate-encrypted OFD
+        run: mvn -q -pl ofdrw-crypto -am -DskipTests=false -Dtest=RustCertificateInteropTest -Dsurefire.failIfNoSpecifiedTests=false test
+      - name: Java reads Rust mixed-recipient OFD
+        run: mvn -q -pl ofdrw-crypto -am -DskipTests=false -Dtest=RustMixedInteropTest -Dsurefire.failIfNoSpecifiedTests=false test
+      - name: Java verifies Rust integrity protection
+        run: mvn -q -pl ofdrw-crypto -am -DskipTests=false -Dtest=RustIntegrityInteropTest -Dsurefire.failIfNoSpecifiedTests=false test
+
+  go-quality:
+    needs: test
+    runs-on: ubuntu-24.04
+    env:
+      OFDRW_LIB_PATH: ${{ github.workspace }}/.ci-native/linux-x64/libofdrw_ffi.so
+      CGO_ENABLED: '1'
+    defaults:
+      run:
+        working-directory: ofdrw-rs/bindings/go
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ofdrw/ofdrw
+          ref: 84e9eb260ba6fd351ecccf08a01a40305d4af635
+      - uses: actions/checkout@v7
+        with:
+          path: ofdrw-rs
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/download-artifact@v8
+        with:
+          name: ofdrw-native-linux-x64
+          path: ${{ github.workspace }}/.ci-native
+      - name: Race and shuffled integration tests
+        run: go test -race -shuffle=on -count=1 -tags=integration ./...
+      - name: Go vet
+        run: go vet ./...
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: ofdrw-rs/bindings/go
+      - name: Dependency vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

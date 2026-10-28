@@ -1,0 +1,11 @@
+ofdrw-rs
+Copyright 2026 ofdrw-rs contributors
+
+Rust implementation inspired by the OFDRW project:
+https://github.com/ofdrw/ofdrw
+The upstream Java project is licensed under Apache-2.0.
+
+Java interoperability tests and test fixtures are derived from or reference
+that project. Test certificates and private keys are public test material,
+not production credentials. Fixture origins and additional font/profile
+license notices are recorded in crates/ofdrw/tests/fixtures/README.md.

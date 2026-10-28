@@ -1,0 +1,52 @@
+[package]
+name = "ofdrw"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "OFD document package and reader written in Rust"
+
+[dependencies]
+roxmltree.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
+sm3 = "0.5.0"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+svg2pdf = { version = "0.13.0", default-features = false, features = ["image", "text"] }
+pdf-writer = "0.12.1"
+lopdf = { version = "0.38.0", default-features = false }
+flate2 = "1.1"
+weezl = "0.1.12"
+justbig2 = "0.2.0"
+png = "0.18.1"
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff"] }
+tiff = "0.11.3"
+ttf-parser = "0.25.1"
+rustybuzz = "0.20.1"
+unicode-bidi = "0.3.18"
+unicode-script = "0.5.8"
+unicode-segmentation = "1.13.3"
+unicode-linebreak = "0.1.5"
+moxcms = "=0.8.1"
+zune-core = "0.5.3"
+zune-jpeg = "0.5.15"
+der = "0.8.2"
+sm2 = { version = "0.14.0", default-features = false, features = ["dsa", "pke", "pkcs8", "getrandom", "std"] }
+x509-cert = "0.3.0"
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["image"] }
+sm4 = "0.6.0"
+cbc = { version = "0.2.1", features = ["alloc"] }
+getrandom = "0.3.4"
+hayro-ccitt = "0.4.0"
+hayro-jbig2 = { version = "0.3.0", default-features = false }
+
+[dev-dependencies]
+fax = "0.2.7"
+
+

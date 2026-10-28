@@ -1,0 +1,44 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R 7 0 R] /D << /BaseState /OFF /ON [6 0 R] >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /Font << /F1 5 0 R >> /Properties << /Hidden 7 0 R /Membership 8 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 82 >>
+stream
+BT /F1 12 Tf 10 20 Td /OC /Hidden BDC (A) Tj EMC /OC /Membership BDC (B) Tj EMC ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 66 /Widths [600 600] >>
+endobj
+6 0 obj
+<< /Type /OCG /Name (Visible) >>
+endobj
+7 0 obj
+<< /Type /OCG /Name (Hidden) >>
+endobj
+8 0 obj
+<< /Type /OCMD /OCGs [6 0 R 7 0 R] /P /AnyOn >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000135 00000 n 
+0000000192 00000 n 
+0000000366 00000 n 
+0000000498 00000 n 
+0000000640 00000 n 
+0000000688 00000 n 
+0000000735 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+798
+%%EOF

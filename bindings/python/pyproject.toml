@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ofdrw-rs"
+version = "0.1.0"
+description = "Python CFFI bindings for the Rust OFD library"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["cffi>=1.16"]
+
+[project.urls]
+Repository = "https://github.com/lihongjie0209/ofdrw-rs"
+Releases = "https://github.com/lihongjie0209/ofdrw-rs/releases"
+
+[tool.setuptools]
+packages = ["ofdrw_rs"]
+

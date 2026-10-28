@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    outputs:
+      run_id: ${{ steps.ci.outputs.run_id }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Check package versions
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python scripts/check_release_version.py "$RELEASE_TAG"
+      - id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Require successful CI for the exact source commit
+        id: ci
+        uses: actions/github-script@v9
+        env:
+          COMMIT_SHA: ${{ steps.source.outputs.sha }}
+        with:
+          script: |
+            for (let attempt = 0; attempt < 180; attempt++) {
+              const {data} = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner, repo: context.repo.repo,
+                workflow_id: 'ci.yml', head_sha: process.env.COMMIT_SHA, per_page: 20
+              });
+              const run = data.workflow_runs.find(run => run.event === 'push' && run.head_branch === 'main');
+              if (run?.status === 'completed') {
+                if (run.conclusion !== 'success') throw new Error(`CI ${run.html_url}: ${run.conclusion}`);
+                core.setOutput('run_id', String(run.id));
+                core.notice(`Using verified artifacts from ${run.html_url}`);
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 20000));
+            }
+            throw new Error('No successful CI run for the tagged commit within 60 minutes');
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ needs.verify.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: ofdrw-release-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ needs.verify.outputs.run_id }}
+          github-token: ${{ github.token }}
+          name: ofdrw-node-package
+          path: dist
+      - name: Package Rust and Go source and validate all distributions
+        run: |
+          cargo package -p ofdrw --locked --no-verify
+          cp target/package/ofdrw-*.crate dist/
+          python scripts/assemble_release.py "$RELEASE_TAG" dist
+      - name: Create matching Go module tag
+        uses: actions/github-script@v9
+        env:
+          COMMIT_SHA: ${{ needs.verify.outputs.sha }}
+        with:
+          script: |
+            const tag = `tags/bindings/go/${process.env.RELEASE_TAG}`;
+            try {
+              const {data} = await github.rest.git.getRef({...context.repo, ref: tag});
+              if (data.object.sha !== process.env.COMMIT_SHA) throw new Error('Go module tag points to another commit');
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({...context.repo, ref: `refs/${tag}`, sha: process.env.COMMIT_SHA});
+            }
+      - name: Upload assets and publish GitHub Release
+        shell: bash
+        run: |
+          flags=()
+          if [[ "$RELEASE_TAG" == v0.* || "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease); fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --draft --verify-tag \
+              --title "$RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md "${flags[@]}"
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false

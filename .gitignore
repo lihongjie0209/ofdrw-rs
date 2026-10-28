@@ -1,0 +1,15 @@
+/target/
+/bindings/python/build/
+/bindings/python/*.egg-info/
+/bindings/node/native/
+__pycache__/
+.pytest_cache/
+.coverage
+coverage.out
+.venv/
+node_modules/
+dist/
+*.profraw
+*.profdata
+.DS_Store
+

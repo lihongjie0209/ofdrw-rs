@@ -1,0 +1,38 @@
+{
+  "name": "ofdrw-rs",
+  "version": "0.1.0",
+  "description": "Node.js bindings for the Rust OFD core",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "native/**"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prepack": "node scripts/native-package.js verify",
+    "typecheck": "tsc --project tsconfig.json",
+    "test": "npm run typecheck && node --test --experimental-test-coverage --test-coverage-lines=90 test/document.test.js test/native-package.test.js"
+  },
+  "dependencies": {
+    "koffi": "^3.3.4"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lihongjie0209/ofdrw-rs.git",
+    "directory": "bindings/node"
+  },
+  "homepage": "https://github.com/lihongjie0209/ofdrw-rs",
+  "bugs": {
+    "url": "https://github.com/lihongjie0209/ofdrw-rs/issues"
+  }
+}

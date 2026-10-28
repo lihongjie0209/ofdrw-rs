@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/ofdrw", "crates/ofdrw-ffi"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/lihongjie0209/ofdrw-rs"
+homepage = "https://github.com/lihongjie0209/ofdrw-rs"
+
+[profile.release]
+strip = "debuginfo"
+
+[workspace.dependencies]
+roxmltree = "0.20"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+

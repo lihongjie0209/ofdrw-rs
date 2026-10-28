@@ -1,0 +1,23553 @@
+//! Strict import of PDF page geometry and basic vector painting.
+
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    ops::Range,
+    sync::Arc,
+};
+
+use lopdf::{content::Operation, Document as PdfDocument, Encoding, Object, ObjectId};
+use moxcms::{
+    ColorProfile, DataColorSpace, Layout, RenderingIntent, Transform8BitExecutor, TransformOptions,
+};
+use zune_core::{
+    bytestream::ZCursor, colorspace::ColorSpace as JpegColorSpace, options::DecoderOptions,
+};
+use zune_jpeg::JpegDecoder;
+
+use crate::{
+    bilevel::BilevelSamples, decode_jpeg2000, direct_page_objects, escape_xml, is_element,
+    is_jpeg2000, is_ofd_element, parse_box, parse_ctm, parse_xml, pdf_line_ending_name,
+    qualified_tag, AnnotationGraphic, AnnotationPath, AttachmentMetadata, DestinationInfo,
+    GradientFillStyle, GradientKind, GradientMapType, GradientSegment, OfdDocument, OfdError,
+    PageArea, PathLineCap, PathLineJoin, PathStyle, ShapeAnnotationStyle, MAX_ENTRY_BYTES,
+    MAX_TOTAL_BYTES,
+};
+
+const MM_PER_PT: f64 = 25.4 / 72.0;
+
+#[derive(Clone)]
+struct GraphicsState {
+    ctm: [f64; 6],
+    fill_space: PdfColorSpace,
+    stroke_space: PdfColorSpace,
+    fill_color: [u8; 3],
+    stroke_color: [u8; 3],
+    fill_components: Vec<f64>,
+    stroke_components: Vec<f64>,
+    rendering_intent: RenderingIntent,
+    fill_alpha: f64,
+    stroke_alpha: f64,
+    blend_mode: &'static str,
+    line_width: f64,
+    line_cap: PathLineCap,
+    line_join: PathLineJoin,
+    miter_limit: f64,
+    dash_pattern: Option<Vec<f64>>,
+    dash_phase: f64,
+    clips: Vec<PdfClip>,
+}
+
+#[derive(Clone)]
+enum PdfColorSpace {
+    Gray,
+    CalGray {
+        gamma: f64,
+    },
+    CalRgb {
+        gamma: [f64; 3],
+        to_srgb: [[f64; 3]; 3],
+    },
+    Lab {
+        range: [f64; 4],
+        to_srgb: [[f64; 3]; 3],
+    },
+    Rgb,
+    Cmyk,
+    Indexed {
+        palettes: [Vec<[u8; 3]>; 4],
+    },
+    Icc {
+        channels: usize,
+        transforms: [Option<Arc<Transform8BitExecutor>>; 4],
+    },
+}
+
+impl PdfColorSpace {
+    fn component_bounds(&self, index: usize) -> [f64; 2] {
+        match self {
+            Self::Lab { range, .. } => match index {
+                0 => [0.0, 100.0],
+                1 => [range[0], range[1]],
+                2 => [range[2], range[3]],
+                _ => [0.0, 1.0],
+            },
+            _ => [0.0, 1.0],
+        }
+    }
+
+    fn channels(&self) -> usize {
+        match self {
+            Self::Gray | Self::CalGray { .. } | Self::Indexed { .. } => 1,
+            Self::Rgb | Self::CalRgb { .. } | Self::Lab { .. } => 3,
+            Self::Cmyk => 4,
+            Self::Icc { channels, .. } => *channels,
+        }
+    }
+
+    fn color(&self, values: &[f64]) -> Result<[u8; 3], OfdError> {
+        self.color_with_intent(values, RenderingIntent::RelativeColorimetric)
+    }
+
+    fn color_with_intent(
+        &self,
+        values: &[f64],
+        intent: RenderingIntent,
+    ) -> Result<[u8; 3], OfdError> {
+        match self {
+            Self::Gray | Self::Rgb => color(values),
+            Self::CalGray { gamma } => {
+                let [gray] = values else {
+                    return Err(OfdError::Invalid("PDF CalGray requires one value".into()));
+                };
+                if !gray.is_finite() || !(0.0..=1.0).contains(gray) {
+                    return Err(OfdError::Invalid("PDF CalGray value is invalid".into()));
+                }
+                let linear = gray.powf(*gamma);
+                let sample = srgb_sample(linear);
+                Ok([sample; 3])
+            }
+            Self::CalRgb { gamma, to_srgb } => {
+                let [red, green, blue] = values else {
+                    return Err(OfdError::Invalid("PDF CalRGB requires three values".into()));
+                };
+                if values
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                {
+                    return Err(OfdError::Invalid("PDF CalRGB value is invalid".into()));
+                }
+                let linear = [
+                    red.powf(gamma[0]),
+                    green.powf(gamma[1]),
+                    blue.powf(gamma[2]),
+                ];
+                Ok(to_srgb.map(|row| {
+                    srgb_sample(row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2])
+                }))
+            }
+            Self::Lab { range, to_srgb } => {
+                let [lightness, a, b] = values else {
+                    return Err(OfdError::Invalid("PDF Lab requires three values".into()));
+                };
+                if values.iter().any(|value| !value.is_finite()) {
+                    return Err(OfdError::Invalid("PDF Lab value is invalid".into()));
+                }
+                let lightness = lightness.clamp(0.0, 100.0);
+                let a = a.clamp(range[0], range[1]);
+                let b = b.clamp(range[2], range[3]);
+                let y = (lightness + 16.0) / 116.0;
+                let xyz = [y + a / 500.0, y, y - b / 200.0].map(lab_inverse);
+                Ok(to_srgb
+                    .map(|row| srgb_sample(row[0] * xyz[0] + row[1] * xyz[1] + row[2] * xyz[2])))
+            }
+            Self::Cmyk => cmyk_color(values),
+            Self::Icc {
+                channels,
+                transforms,
+            } => {
+                if values.len() != *channels
+                    || values
+                        .iter()
+                        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                {
+                    return Err(OfdError::Invalid("PDF ICC color is invalid".into()));
+                }
+                let input = values
+                    .iter()
+                    .map(|value| (value * 255.0).round() as u8)
+                    .collect::<Vec<_>>();
+                let mut rgb = [0_u8; 3];
+                let transform = transforms[intent as usize]
+                    .as_ref()
+                    .or(transforms[RenderingIntent::RelativeColorimetric as usize].as_ref())
+                    .or(transforms[RenderingIntent::Perceptual as usize].as_ref())
+                    .or_else(|| transforms.iter().flatten().next())
+                    .ok_or_else(|| {
+                        OfdError::Invalid("PDF ICC profile has no usable transform".into())
+                    })?;
+                transform.transform(&input, &mut rgb).map_err(|error| {
+                    OfdError::Invalid(format!("cannot convert PDF ICC color: {error}"))
+                })?;
+                Ok(rgb)
+            }
+            Self::Indexed { palettes } => {
+                let [index] = values else {
+                    return Err(OfdError::Invalid(
+                        "PDF Indexed color requires one index".into(),
+                    ));
+                };
+                if !index.is_finite() {
+                    return Err(OfdError::Invalid(
+                        "PDF Indexed color index is invalid".into(),
+                    ));
+                }
+                let palette = &palettes[intent as usize];
+                let index = index.round().clamp(0.0, (palette.len() - 1) as f64) as usize;
+                Ok(palette[index])
+            }
+        }
+    }
+
+    fn initial_components(&self) -> Vec<f64> {
+        match self {
+            Self::Cmyk | Self::Icc { channels: 4, .. } => vec![0.0, 0.0, 0.0, 1.0],
+            _ => vec![0.0; self.channels()],
+        }
+    }
+
+    fn default_decode(&self, maximum: u32) -> Vec<f64> {
+        match self {
+            Self::Indexed { .. } => vec![0.0, f64::from(maximum)],
+            Self::Lab { range, .. } => vec![0.0, 100.0, range[0], range[1], range[2], range[3]],
+            _ => (0..self.channels()).flat_map(|_| [0.0, 1.0]).collect(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PdfClip {
+    Path { commands: String, even_odd: bool },
+    Text { areas: Vec<String> },
+}
+
+impl Default for GraphicsState {
+    fn default() -> Self {
+        Self {
+            ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            fill_space: PdfColorSpace::Gray,
+            stroke_space: PdfColorSpace::Gray,
+            fill_color: [0; 3],
+            stroke_color: [0; 3],
+            fill_components: vec![0.0],
+            stroke_components: vec![0.0],
+            rendering_intent: RenderingIntent::RelativeColorimetric,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
+            blend_mode: "Normal",
+            line_width: 1.0,
+            line_cap: PathLineCap::Butt,
+            line_join: PathLineJoin::Miter,
+            miter_limit: 10.0,
+            dash_pattern: None,
+            dash_phase: 0.0,
+            clips: Vec::new(),
+        }
+    }
+}
+
+impl GraphicsState {
+    fn set_rendering_intent(&mut self, intent: RenderingIntent) -> Result<(), OfdError> {
+        let fill = self
+            .fill_space
+            .color_with_intent(&self.fill_components, intent)?;
+        let stroke = self
+            .stroke_space
+            .color_with_intent(&self.stroke_components, intent)?;
+        self.rendering_intent = intent;
+        self.fill_color = fill;
+        self.stroke_color = stroke;
+        Ok(())
+    }
+
+    fn point(&self, x: f64, y: f64, box_: [f64; 4]) -> (f64, f64) {
+        let [a, b, c, d, e, f] = self.ctm;
+        let x_pdf = a * x + c * y + e;
+        let y_pdf = b * x + d * y + f;
+        ((x_pdf - box_[0]) * MM_PER_PT, (box_[3] - y_pdf) * MM_PER_PT)
+    }
+
+    fn concat(&mut self, [a, b, c, d, e, f]: [f64; 6]) {
+        let [aa, bb, cc, dd, ee, ff] = self.ctm;
+        self.ctm = [
+            aa * a + cc * b,
+            bb * a + dd * b,
+            aa * c + cc * d,
+            bb * c + dd * d,
+            aa * e + cc * f + ee,
+            bb * e + dd * f + ff,
+        ];
+    }
+
+    fn stroke_scale(&self) -> Result<f64, OfdError> {
+        let [a, b, c, d, _, _] = self.ctm;
+        let x = a.hypot(b);
+        let y = c.hypot(d);
+        if x <= 0.0
+            || y <= 0.0
+            || (x - y).abs() > 1e-6 * x.max(y)
+            || (a * c + b * d).abs() > 1e-6 * x * y
+        {
+            return Err(OfdError::Invalid(
+                "PDF stroke uses a nonuniform or skewed transform".into(),
+            ));
+        }
+        Ok(x)
+    }
+}
+
+#[derive(Default)]
+struct PathBuilder {
+    commands: String,
+    current: Option<(f64, f64)>,
+    start: Option<(f64, f64)>,
+}
+
+#[derive(Clone)]
+struct TextState {
+    active: bool,
+    font: Option<PdfFontSelection>,
+    size_pt: f64,
+    matrix: [f64; 6],
+    line_matrix: [f64; 6],
+    leading: f64,
+    char_spacing: f64,
+    word_spacing: f64,
+    h_scale: f64,
+    render_mode: u8,
+    rise: f64,
+    positioned: bool,
+    clip_areas: Vec<String>,
+    clip_requested: bool,
+}
+
+#[derive(Clone)]
+enum PdfFontSelection {
+    Named(Vec<u8>),
+    Indirect(ObjectId),
+}
+
+impl Default for TextState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            font: None,
+            size_pt: 0.0,
+            matrix: [0.0; 6],
+            line_matrix: [0.0; 6],
+            leading: 0.0,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            h_scale: 1.0,
+            render_mode: 0,
+            rise: 0.0,
+            positioned: false,
+            clip_areas: Vec::new(),
+            clip_requested: false,
+        }
+    }
+}
+
+struct PdfPageContext<'a> {
+    pdf: &'a PdfDocument,
+    box_: [f64; 4],
+    index: usize,
+    resources: &'a Object,
+}
+
+#[derive(Clone, Copy)]
+struct PdfPageImport {
+    id: ObjectId,
+    box_: [f64; 4],
+    user_unit: f64,
+    rotation: u16,
+    width_mm: f64,
+    height_mm: f64,
+}
+
+impl TextState {
+    fn begin(&mut self) -> Result<(), OfdError> {
+        if self.active {
+            return Err(OfdError::Invalid(
+                "nested PDF text objects are invalid".into(),
+            ));
+        }
+        self.active = true;
+        self.matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        self.line_matrix = self.matrix;
+        self.positioned = false;
+        self.clip_areas.clear();
+        self.clip_requested = false;
+        Ok(())
+    }
+
+    fn require_active(&self) -> Result<(), OfdError> {
+        if self.active {
+            Ok(())
+        } else {
+            Err(OfdError::Invalid(
+                "PDF text operator is outside BT/ET".into(),
+            ))
+        }
+    }
+
+    fn next_line(&mut self) -> Result<(), OfdError> {
+        self.require_active()?;
+        self.line_matrix[4] -= self.line_matrix[2] * self.leading;
+        self.line_matrix[5] -= self.line_matrix[3] * self.leading;
+        self.matrix = self.line_matrix;
+        self.positioned = true;
+        Ok(())
+    }
+}
+
+impl PathBuilder {
+    fn move_to(&mut self, point: (f64, f64)) {
+        self.commands
+            .push_str(&format!(" M {} {}", point.0, point.1));
+        self.current = Some(point);
+        self.start = Some(point);
+    }
+
+    fn line_to(&mut self, point: (f64, f64)) -> Result<(), OfdError> {
+        if self.current.is_none() {
+            return Err(OfdError::Invalid("PDF line has no current point".into()));
+        }
+        self.commands
+            .push_str(&format!(" L {} {}", point.0, point.1));
+        self.current = Some(point);
+        Ok(())
+    }
+
+    fn curve_to(&mut self, a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> Result<(), OfdError> {
+        if self.current.is_none() {
+            return Err(OfdError::Invalid("PDF curve has no current point".into()));
+        }
+        self.commands.push_str(&format!(
+            " B {} {} {} {} {} {}",
+            a.0, a.1, b.0, b.1, c.0, c.1
+        ));
+        self.current = Some(c);
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        if let Some(start) = self.start {
+            self.commands.push_str(" C");
+            self.current = Some(start);
+        }
+    }
+}
+
+fn numbers(operation: &Operation, count: usize) -> Result<Vec<f64>, OfdError> {
+    if operation.operands.len() != count {
+        return Err(OfdError::Invalid(format!(
+            "PDF {} expects {count} operands",
+            operation.operator
+        )));
+    }
+    operation
+        .operands
+        .iter()
+        .map(|operand| {
+            let value = operand
+                .as_float()
+                .map_err(|_| OfdError::Invalid("PDF operand is not numeric".into()))?
+                as f64;
+            if !value.is_finite() || value.abs() > 1e9 {
+                return Err(OfdError::Limit("PDF coordinate is too large".into()));
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+fn color(values: &[f64]) -> Result<[u8; 3], OfdError> {
+    let rgb = match values {
+        [gray] => [*gray; 3],
+        [red, green, blue] => [*red, *green, *blue],
+        _ => return Err(OfdError::Invalid("unsupported PDF color space".into())),
+    };
+    if rgb.iter().any(|value| !(0.0..=1.0).contains(value)) {
+        return Err(OfdError::Invalid(
+            "PDF color channel is out of range".into(),
+        ));
+    }
+    Ok(rgb.map(|value| (value * 255.0).round() as u8))
+}
+
+fn cmyk_color(values: &[f64]) -> Result<[u8; 3], OfdError> {
+    let [cyan, magenta, yellow, black] = values else {
+        return Err(OfdError::Invalid(
+            "PDF CMYK color requires four channels".into(),
+        ));
+    };
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(OfdError::Invalid(
+            "PDF CMYK color channel is out of range".into(),
+        ));
+    }
+    Ok([cyan, magenta, yellow]
+        .map(|component| ((1.0 - (component + black).min(1.0)) * 255.0).round() as u8))
+}
+
+fn inherited_object<'a>(
+    pdf: &'a PdfDocument,
+    mut id: ObjectId,
+    key: &[u8],
+) -> Result<Option<&'a Object>, OfdError> {
+    for _ in 0..32 {
+        let page = pdf
+            .get_dictionary(id)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF page tree: {error}")))?;
+        if let Ok(value) = page.get(key) {
+            return pdf
+                .dereference(value)
+                .map(|(_, value)| Some(value))
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF page value: {error}")));
+        }
+        let Ok(parent) = page.get(b"Parent") else {
+            return Ok(None);
+        };
+        id = parent
+            .as_reference()
+            .map_err(|_| OfdError::Invalid("invalid PDF page parent".into()))?;
+    }
+    Err(OfdError::Limit("PDF page tree is too deep".into()))
+}
+
+fn page_box(pdf: &PdfDocument, id: ObjectId) -> Result<[f64; 4], OfdError> {
+    let value = inherited_object(pdf, id, b"CropBox")?
+        .or(inherited_object(pdf, id, b"MediaBox")?)
+        .ok_or_else(|| OfdError::Invalid("PDF page has no MediaBox".into()))?;
+    let items = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF page box is not an array".into()))?;
+    let values = numbers(&Operation::new("page box", items.clone()), 4)?;
+    let box_: [f64; 4] = values
+        .try_into()
+        .map_err(|_| OfdError::Invalid("invalid PDF page box".into()))?;
+    if box_[2] <= box_[0] || box_[3] <= box_[1] {
+        return Err(OfdError::Invalid("PDF page has an invalid box".into()));
+    }
+    Ok(box_)
+}
+
+fn page_user_unit(pdf: &PdfDocument, id: ObjectId) -> Result<f64, OfdError> {
+    let Some(value) = inherited_object(pdf, id, b"UserUnit")? else {
+        return Ok(1.0);
+    };
+    let unit = match value {
+        Object::Integer(value) => *value as f64,
+        Object::Real(value) => f64::from(*value),
+        _ => return Err(OfdError::Invalid("invalid PDF UserUnit".into())),
+    };
+    if !unit.is_finite() || unit <= 0.0 || unit > 75_000.0 {
+        return Err(OfdError::Invalid("invalid PDF UserUnit".into()));
+    }
+    Ok(unit)
+}
+
+fn page_rotation(pdf: &PdfDocument, id: ObjectId) -> Result<u16, OfdError> {
+    let Some(value) = inherited_object(pdf, id, b"Rotate")? else {
+        return Ok(0);
+    };
+    let degrees = value
+        .as_i64()
+        .map_err(|_| OfdError::Invalid("invalid PDF page rotation".into()))?;
+    if degrees % 90 != 0 {
+        return Err(OfdError::Invalid(
+            "PDF page rotation must be a multiple of 90".into(),
+        ));
+    }
+    Ok(degrees.rem_euclid(360) as u16)
+}
+
+fn validate_rgb_transparency_group(
+    pdf: &PdfDocument,
+    value: &Object,
+    owner: &str,
+    allow_opaque_flags: bool,
+) -> Result<bool, OfdError> {
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF {owner} group: {error}")))?;
+    let group = value
+        .as_dict()
+        .map_err(|_| OfdError::Invalid(format!("PDF {owner} group is not a dictionary")))?;
+    let entry = |key: &[u8]| -> Result<Option<Object>, OfdError> {
+        group
+            .get(key)
+            .ok()
+            .map(|value| {
+                pdf.dereference(value)
+                    .map(|(_, value)| value.clone())
+                    .map_err(|error| {
+                        OfdError::Invalid(format!("invalid PDF {owner} group entry: {error}"))
+                    })
+            })
+            .transpose()
+    };
+    let group_type = entry(b"Type")?;
+    let subtype = entry(b"S")?;
+    let color_space = entry(b"CS")?;
+    let isolated = entry(b"I")?;
+    let knockout = entry(b"K")?;
+    let requires_opaque_content = [isolated.as_ref(), knockout.as_ref()]
+        .into_iter()
+        .any(|value| value.is_some_and(|value| value.as_bool().ok() == Some(true)));
+    if group_type
+        .as_ref()
+        .is_some_and(|value| value.as_name().ok() != Some(b"Group"))
+        || subtype.as_ref().and_then(|value| value.as_name().ok()) != Some(b"Transparency")
+        || color_space
+            .as_ref()
+            .is_some_and(|value| value.as_name().ok() != Some(b"DeviceRGB"))
+        || [isolated, knockout].iter().any(|value| {
+            value.as_ref().is_some_and(|value| match value.as_bool() {
+                Ok(flag) => flag && !allow_opaque_flags,
+                Err(_) => true,
+            })
+        })
+    {
+        return Err(OfdError::Invalid(format!(
+            "PDF {owner} transparency group is unsupported"
+        )));
+    }
+    Ok(requires_opaque_content)
+}
+
+fn queue_object_attribute(
+    source: &str,
+    object: roxmltree::Node<'_, '_>,
+    name: &str,
+    value: String,
+    edits: &mut Vec<(Range<usize>, String)>,
+) -> Result<(), OfdError> {
+    if let Some(attribute) = object
+        .attributes()
+        .find(|attribute| attribute.name() == name && attribute.namespace().is_none())
+    {
+        edits.push((attribute.range(), format!("{name}=\"{value}\"")));
+    } else {
+        let tag = qualified_tag(source, object)?;
+        let position = object.range().start + 1 + tag.len();
+        edits.push((position..position, format!(" {name}=\"{value}\"")));
+    }
+    Ok(())
+}
+
+fn rotate_imported_page(
+    output: &mut OfdDocument,
+    page_index: usize,
+    rotation: u16,
+    width: f64,
+    height: f64,
+) -> Result<(), OfdError> {
+    if rotation == 0 {
+        return Ok(());
+    }
+    let page_ctm = match rotation {
+        90 => [0.0, 1.0, -1.0, 0.0, height, 0.0],
+        180 => [-1.0, 0.0, 0.0, -1.0, width, height],
+        270 => [0.0, -1.0, 1.0, 0.0, 0.0, width],
+        _ => return Err(OfdError::Invalid("PDF page rotation is invalid".into())),
+    };
+    let [a, b, c, d, e, f] = page_ctm;
+    let page = output
+        .pages()?
+        .into_iter()
+        .nth(page_index)
+        .ok_or_else(|| OfdError::Invalid("imported PDF page is missing".into()))?;
+    let updated = {
+        let bytes = output
+            .entry(&page.path)?
+            .ok_or_else(|| OfdError::Invalid("imported PDF page entry is missing".into()))?;
+        let source = std::str::from_utf8(bytes).map_err(|error| {
+            OfdError::Invalid(format!("imported PDF page is not UTF-8: {error}"))
+        })?;
+        let parsed = parse_xml(&page.path, bytes)?;
+        let mut edits = Vec::new();
+        for object in direct_page_objects(parsed.root_element()) {
+            object
+                .attribute("ID")
+                .ok_or_else(|| OfdError::Invalid("imported PDF object has no ID".into()))?;
+            let [x, y, object_width, object_height] = object
+                .attribute("Boundary")
+                .and_then(parse_box)
+                .ok_or_else(|| OfdError::Invalid("imported PDF object has no boundary".into()))?;
+            let is_image = is_element(object, "ImageObject");
+            let corners = [
+                (0.0, 0.0),
+                (object_width, 0.0),
+                (0.0, object_height),
+                (object_width, object_height),
+            ];
+            let local = corners.map(|(px, py)| (a * px + c * py, b * px + d * py));
+            let local_min_x = local
+                .iter()
+                .map(|point| point.0)
+                .fold(f64::INFINITY, f64::min);
+            let local_min_y = local
+                .iter()
+                .map(|point| point.1)
+                .fold(f64::INFINITY, f64::min);
+            let origin = [
+                a * x + c * y + e + local_min_x,
+                b * x + d * y + f + local_min_y,
+            ];
+            let object_ctm = object
+                .attribute("CTM")
+                .map(|value| {
+                    parse_ctm(value)
+                        .ok_or_else(|| OfdError::Invalid(format!("invalid object CTM: {value}")))
+                })
+                .transpose()?;
+            let [ia, ib, ic, id_linear, ie, if_] = object_ctm.unwrap_or(if is_image {
+                [object_width, 0.0, 0.0, object_height, 0.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+            });
+            let transformed = [
+                a * ia + c * ib,
+                b * ia + d * ib,
+                a * ic + c * id_linear,
+                b * ic + d * id_linear,
+                a * ie + c * if_ - local_min_x,
+                b * ie + d * if_ - local_min_y,
+            ];
+            let bounds_width = local
+                .iter()
+                .map(|point| point.0)
+                .fold(f64::NEG_INFINITY, f64::max)
+                - local_min_x;
+            let bounds_height = local
+                .iter()
+                .map(|point| point.1)
+                .fold(f64::NEG_INFINITY, f64::max)
+                - local_min_y;
+            let display_boundary = [origin[0], origin[1], bounds_width, bounds_height];
+            if display_boundary.iter().any(|value| !value.is_finite())
+                || bounds_width <= 0.0
+                || bounds_height <= 0.0
+                || transformed.iter().any(|value| !value.is_finite())
+            {
+                return Err(OfdError::Invalid(
+                    "rotated PDF object geometry is invalid".into(),
+                ));
+            }
+            queue_object_attribute(
+                source,
+                object,
+                "Boundary",
+                display_boundary.map(|value| value.to_string()).join(" "),
+                &mut edits,
+            )?;
+            queue_object_attribute(
+                source,
+                object,
+                "CTM",
+                transformed.map(|value| value.to_string()).join(" "),
+                &mut edits,
+            )?;
+            if let Some(clips) = object
+                .children()
+                .find(|node| is_ofd_element(*node, "Clips"))
+            {
+                for area in clips
+                    .descendants()
+                    .filter(|node| is_ofd_element(*node, "Area"))
+                {
+                    let range = area
+                        .attributes()
+                        .find(|attribute| attribute.name() == "CTM")
+                        .map(|attribute| attribute.range())
+                        .ok_or_else(|| OfdError::Invalid("imported PDF clip has no CTM".into()))?;
+                    edits.push((
+                        range,
+                        format!(
+                            "CTM=\"{a} {b} {c} {d} {} {}\"",
+                            e - origin[0],
+                            f - origin[1],
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut updated = source.to_owned();
+        edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        for (range, replacement) in edits {
+            updated.replace_range(range, &replacement);
+        }
+        updated
+    };
+    output.set_entry(&page.path, updated.into_bytes())?;
+    let (display_width, display_height) = if rotation == 90 || rotation == 270 {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    output.set_page_area(
+        page_index,
+        PageArea {
+            physical_box: [0.0, 0.0, display_width, display_height],
+            application_box: None,
+            content_box: None,
+            bleed_box: None,
+        },
+    )
+}
+
+struct PdfPaint {
+    fill: bool,
+    stroke: bool,
+    even_odd: bool,
+}
+
+fn paint(
+    output: &mut OfdDocument,
+    page_index: usize,
+    box_: [f64; 4],
+    path: &mut PathBuilder,
+    state: &GraphicsState,
+    mode: PdfPaint,
+    visible: bool,
+) -> Result<(), OfdError> {
+    if path.commands.is_empty() {
+        return Ok(());
+    }
+    let mut style = PathStyle {
+        fill: mode.fill,
+        stroke: mode.stroke,
+        even_odd: mode.even_odd,
+        fill_color: mode.fill.then_some(state.fill_color),
+        fill_alpha: (mode.fill && state.fill_alpha < 1.0)
+            .then_some((state.fill_alpha * 255.0).round() as u8),
+        stroke_color: mode.stroke.then_some(state.stroke_color),
+        stroke_alpha: (mode.stroke && state.stroke_alpha < 1.0)
+            .then_some((state.stroke_alpha * 255.0).round() as u8),
+        ..PathStyle::default()
+    };
+    if mode.stroke {
+        let scale = state.stroke_scale()? * MM_PER_PT;
+        let width = state.line_width * scale;
+        style.line_width = if width > 0.0 { width } else { 0.1 };
+        style.cap = Some(state.line_cap);
+        style.join = Some(state.line_join);
+        style.miter_limit = Some(state.miter_limit);
+        style.dash_sequence = state
+            .dash_pattern
+            .as_ref()
+            .map(|values| values.iter().map(|value| value * scale).collect());
+        style.dash_offset = state
+            .dash_pattern
+            .as_ref()
+            .map(|_| state.dash_phase * scale);
+    }
+    let commands = std::mem::take(&mut path.commands);
+    path.current = None;
+    path.start = None;
+    if !visible {
+        return Ok(());
+    }
+    let id = output.add_path_object(
+        page_index,
+        commands.trim(),
+        [
+            0.0,
+            0.0,
+            (box_[2] - box_[0]) * MM_PER_PT,
+            (box_[3] - box_[1]) * MM_PER_PT,
+        ],
+        style,
+    )?;
+    attach_blend_mode(output, page_index, &id, state.blend_mode)?;
+    attach_clips(output, page_index, &id, "PathObject", &state.clips)?;
+    Ok(())
+}
+
+fn attach_blend_mode(
+    output: &mut OfdDocument,
+    page_index: usize,
+    object_id: &str,
+    mode: &str,
+) -> Result<(), OfdError> {
+    if mode != "Normal" {
+        output.set_page_object_attribute(page_index, object_id, "BlendMode", Some(mode))?;
+    }
+    Ok(())
+}
+
+fn attach_clips(
+    output: &mut OfdDocument,
+    page_index: usize,
+    object_id: &str,
+    kind: &str,
+    clips: &[PdfClip],
+) -> Result<(), OfdError> {
+    if clips.is_empty() {
+        return Ok(());
+    }
+    let page = output
+        .pages()?
+        .into_iter()
+        .nth(page_index)
+        .ok_or_else(|| OfdError::Invalid("imported PDF page is missing".into()))?;
+    let [_, _, page_width, page_height] = page
+        .physical_box
+        .ok_or_else(|| OfdError::Invalid("imported PDF page has no size".into()))?;
+    let (range, [x, y, _, _]) = {
+        let bytes = output
+            .entry(&page.path)?
+            .ok_or_else(|| OfdError::Invalid("imported PDF page entry is missing".into()))?;
+        let parsed = parse_xml(&page.path, bytes)?;
+        let object = parsed
+            .descendants()
+            .find(|node| is_element(*node, kind) && node.attribute("ID") == Some(object_id))
+            .ok_or_else(|| OfdError::Invalid("imported PDF object is missing".into()))?;
+        let boundary = object
+            .attribute("Boundary")
+            .and_then(parse_box)
+            .ok_or_else(|| OfdError::Invalid("imported PDF object has no boundary".into()))?;
+        (object.range(), boundary)
+    };
+    let mut markup = String::from("<ofd:Clips TransFlag=\"false\">");
+    for clip in clips {
+        markup.push_str("<ofd:Clip>");
+        match clip {
+            PdfClip::Path { commands, even_odd } => {
+                let rule = if *even_odd { " Rule=\"Even-Odd\"" } else { "" };
+                markup.push_str(&format!(
+                    "<ofd:Area CTM=\"1 0 0 1 {} {}\"><ofd:Path Boundary=\"0 0 {page_width} {page_height}\" Fill=\"true\" Stroke=\"false\"{rule}><ofd:AbbreviatedData>{}</ofd:AbbreviatedData></ofd:Path></ofd:Area>",
+                    -x,
+                    -y,
+                    escape_xml(commands.trim()),
+                ));
+            }
+            PdfClip::Text { areas } => {
+                for shape in areas {
+                    markup.push_str(&format!(
+                        "<ofd:Area CTM=\"1 0 0 1 {} {}\">{shape}</ofd:Area>",
+                        -x, -y,
+                    ));
+                }
+            }
+        }
+        markup.push_str("</ofd:Clip>");
+    }
+    markup.push_str("</ofd:Clips>");
+    let mut source = std::str::from_utf8(
+        output
+            .entry(&page.path)?
+            .ok_or_else(|| OfdError::Invalid("imported PDF page entry is missing".into()))?,
+    )
+    .map_err(|error| OfdError::Invalid(format!("imported PDF page is not UTF-8: {error}")))?
+    .to_owned();
+    let object_source = &source[range.clone()];
+    if object_source.ends_with("/>") {
+        source.replace_range(range.end - 2..range.end, &format!(">{markup}</ofd:{kind}>"));
+    } else {
+        let closing = format!("</ofd:{kind}>");
+        if !object_source.ends_with(&closing) {
+            return Err(OfdError::Invalid("imported PDF object is malformed".into()));
+        }
+        source.insert_str(range.end - closing.len(), &markup);
+    }
+    output.set_entry(&page.path, source.into_bytes())
+}
+
+fn imported_text_clip_shape(
+    output: &OfdDocument,
+    page_index: usize,
+    object_id: &str,
+) -> Result<String, OfdError> {
+    let page = output
+        .pages()?
+        .into_iter()
+        .nth(page_index)
+        .ok_or_else(|| OfdError::Invalid("imported PDF page is missing".into()))?;
+    let bytes = output
+        .entry(&page.path)?
+        .ok_or_else(|| OfdError::Invalid("imported PDF page entry is missing".into()))?;
+    let parsed = parse_xml(&page.path, bytes)?;
+    let object = parsed
+        .descendants()
+        .find(|node| is_element(*node, "TextObject") && node.attribute("ID") == Some(object_id))
+        .ok_or_else(|| OfdError::Invalid("imported PDF text object is missing".into()))?;
+    let source = std::str::from_utf8(bytes)
+        .map_err(|error| OfdError::Invalid(format!("imported PDF page is not UTF-8: {error}")))?;
+    let mut shape = String::from("<ofd:Text");
+    for name in ["Boundary", "Font", "Size", "HScale", "CharDirection", "CTM"] {
+        if let Some(value) = object.attribute(name) {
+            shape.push_str(&format!(" {name}=\"{}\"", escape_xml(value)));
+        }
+    }
+    shape.push('>');
+    for code in object
+        .children()
+        .filter(|node| is_element(*node, "TextCode"))
+    {
+        shape.push_str(&source[code.range()]);
+    }
+    shape.push_str("</ofd:Text>");
+    Ok(shape)
+}
+
+fn attach_nonstroking_alpha(
+    output: &mut OfdDocument,
+    page_index: usize,
+    object_id: &str,
+    kind: &str,
+    alpha: f64,
+) -> Result<(), OfdError> {
+    if alpha >= 1.0 {
+        return Ok(());
+    }
+    let page = output
+        .pages()?
+        .into_iter()
+        .nth(page_index)
+        .ok_or_else(|| OfdError::Invalid("imported PDF page is missing".into()))?;
+    let bytes = output
+        .entry(&page.path)?
+        .ok_or_else(|| OfdError::Invalid("imported PDF page entry is missing".into()))?;
+    let parsed = parse_xml(&page.path, bytes)?;
+    let object = parsed
+        .descendants()
+        .find(|node| is_element(*node, kind) && node.attribute("ID") == Some(object_id))
+        .ok_or_else(|| OfdError::Invalid("imported PDF object is missing".into()))?;
+    let range = object.range();
+    let mut source = std::str::from_utf8(bytes)
+        .map_err(|error| OfdError::Invalid(format!("imported PDF page is not UTF-8: {error}")))?
+        .to_owned();
+    let tag_end = source[range.clone()]
+        .find('>')
+        .ok_or_else(|| OfdError::Invalid("imported PDF object is malformed".into()))?
+        + range.start;
+    let insertion = if source.as_bytes()[tag_end - 1] == b'/' {
+        tag_end - 1
+    } else {
+        tag_end
+    };
+    let value = (alpha * 255.0).round() as u8;
+    source.insert_str(insertion, &format!(" Alpha=\"{value}\""));
+    output.set_entry(&page.path, source.into_bytes())
+}
+
+fn attach_text_paint(
+    output: &mut OfdDocument,
+    page_index: usize,
+    object_id: &str,
+    graphics: &GraphicsState,
+    render_mode: u8,
+) -> Result<(), OfdError> {
+    let fill = matches!(render_mode % 4, 0 | 2);
+    let stroke = matches!(render_mode % 4, 1 | 2);
+    let mut attrs = String::new();
+    if !fill {
+        attrs.push_str(" Fill=\"false\"");
+    }
+    if stroke {
+        let width = graphics.line_width * graphics.stroke_scale()? * MM_PER_PT;
+        if !width.is_finite() {
+            return Err(OfdError::Invalid(
+                "PDF text stroke width is not representable".into(),
+            ));
+        }
+        let width = if width > 0.0 { width } else { 0.1 };
+        attrs.push_str(&format!(" Stroke=\"true\" LineWidth=\"{width}\""));
+    }
+    let mut colors = String::new();
+    for (name, enabled, [r, g, b], alpha) in [
+        ("FillColor", fill, graphics.fill_color, graphics.fill_alpha),
+        (
+            "StrokeColor",
+            stroke,
+            graphics.stroke_color,
+            graphics.stroke_alpha,
+        ),
+    ] {
+        if enabled {
+            let alpha = if alpha < 1.0 {
+                format!(" Alpha=\"{}\"", (alpha * 255.0).round() as u8)
+            } else {
+                String::new()
+            };
+            colors.push_str(&format!("<ofd:{name} Value=\"{r} {g} {b}\"{alpha}/>"));
+        }
+    }
+    let page = output
+        .pages()?
+        .into_iter()
+        .nth(page_index)
+        .ok_or_else(|| OfdError::Invalid("imported PDF page is missing".into()))?;
+    let bytes = output
+        .entry(&page.path)?
+        .ok_or_else(|| OfdError::Invalid("imported PDF page entry is missing".into()))?;
+    let parsed = parse_xml(&page.path, bytes)?;
+    let object = parsed
+        .descendants()
+        .find(|node| is_element(*node, "TextObject") && node.attribute("ID") == Some(object_id))
+        .ok_or_else(|| OfdError::Invalid("imported PDF text object is missing".into()))?;
+    let source = std::str::from_utf8(bytes)
+        .map_err(|error| OfdError::Invalid(format!("imported PDF page is not UTF-8: {error}")))?;
+    let tag_end = object.range().start
+        + source[object.range()]
+            .find('>')
+            .ok_or_else(|| OfdError::Invalid("imported PDF text object is malformed".into()))?;
+    let mut updated = source.to_owned();
+    updated.insert_str(tag_end + 1, &colors);
+    updated.insert_str(tag_end, &attrs);
+    output.set_entry(&page.path, updated.into_bytes())
+}
+
+fn install_clip(
+    state: &mut GraphicsState,
+    path: &PathBuilder,
+    even_odd: bool,
+) -> Result<(), OfdError> {
+    if path.commands.is_empty() {
+        return Err(OfdError::Invalid("PDF clipping path is empty".into()));
+    }
+    if state.clips.len() >= 256 {
+        return Err(OfdError::Limit(
+            "PDF clipping path nesting is too deep".into(),
+        ));
+    }
+    state.clips.push(PdfClip::Path {
+        commands: path.commands.clone(),
+        even_odd,
+    });
+    Ok(())
+}
+
+fn resource<'a>(
+    pdf: &'a PdfDocument,
+    resources: &'a Object,
+    category: &[u8],
+    name: &[u8],
+) -> Result<(Option<ObjectId>, &'a Object), OfdError> {
+    let resources = resources
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("invalid PDF resources".into()))?;
+    let entries = resources
+        .get(category)
+        .map_err(|_| OfdError::Invalid("PDF resource category was not found".into()))?;
+    let (_, entries) = pdf
+        .dereference(entries)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF resources: {error}")))?;
+    let value = entries
+        .as_dict()
+        .and_then(|entries| entries.get(name))
+        .map_err(|_| OfdError::Invalid("PDF resource was not found".into()))?;
+    pdf.dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF resource: {error}")))
+}
+
+fn pdf_has_optional_content(pdf: &PdfDocument) -> Result<bool, OfdError> {
+    Ok(pdf
+        .catalog()
+        .map_err(|_| OfdError::Invalid("PDF catalog is invalid".into()))?
+        .get(b"OCProperties")
+        .is_ok())
+}
+
+fn optional_content_visible(pdf: &PdfDocument, object_id: ObjectId) -> Result<bool, OfdError> {
+    if !pdf_has_optional_content(pdf)? {
+        return Ok(true);
+    }
+    let membership = pdf
+        .get_dictionary(object_id)
+        .map_err(|_| OfdError::Invalid("PDF optional content is invalid".into()))?;
+    match membership.get(b"Type").and_then(Object::as_name).ok() {
+        Some(b"OCG") => optional_group_visible(pdf, object_id),
+        Some(b"OCMD") => optional_membership_visible(pdf, membership),
+        _ => Err(OfdError::Invalid(
+            "PDF optional content type is invalid".into(),
+        )),
+    }
+}
+
+fn optional_content_value_visible(pdf: &PdfDocument, value: &Object) -> Result<bool, OfdError> {
+    match value {
+        Object::Reference(id) => optional_content_visible(pdf, *id),
+        Object::Dictionary(membership)
+            if membership.get(b"Type").and_then(Object::as_name).ok()
+                == Some(b"OCMD".as_slice()) =>
+        {
+            optional_membership_visible(pdf, membership)
+        }
+        _ => Err(OfdError::Invalid("PDF optional content is invalid".into())),
+    }
+}
+
+fn optional_membership_visible(
+    pdf: &PdfDocument,
+    membership: &lopdf::Dictionary,
+) -> Result<bool, OfdError> {
+    if let Ok(expression) = membership.get(b"VE") {
+        return optional_visibility_expression(pdf, expression, 0);
+    }
+    let Some(groups) = membership.get(b"OCGs").ok() else {
+        return Ok(true);
+    };
+    let groups = match groups {
+        Object::Reference(id)
+            if pdf.get_dictionary(*id).is_ok_and(|group| {
+                group.get(b"Type").and_then(Object::as_name).ok() == Some(b"OCG".as_slice())
+            }) =>
+        {
+            vec![*id]
+        }
+        _ => {
+            let (_, groups) = pdf
+                .dereference(groups)
+                .map_err(|_| OfdError::Invalid("PDF OCMD groups are invalid".into()))?;
+            let groups = groups
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF OCMD groups are invalid".into()))?;
+            if groups.len() > 256 {
+                return Err(OfdError::Limit("PDF OCMD has too many groups".into()));
+            }
+            let mut ids = Vec::new();
+            for group in groups {
+                match group {
+                    Object::Null => {}
+                    Object::Reference(id)
+                        if pdf
+                            .get_object(*id)
+                            .is_ok_and(|value| !matches!(value, Object::Null)) =>
+                    {
+                        ids.push(*id);
+                    }
+                    Object::Reference(_) => {}
+                    _ => return Err(OfdError::Invalid("PDF OCMD group is invalid".into())),
+                }
+            }
+            ids
+        }
+    };
+    if groups.is_empty() {
+        return Ok(true);
+    }
+    let mut states = Vec::with_capacity(groups.len());
+    for id in groups {
+        states.push(optional_group_visible(pdf, id)?);
+    }
+    let policy = match membership.get(b"P") {
+        Ok(value) => value
+            .as_name()
+            .map_err(|_| OfdError::Invalid("PDF OCMD policy is invalid".into()))?,
+        Err(_) => b"AnyOn".as_slice(),
+    };
+    match policy {
+        b"AnyOn" => Ok(states.iter().any(|state| *state)),
+        b"AllOn" => Ok(states.iter().all(|state| *state)),
+        b"AnyOff" => Ok(states.iter().any(|state| !*state)),
+        b"AllOff" => Ok(states.iter().all(|state| !*state)),
+        _ => Err(OfdError::Invalid("PDF OCMD policy is invalid".into())),
+    }
+}
+
+fn optional_visibility_expression(
+    pdf: &PdfDocument,
+    expression: &Object,
+    depth: usize,
+) -> Result<bool, OfdError> {
+    if depth > 32 {
+        return Err(OfdError::Limit("PDF OCMD expression is too deep".into()));
+    }
+    if let Object::Reference(id) = expression {
+        if pdf.get_dictionary(*id).is_ok() {
+            return optional_group_visible(pdf, *id);
+        }
+    }
+    let (_, expression) = pdf
+        .dereference(expression)
+        .map_err(|_| OfdError::Invalid("PDF OCMD expression is invalid".into()))?;
+    let elements = expression
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF OCMD expression is invalid".into()))?;
+    if elements.len() < 2 || elements.len() > 256 {
+        return Err(OfdError::Invalid(
+            "PDF OCMD expression size is invalid".into(),
+        ));
+    }
+    let operator = elements[0]
+        .as_name()
+        .map_err(|_| OfdError::Invalid("PDF OCMD expression operator is invalid".into()))?;
+    let mut states = Vec::with_capacity(elements.len() - 1);
+    for element in &elements[1..] {
+        match element {
+            Object::Reference(_) | Object::Array(_) => {
+                states.push(optional_visibility_expression(pdf, element, depth + 1)?);
+            }
+            _ => {
+                return Err(OfdError::Invalid(
+                    "PDF OCMD expression member is invalid".into(),
+                ))
+            }
+        }
+    }
+    match operator {
+        b"Not" if states.len() == 1 => Ok(!states[0]),
+        b"And" => Ok(states.iter().all(|state| *state)),
+        b"Or" => Ok(states.iter().any(|state| *state)),
+        _ => Err(OfdError::Invalid(
+            "PDF OCMD expression operator is invalid".into(),
+        )),
+    }
+}
+
+fn optional_intent_mask(pdf: &PdfDocument, value: Option<&Object>) -> Result<u8, OfdError> {
+    let Some(value) = value else {
+        return Ok(1);
+    };
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|_| OfdError::Invalid("PDF OCG intent is invalid".into()))?;
+    let names: Vec<&Object> = match value {
+        Object::Array(names) => names.iter().collect(),
+        value => vec![value],
+    };
+    let mut mask = 0_u8;
+    for name in names {
+        let (_, name) = pdf
+            .dereference(name)
+            .map_err(|_| OfdError::Invalid("PDF OCG intent is invalid".into()))?;
+        let name = name
+            .as_name()
+            .map_err(|_| OfdError::Invalid("PDF OCG intent is invalid".into()))?;
+        mask |= match name {
+            b"View" => 1,
+            b"Design" => 2,
+            b"All" => 3,
+            _ => 0,
+        };
+    }
+    Ok(mask)
+}
+
+fn optional_group_visible(pdf: &PdfDocument, group_id: ObjectId) -> Result<bool, OfdError> {
+    let group = pdf
+        .get_dictionary(group_id)
+        .map_err(|_| OfdError::Invalid("PDF optional content group is invalid".into()))?;
+    if group.get(b"Type").and_then(Object::as_name).ok() != Some(b"OCG".as_slice()) {
+        return Err(OfdError::Invalid(
+            "PDF optional content membership is unsupported".into(),
+        ));
+    }
+    let group_intent = optional_intent_mask(pdf, group.get(b"Intent").ok())?;
+    let catalog = pdf
+        .catalog()
+        .map_err(|_| OfdError::Invalid("PDF catalog is invalid".into()))?;
+    let properties = catalog
+        .get(b"OCProperties")
+        .map_err(|_| OfdError::Invalid("PDF OCProperties are missing".into()))?;
+    let (_, properties) = pdf
+        .dereference(properties)
+        .map_err(|_| OfdError::Invalid("PDF OCProperties are invalid".into()))?;
+    let properties = properties
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF OCProperties are invalid".into()))?;
+    let (_, groups) = pdf
+        .dereference(
+            properties
+                .get(b"OCGs")
+                .map_err(|_| OfdError::Invalid("PDF OCG list is invalid".into()))?,
+        )
+        .map_err(|_| OfdError::Invalid("PDF OCG list is invalid".into()))?;
+    let groups = groups
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF OCG list is invalid".into()))?;
+    if !groups
+        .iter()
+        .any(|value| value.as_reference().ok() == Some(group_id))
+    {
+        return Err(OfdError::Invalid("PDF OCG is not registered".into()));
+    }
+    let default = properties
+        .get(b"D")
+        .map_err(|_| OfdError::Invalid("PDF default OCG configuration is missing".into()))?;
+    let (_, default) = pdf
+        .dereference(default)
+        .map_err(|_| OfdError::Invalid("PDF default OCG configuration is invalid".into()))?;
+    let default = default
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF default OCG configuration is invalid".into()))?;
+    let config_intent = optional_intent_mask(pdf, default.get(b"Intent").ok())?;
+    if group_intent & config_intent == 0 {
+        return Ok(true);
+    }
+    let mut visible = match default.get(b"BaseState") {
+        Err(_) => true,
+        Ok(value) => {
+            let (_, value) = pdf
+                .dereference(value)
+                .map_err(|_| OfdError::Invalid("PDF OCG BaseState is invalid".into()))?;
+            match value.as_name().ok() {
+                Some(b"ON") => true,
+                Some(b"OFF") => false,
+                _ => return Err(OfdError::Invalid("PDF OCG BaseState is unsupported".into())),
+            }
+        }
+    };
+    for (key, state) in [(b"ON".as_slice(), true), (b"OFF".as_slice(), false)] {
+        if let Ok(value) = default.get(key) {
+            let (_, value) = pdf
+                .dereference(value)
+                .map_err(|_| OfdError::Invalid("PDF OCG state list is invalid".into()))?;
+            let list = value
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF OCG state list is invalid".into()))?;
+            if list
+                .iter()
+                .any(|entry| entry.as_reference().ok() == Some(group_id))
+            {
+                visible = state;
+            }
+        }
+    }
+    Ok(visible)
+}
+
+fn selected_color_space(
+    pdf: &PdfDocument,
+    resources: &Object,
+    name: &[u8],
+) -> Result<PdfColorSpace, OfdError> {
+    parse_color_space(Some(pdf), Some(resources), &Object::Name(name.to_vec()), 0)
+}
+
+fn parse_color_space(
+    pdf: Option<&PdfDocument>,
+    resources: Option<&Object>,
+    value: &Object,
+    depth: usize,
+) -> Result<PdfColorSpace, OfdError> {
+    parse_color_space_inner(pdf, resources, value, depth, true)
+}
+
+fn parse_color_space_inner(
+    pdf: Option<&PdfDocument>,
+    resources: Option<&Object>,
+    value: &Object,
+    depth: usize,
+    remap_device: bool,
+) -> Result<PdfColorSpace, OfdError> {
+    if depth > 4 {
+        return Err(OfdError::Invalid("PDF color space resource cycle".into()));
+    }
+    let value = if matches!(value, Object::Reference(_)) {
+        pdf.ok_or_else(|| OfdError::Invalid("PDF color space reference is unresolved".into()))?
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF color space: {error}")))?
+            .1
+    } else {
+        value
+    };
+    if let Ok(name) = value.as_name() {
+        let default = match name {
+            b"DeviceGray" => Some((b"DefaultGray".as_slice(), 1)),
+            b"DeviceRGB" => Some((b"DefaultRGB".as_slice(), 3)),
+            b"DeviceCMYK" => Some((b"DefaultCMYK".as_slice(), 4)),
+            _ => None,
+        };
+        if remap_device {
+            if let (Some(pdf), Some(resources), Some((default_name, channels))) =
+                (pdf, resources, default)
+            {
+                let resource_dict = resources
+                    .as_dict()
+                    .map_err(|_| OfdError::Invalid("invalid PDF resources".into()))?;
+                if let Ok(color_spaces) = resource_dict.get(b"ColorSpace") {
+                    let (_, color_spaces) = pdf.dereference(color_spaces).map_err(|error| {
+                        OfdError::Invalid(format!("invalid PDF ColorSpace resources: {error}"))
+                    })?;
+                    let color_spaces = color_spaces.as_dict().map_err(|_| {
+                        OfdError::Invalid("PDF ColorSpace resources are not a dictionary".into())
+                    })?;
+                    if let Ok(replacement) = color_spaces.get(default_name) {
+                        let replacement = parse_color_space_inner(
+                            Some(pdf),
+                            Some(resources),
+                            replacement,
+                            depth + 1,
+                            false,
+                        )?;
+                        if replacement.channels() != channels
+                            || matches!(
+                                replacement,
+                                PdfColorSpace::Lab { .. } | PdfColorSpace::Indexed { .. }
+                            )
+                        {
+                            return Err(OfdError::Invalid(
+                                "PDF default color space has incompatible components".into(),
+                            ));
+                        }
+                        return Ok(replacement);
+                    }
+                }
+            }
+        }
+        match name {
+            b"DeviceGray" => return Ok(PdfColorSpace::Gray),
+            b"DeviceRGB" => return Ok(PdfColorSpace::Rgb),
+            b"DeviceCMYK" => return Ok(PdfColorSpace::Cmyk),
+            _ => {}
+        }
+        let (pdf, resources) = pdf.zip(resources).ok_or_else(|| {
+            OfdError::Invalid("unsupported PDF image color space resource".into())
+        })?;
+        let (_, resolved) = resource(pdf, resources, b"ColorSpace", name)?;
+        return parse_color_space_inner(
+            Some(pdf),
+            Some(resources),
+            resolved,
+            depth + 1,
+            remap_device,
+        );
+    }
+    let array = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("unsupported PDF color space resource".into()))?;
+    if let [kind, profile] = array.as_slice() {
+        if kind.as_name().ok() == Some(b"CalGray".as_slice()) {
+            let profile = if matches!(profile, Object::Reference(_)) {
+                pdf.ok_or_else(|| OfdError::Invalid("PDF CalGray is unresolved".into()))?
+                    .dereference(profile)
+                    .map_err(|error| OfdError::Invalid(format!("invalid PDF CalGray: {error}")))?
+                    .1
+            } else {
+                profile
+            };
+            let dict = profile.as_dict().map_err(|_| {
+                OfdError::Invalid("PDF CalGray parameters are not a dictionary".into())
+            })?;
+            let white = dict
+                .get(b"WhitePoint")
+                .and_then(Object::as_array)
+                .map_err(|_| OfdError::Invalid("PDF CalGray has no WhitePoint".into()))?;
+            let white = pdf_color_triple(white, "CalGray WhitePoint")?;
+            if white[0] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 || white[2] <= 0.0 {
+                return Err(OfdError::Invalid(
+                    "PDF CalGray WhitePoint is invalid".into(),
+                ));
+            }
+            if let Ok(black) = dict.get(b"BlackPoint") {
+                let black = black
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF CalGray BlackPoint is invalid".into()))?;
+                let black = pdf_color_triple(black, "CalGray BlackPoint")?;
+                if black != [0.0; 3] {
+                    return Err(OfdError::Invalid(
+                        "PDF CalGray nonzero BlackPoint is unsupported".into(),
+                    ));
+                }
+            }
+            let gamma = match dict.get(b"Gamma") {
+                Ok(value) => f64::from(
+                    value
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF CalGray Gamma is invalid".into()))?,
+                ),
+                Err(_) => 1.0,
+            };
+            if !gamma.is_finite() || gamma <= 0.0 || gamma > 1e6 {
+                return Err(OfdError::Invalid("PDF CalGray Gamma is invalid".into()));
+            }
+            return Ok(PdfColorSpace::CalGray { gamma });
+        }
+        if kind.as_name().ok() == Some(b"CalRGB".as_slice()) {
+            let profile = if matches!(profile, Object::Reference(_)) {
+                pdf.ok_or_else(|| OfdError::Invalid("PDF CalRGB is unresolved".into()))?
+                    .dereference(profile)
+                    .map_err(|error| OfdError::Invalid(format!("invalid PDF CalRGB: {error}")))?
+                    .1
+            } else {
+                profile
+            };
+            let dict = profile.as_dict().map_err(|_| {
+                OfdError::Invalid("PDF CalRGB parameters are not a dictionary".into())
+            })?;
+            let white = dict
+                .get(b"WhitePoint")
+                .and_then(Object::as_array)
+                .map_err(|_| OfdError::Invalid("PDF CalRGB has no WhitePoint".into()))?;
+            let white = pdf_color_triple(white, "CalRGB WhitePoint")?;
+            if white[0] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 || white[2] <= 0.0 {
+                return Err(OfdError::Invalid("PDF CalRGB WhitePoint is invalid".into()));
+            }
+            if let Ok(black) = dict.get(b"BlackPoint") {
+                let black = black
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF CalRGB BlackPoint is invalid".into()))?;
+                let black = pdf_color_triple(black, "CalRGB BlackPoint")?;
+                if black != [0.0; 3] {
+                    return Err(OfdError::Invalid(
+                        "PDF CalRGB nonzero BlackPoint is unsupported".into(),
+                    ));
+                }
+            }
+            let gamma = match dict.get(b"Gamma") {
+                Ok(value) => pdf_color_triple(
+                    value
+                        .as_array()
+                        .map_err(|_| OfdError::Invalid("PDF CalRGB Gamma is invalid".into()))?,
+                    "CalRGB Gamma",
+                )?,
+                Err(_) => [1.0; 3],
+            };
+            if gamma.iter().any(|value| *value <= 0.0) {
+                return Err(OfdError::Invalid("PDF CalRGB Gamma is invalid".into()));
+            }
+            let matrix = match dict.get(b"Matrix") {
+                Ok(value) => pdf_calrgb_matrix(
+                    value
+                        .as_array()
+                        .map_err(|_| OfdError::Invalid("PDF CalRGB Matrix is invalid".into()))?,
+                )?,
+                Err(_) => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            };
+            let to_srgb = calibrated_rgb_to_srgb_matrix(white, matrix)?;
+            return Ok(PdfColorSpace::CalRgb { gamma, to_srgb });
+        }
+        if kind.as_name().ok() == Some(b"Lab".as_slice()) {
+            let profile = if matches!(profile, Object::Reference(_)) {
+                pdf.ok_or_else(|| OfdError::Invalid("PDF Lab is unresolved".into()))?
+                    .dereference(profile)
+                    .map_err(|error| OfdError::Invalid(format!("invalid PDF Lab: {error}")))?
+                    .1
+            } else {
+                profile
+            };
+            let dict = profile
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF Lab parameters are not a dictionary".into()))?;
+            let white = dict
+                .get(b"WhitePoint")
+                .and_then(Object::as_array)
+                .map_err(|_| OfdError::Invalid("PDF Lab has no WhitePoint".into()))?;
+            let white = pdf_color_triple(white, "Lab WhitePoint")?;
+            if white[0] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 || white[2] <= 0.0 {
+                return Err(OfdError::Invalid("PDF Lab WhitePoint is invalid".into()));
+            }
+            if let Ok(black) = dict.get(b"BlackPoint") {
+                let black = black
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF Lab BlackPoint is invalid".into()))?;
+                let black = pdf_color_triple(black, "Lab BlackPoint")?;
+                if black != [0.0; 3] {
+                    return Err(OfdError::Invalid(
+                        "PDF Lab nonzero BlackPoint is unsupported".into(),
+                    ));
+                }
+            }
+            let range = match dict.get(b"Range") {
+                Ok(value) => pdf_lab_range(
+                    value
+                        .as_array()
+                        .map_err(|_| OfdError::Invalid("PDF Lab Range is invalid".into()))?,
+                )?,
+                Err(_) => [-100.0, 100.0, -100.0, 100.0],
+            };
+            let to_srgb = calibrated_rgb_to_srgb_matrix(
+                white,
+                [white[0], 0.0, 0.0, 0.0, white[1], 0.0, 0.0, 0.0, white[2]],
+            )?;
+            return Ok(PdfColorSpace::Lab { range, to_srgb });
+        }
+        if kind.as_name().ok() != Some(b"ICCBased".as_slice()) {
+            return Err(OfdError::Invalid("unsupported PDF color space".into()));
+        }
+        let pdf = pdf.ok_or_else(|| OfdError::Invalid("PDF ICC profile is unresolved".into()))?;
+        let (_, profile) = pdf
+            .dereference(profile)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF ICC profile: {error}")))?;
+        let profile = profile
+            .as_stream()
+            .map_err(|_| OfdError::Invalid("PDF ICC profile is not a stream".into()))?;
+        let channels = profile
+            .dict
+            .get(b"N")
+            .and_then(Object::as_i64)
+            .map_err(|_| OfdError::Invalid("PDF ICC N is missing".into()))?;
+        let (channels, expected, layout) = match channels {
+            1 => (1, DataColorSpace::Gray, Layout::Gray),
+            3 => (3, DataColorSpace::Rgb, Layout::Rgb),
+            4 => (4, DataColorSpace::Cmyk, Layout::Rgba),
+            _ => {
+                return Err(OfdError::Invalid(
+                    "unsupported PDF ICC channel count".into(),
+                ))
+            }
+        };
+        let bytes = profile.get_plain_content().map_err(|error| {
+            OfdError::Invalid(format!("cannot decode PDF ICC profile: {error}"))
+        })?;
+        if bytes.len() > MAX_ENTRY_BYTES as usize {
+            return Err(OfdError::Limit("PDF ICC profile is too large".into()));
+        }
+        let profile = ColorProfile::new_from_slice(&bytes)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF ICC profile: {error}")))?;
+        if profile.color_space != expected {
+            return Err(OfdError::Invalid("PDF ICC N does not match profile".into()));
+        }
+        let transforms = [
+            RenderingIntent::Perceptual,
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::Saturation,
+            RenderingIntent::AbsoluteColorimetric,
+        ]
+        .map(|rendering_intent| {
+            profile
+                .create_transform_8bit(
+                    layout,
+                    &ColorProfile::new_srgb(),
+                    Layout::Rgb,
+                    TransformOptions {
+                        rendering_intent,
+                        ..TransformOptions::default()
+                    },
+                )
+                .ok()
+        });
+        if transforms.iter().all(Option::is_none) {
+            return Err(OfdError::Invalid(
+                "PDF ICC profile has no usable transform".into(),
+            ));
+        }
+        return Ok(PdfColorSpace::Icc {
+            channels,
+            transforms,
+        });
+    }
+    let [kind, base, high, lookup] = array.as_slice() else {
+        return Err(OfdError::Invalid("invalid PDF Indexed color space".into()));
+    };
+    if kind.as_name().ok() != Some(b"Indexed".as_slice())
+        && kind.as_name().ok() != Some(b"I".as_slice())
+    {
+        return Err(OfdError::Invalid("unsupported PDF color space".into()));
+    }
+    let base_space = parse_color_space_inner(pdf, resources, base, depth + 1, remap_device)?;
+    if matches!(base_space, PdfColorSpace::Indexed { .. }) {
+        return Err(OfdError::Invalid(
+            "PDF Indexed base cannot be Indexed".into(),
+        ));
+    }
+    let high = high
+        .as_i64()
+        .map_err(|_| OfdError::Invalid("PDF Indexed hival is not an integer".into()))?;
+    if !(0..=255).contains(&high) {
+        return Err(OfdError::Invalid(
+            "PDF Indexed hival is out of range".into(),
+        ));
+    }
+    let lookup = if matches!(lookup, Object::Reference(_)) {
+        pdf.ok_or_else(|| OfdError::Invalid("PDF Indexed lookup is unresolved".into()))?
+            .dereference(lookup)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Indexed lookup: {error}")))?
+            .1
+    } else {
+        lookup
+    };
+    let bytes = match lookup {
+        Object::String(bytes, _) => bytes.clone(),
+        Object::Stream(stream) => {
+            if stream.dict.get(b"Filter").is_ok() {
+                stream.decompressed_content().map_err(|error| {
+                    OfdError::Invalid(format!("cannot decode PDF Indexed lookup: {error}"))
+                })?
+            } else {
+                stream.content.clone()
+            }
+        }
+        _ => return Err(OfdError::Invalid("PDF Indexed lookup is not bytes".into())),
+    };
+    let channels = base_space.channels();
+    if bytes.len() != (high as usize + 1) * channels {
+        return Err(OfdError::Invalid(
+            "PDF Indexed lookup length is invalid".into(),
+        ));
+    }
+    let decode = base_space.default_decode(255);
+    let intents = [
+        RenderingIntent::Perceptual,
+        RenderingIntent::RelativeColorimetric,
+        RenderingIntent::Saturation,
+        RenderingIntent::AbsoluteColorimetric,
+    ];
+    let mut palettes: [Vec<[u8; 3]>; 4] =
+        std::array::from_fn(|_| Vec::with_capacity(high as usize + 1));
+    for entry in bytes.chunks_exact(channels) {
+        let components = entry
+            .iter()
+            .enumerate()
+            .map(|(channel, component)| {
+                let minimum = decode[channel * 2];
+                minimum + (decode[channel * 2 + 1] - minimum) * f64::from(*component) / 255.0
+            })
+            .collect::<Vec<_>>();
+        if matches!(base_space, PdfColorSpace::Icc { .. }) {
+            for (palette, intent) in palettes.iter_mut().zip(intents) {
+                palette.push(base_space.color_with_intent(&components, intent)?);
+            }
+        } else {
+            let color = base_space.color(&components)?;
+            for palette in &mut palettes {
+                palette.push(color);
+            }
+        }
+    }
+    Ok(PdfColorSpace::Indexed { palettes })
+}
+
+fn pdf_color_triple(values: &[Object], name: &str) -> Result<[f64; 3], OfdError> {
+    let [x, y, z] = values else {
+        return Err(OfdError::Invalid(format!(
+            "PDF {name} must have three values"
+        )));
+    };
+    let [x, y, z] = [x, y, z].map(|value| {
+        value
+            .as_float()
+            .map(f64::from)
+            .map_err(|_| OfdError::Invalid(format!("PDF {name} is not numeric")))
+    });
+    let values = [x?, y?, z?];
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0 || *value > 1e6)
+    {
+        return Err(OfdError::Invalid(format!("PDF {name} is invalid")));
+    }
+    Ok(values)
+}
+
+fn pdf_calrgb_matrix(values: &[Object]) -> Result<[f64; 9], OfdError> {
+    if values.len() != 9 {
+        return Err(OfdError::Invalid(
+            "PDF CalRGB Matrix needs nine values".into(),
+        ));
+    }
+    let values = values
+        .iter()
+        .map(|value| {
+            let value = f64::from(
+                value
+                    .as_float()
+                    .map_err(|_| OfdError::Invalid("PDF CalRGB Matrix is not numeric".into()))?,
+            );
+            if !value.is_finite() || value.abs() > 1e6 {
+                return Err(OfdError::Invalid("PDF CalRGB Matrix is invalid".into()));
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    values
+        .try_into()
+        .map_err(|_| OfdError::Invalid("PDF CalRGB Matrix needs nine values".into()))
+}
+
+fn pdf_lab_range(values: &[Object]) -> Result<[f64; 4], OfdError> {
+    if values.len() != 4 {
+        return Err(OfdError::Invalid("PDF Lab Range needs four values".into()));
+    }
+    let values = values
+        .iter()
+        .map(|value| {
+            let value = f64::from(
+                value
+                    .as_float()
+                    .map_err(|_| OfdError::Invalid("PDF Lab Range is not numeric".into()))?,
+            );
+            if !value.is_finite() || value.abs() > 1e6 {
+                return Err(OfdError::Invalid("PDF Lab Range is invalid".into()));
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let [a_min, a_max, b_min, b_max]: [f64; 4] = values
+        .try_into()
+        .map_err(|_| OfdError::Invalid("PDF Lab Range needs four values".into()))?;
+    if a_min >= a_max || b_min >= b_max {
+        return Err(OfdError::Invalid("PDF Lab Range is invalid".into()));
+    }
+    Ok([a_min, a_max, b_min, b_max])
+}
+
+fn lab_inverse(value: f64) -> f64 {
+    let threshold = 6.0 / 29.0;
+    if value > threshold {
+        value.powi(3)
+    } else {
+        3.0 * threshold * threshold * (value - 4.0 / 29.0)
+    }
+}
+
+fn matrix3_product(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    std::array::from_fn(|row| {
+        std::array::from_fn(|column| {
+            (0..3)
+                .map(|index| left[row][index] * right[index][column])
+                .sum()
+        })
+    })
+}
+
+fn matrix3_vector(matrix: [[f64; 3]; 3], vector: [f64; 3]) -> [f64; 3] {
+    matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
+}
+
+fn calibrated_rgb_to_srgb_matrix(
+    white: [f64; 3],
+    matrix: [f64; 9],
+) -> Result<[[f64; 3]; 3], OfdError> {
+    // Adapt the PDF source white to sRGB's D65 white before the XYZ-to-RGB step.
+    let bradford = [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ];
+    let inverse = [
+        [0.986_992_9, -0.147_054_3, 0.159_962_7],
+        [0.432_305_3, 0.518_360_3, 0.049_291_2],
+        [-0.008_528_7, 0.040_042_8, 0.968_486_7],
+    ];
+    let source = matrix3_vector(bradford, white);
+    let target = matrix3_vector(bradford, [0.950_47, 1.0, 1.088_83]);
+    if source
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(OfdError::Invalid("PDF CalRGB WhitePoint is invalid".into()));
+    }
+    let scale: [f64; 3] = std::array::from_fn(|index| target[index] / source[index]);
+    let adaptation = matrix3_product(
+        inverse,
+        std::array::from_fn(|row| std::array::from_fn(|column| scale[row] * bradford[row][column])),
+    );
+    let xyz_to_srgb = [
+        [3.240_454_2, -1.537_138_5, -0.498_531_4],
+        [-0.969_266_0, 1.876_010_8, 0.041_556_0],
+        [0.055_643_4, -0.204_025_9, 1.057_225_2],
+    ];
+    let pdf_to_xyz = [
+        [matrix[0], matrix[3], matrix[6]],
+        [matrix[1], matrix[4], matrix[7]],
+        [matrix[2], matrix[5], matrix[8]],
+    ];
+    let result = matrix3_product(matrix3_product(xyz_to_srgb, adaptation), pdf_to_xyz);
+    if result.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(OfdError::Invalid("PDF CalRGB Matrix is invalid".into()));
+    }
+    Ok(result)
+}
+
+fn srgb_sample(linear: f64) -> u8 {
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn image_resource<'a>(
+    pdf: &'a PdfDocument,
+    resources: &'a Object,
+    name: &[u8],
+) -> Result<&'a lopdf::Stream, OfdError> {
+    let (_, image) = resource(pdf, resources, b"XObject", name)?;
+    let image = image
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF XObject is not a stream".into()))?;
+    if image.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image".as_slice()) {
+        return Err(OfdError::Invalid("PDF XObject is not an image".into()));
+    }
+    Ok(image)
+}
+
+fn pdf_blend_mode_name(name: &[u8]) -> Option<&'static str> {
+    Some(match name {
+        b"Normal" | b"Compatible" => "Normal",
+        b"Multiply" => "Multiply",
+        b"Screen" => "Screen",
+        b"Overlay" => "Overlay",
+        b"Darken" => "Darken",
+        b"Lighten" => "Lighten",
+        b"ColorDodge" => "ColorDodge",
+        b"ColorBurn" => "ColorBurn",
+        b"HardLight" => "HardLight",
+        b"SoftLight" => "SoftLight",
+        b"Difference" => "Difference",
+        b"Exclusion" => "Exclusion",
+        b"Hue" => "Hue",
+        b"Saturation" => "Saturation",
+        b"Color" => "Color",
+        b"Luminosity" => "Luminosity",
+        _ => return None,
+    })
+}
+
+fn pdf_rendering_intent(name: &[u8]) -> RenderingIntent {
+    match name {
+        b"AbsoluteColorimetric" => RenderingIntent::AbsoluteColorimetric,
+        b"Perceptual" => RenderingIntent::Perceptual,
+        b"Saturation" => RenderingIntent::Saturation,
+        _ => RenderingIntent::RelativeColorimetric,
+    }
+}
+
+fn pdf_blend_mode(pdf: &PdfDocument, value: &Object) -> Result<&'static str, OfdError> {
+    if let Ok(name) = value.as_name() {
+        return pdf_blend_mode_name(name)
+            .ok_or_else(|| OfdError::Invalid("unsupported PDF blend mode".into()));
+    }
+    let names = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF blend mode is not a name or array".into()))?;
+    for entry in names {
+        let (_, entry) = pdf
+            .dereference(entry)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF blend mode: {error}")))?;
+        let name = entry
+            .as_name()
+            .map_err(|_| OfdError::Invalid("PDF blend mode array contains a non-name".into()))?;
+        if let Some(mode) = pdf_blend_mode_name(name) {
+            return Ok(mode);
+        }
+    }
+    Ok("Normal")
+}
+
+fn apply_ext_gstate(
+    pdf: &PdfDocument,
+    resources: &Object,
+    name: &[u8],
+    state: &mut GraphicsState,
+    text: &mut TextState,
+) -> Result<(), OfdError> {
+    let (_, value) = resource(pdf, resources, b"ExtGState", name)?;
+    let dictionary = value
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF ExtGState is not a dictionary".into()))?;
+    for (key, value) in dictionary.iter() {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF ExtGState value: {error}")))?;
+        match key.as_slice() {
+            b"Font" => {
+                let array = value
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF ExtGState Font is not an array".into()))?;
+                let [font, size] = array.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF ExtGState Font expects a font and size".into(),
+                    ));
+                };
+                let id = font.as_reference().map_err(|_| {
+                    OfdError::Invalid("PDF ExtGState Font is not an indirect reference".into())
+                })?;
+                pdf.get_object(id)
+                    .map_err(|_| OfdError::Invalid("PDF ExtGState Font is missing".into()))?
+                    .as_dict()
+                    .map_err(|_| {
+                        OfdError::Invalid("PDF ExtGState Font is not a dictionary".into())
+                    })?;
+                let (_, size) = pdf.dereference(size).map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF ExtGState Font size: {error}"))
+                })?;
+                let size = f64::from(size.as_float().map_err(|_| {
+                    OfdError::Invalid("PDF ExtGState Font size is not numeric".into())
+                })?);
+                if !size.is_finite() || size <= 0.0 {
+                    return Err(OfdError::Invalid("PDF text font size is invalid".into()));
+                }
+                text.font = Some(PdfFontSelection::Indirect(id));
+                text.size_pt = size;
+            }
+            b"LW" => {
+                let width = f64::from(
+                    value
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF line width is not numeric".into()))?,
+                );
+                if !width.is_finite() || width < 0.0 {
+                    return Err(OfdError::Invalid("negative PDF line width".into()));
+                }
+                state.line_width = width;
+            }
+            b"LC" => {
+                state.line_cap = match value.as_i64().ok() {
+                    Some(0) => PathLineCap::Butt,
+                    Some(1) => PathLineCap::Round,
+                    Some(2) => PathLineCap::Square,
+                    _ => return Err(OfdError::Invalid("invalid PDF line cap".into())),
+                };
+            }
+            b"LJ" => {
+                state.line_join = match value.as_i64().ok() {
+                    Some(0) => PathLineJoin::Miter,
+                    Some(1) => PathLineJoin::Round,
+                    Some(2) => PathLineJoin::Bevel,
+                    _ => return Err(OfdError::Invalid("invalid PDF line join".into())),
+                };
+            }
+            b"ML" => {
+                let limit = f64::from(
+                    value
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF miter limit is not numeric".into()))?,
+                );
+                if !limit.is_finite() || limit <= 0.0 {
+                    return Err(OfdError::Invalid("invalid PDF miter limit".into()));
+                }
+                state.miter_limit = limit;
+            }
+            b"D" => {
+                let values = value
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF dash is not an array".into()))?;
+                let [pattern, phase] = values.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF dash expects an array and phase".into(),
+                    ));
+                };
+                (state.dash_pattern, state.dash_phase) = parse_pdf_dash(pattern, phase)?;
+            }
+            b"FL" => {
+                let flatness = f64::from(
+                    value
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF flatness is not numeric".into()))?,
+                );
+                if !flatness.is_finite() || !(0.0..=100.0).contains(&flatness) {
+                    return Err(OfdError::Invalid("invalid PDF flatness tolerance".into()));
+                }
+            }
+            b"CA" | b"ca" => {
+                let alpha = f64::from(
+                    value
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF alpha is not numeric".into()))?,
+                );
+                if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+                    return Err(OfdError::Invalid("PDF alpha is out of range".into()));
+                }
+                if key == b"CA" {
+                    state.stroke_alpha = alpha;
+                } else {
+                    state.fill_alpha = alpha;
+                }
+            }
+            b"Type" if value.as_name().ok() == Some(b"ExtGState".as_slice()) => {}
+            b"RI" => state.set_rendering_intent(pdf_rendering_intent(
+                value
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("unsupported PDF ExtGState RI".into()))?,
+            ))?,
+            b"TR" if value.as_name().ok() == Some(b"Identity".as_slice()) => {}
+            b"TR2" if matches!(value.as_name().ok(), Some(b"Identity" | b"Default")) => {}
+            b"BM" => state.blend_mode = pdf_blend_mode(pdf, value)?,
+            b"AIS" if value.as_bool().ok() == Some(false) => {}
+            b"SMask" if value.as_name().ok() == Some(b"None".as_slice()) => {}
+            b"OP" | b"op" | b"SA" if value.as_bool().ok() == Some(false) => {}
+            b"OPM" if value.as_i64().ok() == Some(0) => {}
+            b"TK" if value.as_bool().ok() == Some(true) => {}
+            other => {
+                return Err(OfdError::Invalid(format!(
+                    "unsupported PDF ExtGState {}",
+                    String::from_utf8_lossy(other)
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_pdf_dash(pattern: &Object, phase: &Object) -> Result<(Option<Vec<f64>>, f64), OfdError> {
+    let pattern = pattern
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF dash pattern is not an array".into()))?;
+    let phase = f64::from(
+        phase
+            .as_float()
+            .map_err(|_| OfdError::Invalid("PDF dash phase is not numeric".into()))?,
+    );
+    if !phase.is_finite() || phase.abs() > 1e9 {
+        return Err(OfdError::Limit("PDF dash phase is too large".into()));
+    }
+    let dash_pattern = if pattern.is_empty() {
+        None
+    } else {
+        if pattern.len() > 256 {
+            return Err(OfdError::Limit("PDF dash array is too long".into()));
+        }
+        let values = numbers(&Operation::new("d", pattern.clone()), pattern.len())?;
+        if values.iter().any(|value| *value <= 0.0) {
+            return Err(OfdError::Invalid(
+                "PDF dash lengths must be positive".into(),
+            ));
+        }
+        Some(values)
+    };
+    Ok((dash_pattern, phase))
+}
+
+fn pdf_function_type(pdf: &PdfDocument, function: &lopdf::Dictionary) -> Result<i64, OfdError> {
+    let value = function
+        .get(b"FunctionType")
+        .map_err(|_| OfdError::Invalid("PDF shading Function has no FunctionType".into()))?;
+    pdf.dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF FunctionType: {error}")))?
+        .1
+        .as_i64()
+        .map_err(|_| OfdError::Invalid("invalid PDF FunctionType".into()))
+}
+
+fn pdf_function_domain(function: &lopdf::Dictionary) -> Result<[f64; 2], OfdError> {
+    let domain = if let Ok(domain) = function.get(b"Domain") {
+        let values = domain
+            .as_array()
+            .map_err(|_| OfdError::Invalid("invalid PDF shading Function Domain".into()))?;
+        let values = numbers(&Operation::new("Function Domain", values.clone()), 2)?;
+        [values[0], values[1]]
+    } else {
+        [0.0, 1.0]
+    };
+    if domain[0] >= domain[1] {
+        return Err(OfdError::Invalid(
+            "invalid PDF shading Function Domain".into(),
+        ));
+    }
+    Ok(domain)
+}
+
+fn subdivide_pdf_gradient<F>(
+    evaluate: &F,
+    start: (f64, [u8; 3]),
+    end: (f64, [u8; 3]),
+    depth: usize,
+    output: &mut Vec<(f64, [u8; 3])>,
+) -> Result<(), OfdError>
+where
+    F: Fn(f64) -> Result<[u8; 3], OfdError>,
+{
+    let interval = end.0 - start.0;
+    let samples = [0.25, 0.5, 0.75]
+        .map(|fraction| -> Result<_, OfdError> {
+            let position = start.0 + interval * fraction;
+            Ok((fraction, position, evaluate(position)?))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let accurate = samples.iter().all(|(fraction, _, color)| {
+        (0..3).all(|channel| {
+            let interpolated = f64::from(start.1[channel]) * (1.0 - fraction)
+                + f64::from(end.1[channel]) * fraction;
+            (f64::from(color[channel]) - interpolated).abs() <= 2.0
+        })
+    });
+    if !accurate && depth == 12 {
+        return Err(OfdError::Limit(
+            "PDF shading Function needs too many color stops".into(),
+        ));
+    }
+    if accurate {
+        output.push(end);
+        return Ok(());
+    }
+    let (_, middle_position, middle_color) = samples[1];
+    let middle = (middle_position, middle_color);
+    subdivide_pdf_gradient(evaluate, start, middle, depth + 1, output)?;
+    subdivide_pdf_gradient(evaluate, middle, end, depth + 1, output)
+}
+
+fn pdf_shading_function_range(
+    pdf: &PdfDocument,
+    function: &lopdf::Dictionary,
+    channels: usize,
+) -> Result<Option<Vec<f64>>, OfdError> {
+    let Ok(range) = function.get(b"Range") else {
+        return Ok(None);
+    };
+    let (_, range) = pdf.dereference(range).map_err(|error| {
+        OfdError::Invalid(format!("invalid PDF shading Function Range: {error}"))
+    })?;
+    let values = range
+        .as_array()
+        .map_err(|_| OfdError::Invalid("invalid PDF shading Function Range".into()))?;
+    if values.len() != channels * 2 {
+        return Err(OfdError::Invalid(
+            "invalid PDF shading Function Range".into(),
+        ));
+    }
+    let values = values
+        .iter()
+        .map(|value| pdf_link_number(pdf, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.chunks_exact(2).any(|pair| pair[0] > pair[1]) {
+        return Err(OfdError::Invalid(
+            "invalid PDF shading Function Range".into(),
+        ));
+    }
+    Ok(Some(values))
+}
+
+fn pdf_sampled_function_points(
+    pdf: &PdfDocument,
+    stream: &lopdf::Stream,
+    color_space: &PdfColorSpace,
+    rendering_intent: RenderingIntent,
+    input: [f64; 2],
+    output_range: Option<&[f64]>,
+) -> Result<Vec<(f64, [u8; 3])>, OfdError> {
+    let dictionary = &stream.dict;
+    let array = |key: &[u8], count: usize| -> Result<Option<Vec<f64>>, OfdError> {
+        let Ok(value) = dictionary.get(key) else {
+            return Ok(None);
+        };
+        let (_, value) = pdf.dereference(value).map_err(|error| {
+            OfdError::Invalid(format!("invalid PDF sampled Function array: {error}"))
+        })?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("invalid PDF sampled Function array".into()))?;
+        if values.len() != count {
+            return Err(OfdError::Invalid(
+                "invalid PDF sampled Function array length".into(),
+            ));
+        }
+        values
+            .iter()
+            .map(|value| pdf_link_number(pdf, value))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    };
+    let domain = array(b"Domain", 2)?
+        .ok_or_else(|| OfdError::Invalid("PDF sampled Function has no Domain".into()))?;
+    if domain[0] >= domain[1] {
+        return Err(OfdError::Invalid(
+            "invalid PDF sampled Function Domain".into(),
+        ));
+    }
+    let size = array(b"Size", 1)?
+        .ok_or_else(|| OfdError::Invalid("PDF sampled Function has no Size".into()))?[0];
+    if size.fract() != 0.0 || size < 1.0 {
+        return Err(OfdError::Invalid(
+            "invalid PDF sampled Function Size".into(),
+        ));
+    }
+    if size > 10_000.0 {
+        return Err(OfdError::Limit(
+            "PDF sampled Function has too many samples".into(),
+        ));
+    }
+    let size = size as usize;
+    let integer = |key: &[u8], default: Option<i64>| -> Result<i64, OfdError> {
+        match dictionary.get(key) {
+            Ok(value) => pdf
+                .dereference(value)
+                .map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF sampled Function parameter: {error}"))
+                })?
+                .1
+                .as_i64()
+                .map_err(|_| OfdError::Invalid("invalid PDF sampled Function integer".into())),
+            Err(_) => default
+                .ok_or_else(|| OfdError::Invalid("missing PDF sampled Function integer".into())),
+        }
+    };
+    let bits = integer(b"BitsPerSample", None)?;
+    if !matches!(bits, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
+        return Err(OfdError::Invalid(
+            "invalid PDF sampled Function BitsPerSample".into(),
+        ));
+    }
+    match integer(b"Order", Some(1))? {
+        1 => {}
+        3 if size < 4 => {}
+        3 => {
+            return Err(OfdError::Invalid(
+                "PDF sampled Function cubic interpolation is unsupported".into(),
+            ))
+        }
+        _ => {
+            return Err(OfdError::Invalid(
+                "invalid PDF sampled Function Order".into(),
+            ))
+        }
+    }
+    let range = pdf_shading_function_range(pdf, dictionary, color_space.channels())?
+        .ok_or_else(|| OfdError::Invalid("PDF sampled Function has no Range".into()))?;
+    let decode = array(b"Decode", color_space.channels() * 2)?.unwrap_or_else(|| range.clone());
+    let encode = array(b"Encode", 2)?.unwrap_or_else(|| vec![0.0, (size - 1) as f64]);
+    let bytes = pdf_byte_stream_data(stream, Some(pdf), "sampled Function")?;
+    let sample_count = size * color_space.channels();
+    let expected = (sample_count * bits as usize).div_ceil(8);
+    if bytes.len() < expected {
+        return Err(OfdError::Invalid(
+            "truncated PDF sampled Function data".into(),
+        ));
+    }
+    let maximum = ((1u64 << bits) - 1) as f64;
+    let samples = (0..sample_count)
+        .map(|index| f64::from(read_pdf_sample(&bytes, index, bits as usize)) / maximum)
+        .collect::<Vec<_>>();
+    let raw_at = |position: f64| {
+        let x = (input[0] + position * (input[1] - input[0])).clamp(domain[0], domain[1]);
+        let x = (encode[0] + (x - domain[0]) / (domain[1] - domain[0]) * (encode[1] - encode[0]))
+            .clamp(0.0, (size - 1) as f64);
+        let first = x.floor() as usize;
+        let last = (first + 1).min(size - 1);
+        let fraction = x - first as f64;
+        (0..color_space.channels())
+            .map(|channel| {
+                let sample = samples[first * color_space.channels() + channel] * (1.0 - fraction)
+                    + samples[last * color_space.channels() + channel] * fraction;
+                decode[2 * channel] + sample * (decode[2 * channel + 1] - decode[2 * channel])
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut positions = vec![0.0, 1.0];
+    if input[0] != input[1] {
+        let mut inputs = vec![domain[0], domain[1]];
+        if encode[0] != encode[1] {
+            inputs.extend((0..size).map(|index| {
+                domain[0]
+                    + (index as f64 - encode[0]) / (encode[1] - encode[0]) * (domain[1] - domain[0])
+            }));
+        }
+        for x in inputs {
+            if x >= domain[0] && x <= domain[1] {
+                let position = (x - input[0]) / (input[1] - input[0]);
+                if position > 0.0 && position < 1.0 {
+                    positions.push(position);
+                }
+            }
+        }
+    }
+    positions.sort_by(f64::total_cmp);
+    positions.dedup();
+    let mut clipping = Vec::new();
+    for pair in positions.windows(2) {
+        let start = raw_at(pair[0]);
+        let end = raw_at(pair[1]);
+        for channel in 0..color_space.channels() {
+            if start[channel] == end[channel] {
+                continue;
+            }
+            let bounds = color_space.component_bounds(channel);
+            let mut thresholds = vec![
+                range[2 * channel],
+                range[2 * channel + 1],
+                bounds[0],
+                bounds[1],
+            ];
+            if let Some(range) = output_range {
+                thresholds.extend_from_slice(&range[2 * channel..2 * channel + 2]);
+            }
+            for value in thresholds {
+                let fraction = (value - start[channel]) / (end[channel] - start[channel]);
+                if fraction > 0.0 && fraction < 1.0 {
+                    clipping.push(pair[0] + fraction * (pair[1] - pair[0]));
+                }
+            }
+        }
+    }
+    positions.extend(clipping);
+    positions.sort_by(f64::total_cmp);
+    positions.dedup();
+    let evaluate = |position| {
+        let mut components = raw_at(position);
+        for (channel, value) in components.iter_mut().enumerate() {
+            *value = value.clamp(range[2 * channel], range[2 * channel + 1]);
+            if let Some(range) = output_range {
+                *value = value.clamp(range[2 * channel], range[2 * channel + 1]);
+            }
+            let bounds = color_space.component_bounds(channel);
+            *value = value.clamp(bounds[0], bounds[1]);
+        }
+        color_space.color_with_intent(&components, rendering_intent)
+    };
+    let mut points = vec![(0.0, evaluate(0.0)?)];
+    for pair in positions.windows(2) {
+        subdivide_pdf_gradient(
+            &evaluate,
+            (pair[0], evaluate(pair[0])?),
+            (pair[1], evaluate(pair[1])?),
+            0,
+            &mut points,
+        )?;
+        if points.len() > 10_000 {
+            return Err(OfdError::Limit(
+                "PDF shading has too many color stops".into(),
+            ));
+        }
+    }
+    Ok(points)
+}
+
+fn pdf_linear_function_points(
+    pdf: &PdfDocument,
+    object: &Object,
+    color_space: &PdfColorSpace,
+    rendering_intent: RenderingIntent,
+    encode: [f64; 2],
+    output_range: Option<&[f64]>,
+) -> Result<Vec<(f64, [u8; 3])>, OfdError> {
+    let (_, function) = pdf
+        .dereference(object)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function: {error}")))?;
+    if let Object::Stream(stream) = function {
+        if pdf_function_type(pdf, &stream.dict)? == 0 {
+            return pdf_sampled_function_points(
+                pdf,
+                stream,
+                color_space,
+                rendering_intent,
+                encode,
+                output_range,
+            );
+        }
+    }
+    let function = function
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF shading Function is not a dictionary".into()))?;
+    if pdf_function_type(pdf, function)? != 2 {
+        return Err(OfdError::Invalid(
+            "unsupported PDF shading FunctionType".into(),
+        ));
+    }
+    let domain = pdf_function_domain(function)?;
+    let exponent = function
+        .get(b"N")
+        .and_then(Object::as_float)
+        .map_err(|_| OfdError::Invalid("PDF shading Function has no N".into()))?
+        as f64;
+    if !exponent.is_finite()
+        || exponent.abs() > 1e6
+        || (exponent.fract() != 0.0 && domain[0] < 0.0)
+        || (exponent < 0.0 && domain[0] <= 0.0 && domain[1] >= 0.0)
+    {
+        return Err(OfdError::Invalid(
+            "PDF shading Function exponent is invalid".into(),
+        ));
+    }
+    let endpoint = |key: &[u8], default: f64| -> Result<Vec<f64>, OfdError> {
+        if let Ok(value) = function.get(key) {
+            let values = value
+                .as_array()
+                .map_err(|_| OfdError::Invalid("invalid PDF shading color endpoint".into()))?;
+            numbers(
+                &Operation::new("shading color", values.clone()),
+                color_space.channels(),
+            )
+        } else {
+            Ok(vec![default; color_space.channels()])
+        }
+    };
+    let c0 = endpoint(b"C0", 0.0)?;
+    let c1 = endpoint(b"C1", 1.0)?;
+    let range = pdf_shading_function_range(pdf, function, color_space.channels())?;
+    let mut positions = vec![0.0, 1.0];
+    if encode[0] != encode[1] {
+        for bound in domain {
+            let position = (bound - encode[0]) / (encode[1] - encode[0]);
+            if position > 0.0 && position < 1.0 {
+                positions.push(position);
+            }
+        }
+    }
+    for (index, (first, last)) in c0.iter().zip(&c1).enumerate() {
+        if exponent != 1.0 {
+            break;
+        }
+        let start = first + encode[0] * (last - first);
+        let end = first + encode[1] * (last - first);
+        if start == end {
+            continue;
+        }
+        let limits = range
+            .as_ref()
+            .map(|range| [range[2 * index], range[2 * index + 1]]);
+        let outer_limits = output_range.map(|range| [range[2 * index], range[2 * index + 1]]);
+        let bounds = color_space.component_bounds(index);
+        for threshold in [
+            Some(bounds[0]),
+            Some(bounds[1]),
+            limits.map(|v| v[0]),
+            limits.map(|v| v[1]),
+            outer_limits.map(|v| v[0]),
+            outer_limits.map(|v| v[1]),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let position = (threshold - start) / (end - start);
+            if position > 0.0 && position < 1.0 {
+                positions.push(position);
+            }
+        }
+    }
+    positions.sort_by(f64::total_cmp);
+    positions.dedup();
+    let component_at = |index: usize, position: f64| {
+        let input = (encode[0] + position * (encode[1] - encode[0])).clamp(domain[0], domain[1]);
+        let mut value = c0[index] + input.powf(exponent) * (c1[index] - c0[index]);
+        if let Some(range) = &range {
+            value = value.clamp(range[2 * index], range[2 * index + 1]);
+        }
+        if let Some(range) = output_range {
+            value = value.clamp(range[2 * index], range[2 * index + 1]);
+        }
+        let bounds = color_space.component_bounds(index);
+        value.clamp(bounds[0], bounds[1])
+    };
+    if matches!(color_space, PdfColorSpace::Cmyk) {
+        let mut extra = Vec::new();
+        for pair in positions.windows(2) {
+            for channel in 0..3 {
+                let first = component_at(channel, pair[0]) + component_at(3, pair[0]);
+                let last = component_at(channel, pair[1]) + component_at(3, pair[1]);
+                if (first < 1.0 && last > 1.0) || (first > 1.0 && last < 1.0) {
+                    extra.push(pair[0] + (1.0 - first) / (last - first) * (pair[1] - pair[0]));
+                }
+            }
+        }
+        positions.extend(extra);
+        positions.sort_by(f64::total_cmp);
+        positions.dedup();
+    }
+    let evaluate = |position: f64| -> Result<[u8; 3], OfdError> {
+        let components = (0..c0.len())
+            .map(|index| component_at(index, position))
+            .collect::<Vec<_>>();
+        if components.iter().any(|value| !value.is_finite()) {
+            return Err(OfdError::Invalid(
+                "PDF shading Function output is invalid".into(),
+            ));
+        }
+        color_space.color_with_intent(&components, rendering_intent)
+    };
+    let base = positions
+        .into_iter()
+        .map(|position| Ok((position, evaluate(position)?)))
+        .collect::<Result<Vec<_>, OfdError>>()?;
+    if exponent == 1.0 {
+        return Ok(base);
+    }
+    let mut sampled = vec![base[0]];
+    for pair in base.windows(2) {
+        subdivide_pdf_gradient(&evaluate, pair[0], pair[1], 0, &mut sampled)?;
+    }
+    Ok(sampled)
+}
+
+fn pdf_shading_segments(
+    pdf: &PdfDocument,
+    function: &Object,
+    color_space: &PdfColorSpace,
+    rendering_intent: RenderingIntent,
+    shading_domain: [f64; 2],
+) -> Result<Vec<GradientSegment>, OfdError> {
+    let (_, resolved) = pdf
+        .dereference(function)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function: {error}")))?;
+    let dictionary = match resolved {
+        Object::Stream(stream) => &stream.dict,
+        other => other
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF shading Function is not a dictionary".into()))?,
+    };
+    let function_type = pdf_function_type(pdf, dictionary)?;
+    if matches!(function_type, 0 | 2) {
+        let points = pdf_linear_function_points(
+            pdf,
+            function,
+            color_space,
+            rendering_intent,
+            shading_domain,
+            None,
+        )?;
+        return Ok(points
+            .into_iter()
+            .map(|(position, color)| GradientSegment {
+                position: Some(position),
+                color,
+                alpha: None,
+            })
+            .collect());
+    }
+    if function_type != 3 {
+        return Err(OfdError::Invalid(
+            "unsupported PDF shading FunctionType".into(),
+        ));
+    }
+    let domain = pdf_function_domain(dictionary)?;
+    let range = pdf_shading_function_range(pdf, dictionary, color_space.channels())?;
+    let functions = dictionary
+        .get(b"Functions")
+        .and_then(Object::as_array)
+        .map_err(|_| OfdError::Invalid("PDF stitching Function has no Functions".into()))?;
+    if functions.is_empty() || functions.len() > 256 {
+        return Err(OfdError::Invalid(
+            "PDF stitching Function has invalid count".into(),
+        ));
+    }
+    let bounds = dictionary
+        .get(b"Bounds")
+        .and_then(Object::as_array)
+        .map_err(|_| OfdError::Invalid("PDF stitching Function has no Bounds".into()))?;
+    let bounds = numbers(
+        &Operation::new("stitching Bounds", bounds.clone()),
+        functions.len() - 1,
+    )?;
+    let mut previous = domain[0];
+    for &bound in &bounds {
+        if bound <= previous || bound >= domain[1] {
+            return Err(OfdError::Invalid("PDF stitching Bounds are invalid".into()));
+        }
+        previous = bound;
+    }
+    let encode = dictionary
+        .get(b"Encode")
+        .and_then(Object::as_array)
+        .map_err(|_| OfdError::Invalid("PDF stitching Function has no Encode".into()))?;
+    let encode = numbers(
+        &Operation::new("stitching Encode", encode.clone()),
+        functions.len() * 2,
+    )?;
+    let mut segments = Vec::with_capacity(functions.len() * 2);
+    for (index, function) in functions.iter().enumerate() {
+        let start = if index == 0 {
+            domain[0]
+        } else {
+            bounds[index - 1]
+        };
+        let end = if index == bounds.len() {
+            domain[1]
+        } else {
+            bounds[index]
+        };
+        let visible_start = start.max(shading_domain[0]);
+        let visible_end = end.min(shading_domain[1]);
+        if visible_end < visible_start
+            || (visible_end == visible_start && visible_end != shading_domain[1])
+        {
+            continue;
+        }
+        let interpolate = |value: f64| {
+            encode[2 * index]
+                + (value - start) / (end - start) * (encode[2 * index + 1] - encode[2 * index])
+        };
+        let points = pdf_linear_function_points(
+            pdf,
+            function,
+            color_space,
+            rendering_intent,
+            [interpolate(visible_start), interpolate(visible_end)],
+            range.as_deref(),
+        )?;
+        for (local, color) in points {
+            let value = visible_start + local * (visible_end - visible_start);
+            segments.push(GradientSegment {
+                position: Some(
+                    (value - shading_domain[0]) / (shading_domain[1] - shading_domain[0]),
+                ),
+                color,
+                alpha: None,
+            });
+            if segments.len() > 10_000 {
+                return Err(OfdError::Limit(
+                    "PDF shading has too many color stops".into(),
+                ));
+            }
+        }
+    }
+    if segments.is_empty() {
+        let at_start = shading_domain[1] <= domain[0];
+        let index = if at_start { 0 } else { functions.len() - 1 };
+        let encoded = encode[2 * index + usize::from(!at_start)];
+        let color = pdf_linear_function_points(
+            pdf,
+            &functions[index],
+            color_space,
+            rendering_intent,
+            [encoded, encoded],
+            range.as_deref(),
+        )?[0]
+            .1;
+        return Ok([0.0, 1.0]
+            .map(|position| GradientSegment {
+                position: Some(position),
+                color,
+                alpha: None,
+            })
+            .to_vec());
+    }
+    if shading_domain[0] < domain[0] {
+        let color = segments[0].color;
+        segments.insert(
+            0,
+            GradientSegment {
+                position: Some(0.0),
+                color,
+                alpha: None,
+            },
+        );
+    }
+    if shading_domain[1] > domain[1] {
+        let color = segments
+            .last()
+            .expect("stitching has at least one color stop")
+            .color;
+        segments.push(GradientSegment {
+            position: Some(1.0),
+            color,
+            alpha: None,
+        });
+    }
+    if segments.len() > 10_000 {
+        return Err(OfdError::Limit(
+            "PDF shading has too many color stops".into(),
+        ));
+    }
+    Ok(segments)
+}
+
+fn import_pdf_shading(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    state: &GraphicsState,
+    name: &[u8],
+    visible: bool,
+) -> Result<(), OfdError> {
+    let (_, shading) = resource(page.pdf, page.resources, b"Shading", name)?;
+    let shading = shading
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF shading is not a dictionary".into()))?;
+    let shading_type = shading
+        .get(b"ShadingType")
+        .and_then(Object::as_i64)
+        .map_err(|_| OfdError::Invalid("PDF shading has no ShadingType".into()))?;
+    if !matches!(shading_type, 2 | 3) {
+        return Err(OfdError::Invalid("unsupported PDF shading type".into()));
+    }
+    let bbox_clip = if let Ok(bbox) = shading.get(b"BBox") {
+        let values = bbox
+            .as_array()
+            .map_err(|_| OfdError::Invalid("invalid PDF shading BBox".into()))?;
+        let values = numbers(&Operation::new("shading BBox", values.clone()), 4)?;
+        let [left, bottom, right, top] = values.as_slice() else {
+            unreachable!();
+        };
+        if right <= left || top <= bottom {
+            return Err(OfdError::Invalid("invalid PDF shading BBox".into()));
+        }
+        let corners = [
+            state.point(*left, *bottom, page.box_),
+            state.point(*right, *bottom, page.box_),
+            state.point(*right, *top, page.box_),
+            state.point(*left, *top, page.box_),
+        ];
+        if corners.iter().any(|point| {
+            ![point.0, point.1]
+                .iter()
+                .all(|value| value.is_finite() && value.abs() <= 1e9)
+        }) {
+            return Err(OfdError::Invalid(
+                "PDF shading BBox exceeds coordinate range".into(),
+            ));
+        }
+        let mut path = PathBuilder::default();
+        path.move_to(corners[0]);
+        path.line_to(corners[1])?;
+        path.line_to(corners[2])?;
+        path.line_to(corners[3])?;
+        path.close();
+        Some(PdfClip::Path {
+            commands: path.commands,
+            even_odd: false,
+        })
+    } else {
+        None
+    };
+    let coords = shading
+        .get(b"Coords")
+        .and_then(Object::as_array)
+        .map_err(|_| OfdError::Invalid("PDF shading has no Coords".into()))?;
+    let coords = numbers(
+        &Operation::new("shading Coords", coords.clone()),
+        if shading_type == 2 { 4 } else { 6 },
+    )?;
+    let (kind, start, end, reverse) = if shading_type == 2 {
+        let start = state.point(coords[0], coords[1], page.box_);
+        let end = state.point(coords[2], coords[3], page.box_);
+        if start == end {
+            return Err(OfdError::Invalid("invalid PDF axial shading axis".into()));
+        }
+        (GradientKind::Axial, start, end, false)
+    } else {
+        let scale = state.stroke_scale()? * MM_PER_PT;
+        let mut start = state.point(coords[0], coords[1], page.box_);
+        let mut end = state.point(coords[3], coords[4], page.box_);
+        let mut start_radius = coords[2] * scale;
+        let mut end_radius = coords[5] * scale;
+        if ![start_radius, end_radius]
+            .iter()
+            .all(|radius| radius.is_finite() && *radius <= 1e9)
+            || start_radius < 0.0
+            || end_radius < 0.0
+            || start_radius == end_radius
+        {
+            return Err(OfdError::Invalid("invalid PDF radial shading radii".into()));
+        }
+        let reverse = start_radius > end_radius;
+        if reverse {
+            std::mem::swap(&mut start, &mut end);
+            std::mem::swap(&mut start_radius, &mut end_radius);
+        }
+        if (end.0 - start.0).hypot(end.1 - start.1) + start_radius > end_radius {
+            return Err(OfdError::Invalid(
+                "PDF radial shading circles are not nested".into(),
+            ));
+        }
+        (
+            GradientKind::Radial {
+                start_radius,
+                end_radius,
+                eccentricity: 0.0,
+                angle: 0.0,
+            },
+            start,
+            end,
+            reverse,
+        )
+    };
+    if ![start.0, start.1, end.0, end.1]
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= 1e9)
+    {
+        return Err(OfdError::Invalid("invalid PDF shading coordinates".into()));
+    }
+    let (mut extend_start, mut extend_end) = shading
+        .get(b"Extend")
+        .ok()
+        .map(|value| {
+            let values = value
+                .as_array()
+                .map_err(|_| OfdError::Invalid("invalid PDF shading Extend".into()))?;
+            let [before, after] = values.as_slice() else {
+                return Err(OfdError::Invalid("invalid PDF shading Extend".into()));
+            };
+            Ok::<_, OfdError>((
+                before
+                    .as_bool()
+                    .map_err(|_| OfdError::Invalid("invalid PDF shading Extend".into()))?,
+                after
+                    .as_bool()
+                    .map_err(|_| OfdError::Invalid("invalid PDF shading Extend".into()))?,
+            ))
+        })
+        .transpose()?
+        .unwrap_or((false, false));
+    if reverse {
+        std::mem::swap(&mut extend_start, &mut extend_end);
+    }
+    let extend = u8::from(extend_start) | (u8::from(extend_end) << 1);
+    let shading_domain = if let Ok(domain) = shading.get(b"Domain") {
+        let values = domain
+            .as_array()
+            .map_err(|_| OfdError::Invalid("invalid PDF shading Domain".into()))?;
+        let values = numbers(&Operation::new("shading Domain", values.clone()), 2)?;
+        [values[0], values[1]]
+    } else {
+        [0.0, 1.0]
+    };
+    if shading_domain[0] >= shading_domain[1] {
+        return Err(OfdError::Invalid("invalid PDF shading Domain".into()));
+    }
+    let color_space = shading
+        .get(b"ColorSpace")
+        .map_err(|_| OfdError::Invalid("PDF shading has no ColorSpace".into()))?;
+    let color_space = parse_color_space(Some(page.pdf), Some(page.resources), color_space, 0)?;
+    if matches!(color_space, PdfColorSpace::Indexed { .. }) {
+        return Err(OfdError::Invalid(
+            "PDF axial and radial shading cannot use Indexed color".into(),
+        ));
+    }
+    let function = shading
+        .get(b"Function")
+        .map_err(|_| OfdError::Invalid("PDF shading has no Function".into()))?;
+    let mut segments = pdf_shading_segments(
+        page.pdf,
+        function,
+        &color_space,
+        state.rendering_intent,
+        shading_domain,
+    )?;
+    if reverse {
+        segments.reverse();
+        for segment in &mut segments {
+            segment.position = segment.position.map(|position| 1.0 - position);
+        }
+    }
+    if !visible {
+        return Ok(());
+    }
+    let width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
+    let height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
+    let path = format!("M 0 0 L {width} 0 L {width} {height} L 0 {height} C");
+    let id = output.add_path_object(
+        page.index,
+        &path,
+        [0.0, 0.0, width, height],
+        PathStyle {
+            fill: true,
+            stroke: false,
+            ..PathStyle::default()
+        },
+    )?;
+    output.set_page_object_gradient_fill(
+        page.index,
+        &id,
+        &GradientFillStyle {
+            kind,
+            start_point: [start.0, start.1],
+            end_point: [end.0, end.1],
+            segments,
+            map_type: GradientMapType::Direct,
+            map_unit: None,
+            extend,
+            fill_alpha: (state.fill_alpha < 1.0)
+                .then_some((state.fill_alpha * 255.0).round() as u8),
+        },
+    )?;
+    attach_blend_mode(output, page.index, &id, state.blend_mode)?;
+    let mut clips = state.clips.clone();
+    if let Some(clip) = bbox_clip {
+        clips.push(clip);
+    }
+    attach_clips(output, page.index, &id, "PathObject", &clips)
+}
+
+fn image_bytes(image: &lopdf::Stream) -> Result<(Vec<u8>, &'static str), OfdError> {
+    image_bytes_inner(image, false)
+}
+
+fn push_pdf_image_bytes(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> Result<(), OfdError> {
+    if bytes.len() > limit.saturating_sub(output.len()) {
+        return Err(OfdError::Limit("PDF image data is too large".into()));
+    }
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn decode_pdf_run_length(input: &[u8], limit: usize) -> Result<Vec<u8>, OfdError> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < input.len() {
+        let length = input[index];
+        index += 1;
+        if length == 128 {
+            return Ok(output);
+        }
+        if length < 128 {
+            let count = usize::from(length) + 1;
+            let end = index
+                .checked_add(count)
+                .filter(|end| *end <= input.len())
+                .ok_or_else(|| OfdError::Invalid("truncated PDF RunLength data".into()))?;
+            push_pdf_image_bytes(&mut output, &input[index..end], limit)?;
+            index = end;
+        } else {
+            let byte = *input
+                .get(index)
+                .ok_or_else(|| OfdError::Invalid("truncated PDF RunLength data".into()))?;
+            index += 1;
+            let count = 257 - usize::from(length);
+            if count > limit.saturating_sub(output.len()) {
+                return Err(OfdError::Limit("PDF image data is too large".into()));
+            }
+            output.resize(output.len() + count, byte);
+        }
+    }
+    Err(OfdError::Invalid("PDF RunLength data has no EOD".into()))
+}
+
+fn pdf_filter_space(byte: u8) -> bool {
+    matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
+fn decode_pdf_ascii_hex(input: &[u8], limit: usize) -> Result<Vec<u8>, OfdError> {
+    let mut output = Vec::new();
+    let mut high = None;
+    for &byte in input {
+        if pdf_filter_space(byte) {
+            continue;
+        }
+        if byte == b'>' {
+            if let Some(high) = high {
+                push_pdf_image_bytes(&mut output, &[high << 4], limit)?;
+            }
+            return Ok(output);
+        }
+        let digit = (byte as char)
+            .to_digit(16)
+            .ok_or_else(|| OfdError::Invalid("invalid PDF ASCIIHex digit".into()))?
+            as u8;
+        if let Some(high) = high.take() {
+            push_pdf_image_bytes(&mut output, &[(high << 4) | digit], limit)?;
+        } else {
+            high = Some(digit);
+        }
+    }
+    Err(OfdError::Invalid("PDF ASCIIHex data has no EOD".into()))
+}
+
+fn decode_pdf_ascii85(input: &[u8], limit: usize) -> Result<Vec<u8>, OfdError> {
+    let mut output = Vec::new();
+    let mut group = [0_u8; 5];
+    let mut count = 0;
+    let mut index = 0;
+    while index < input.len() {
+        let byte = input[index];
+        index += 1;
+        if pdf_filter_space(byte) {
+            continue;
+        }
+        if byte == b'~' {
+            if input.get(index) != Some(&b'>') {
+                return Err(OfdError::Invalid("invalid PDF ASCII85 EOD".into()));
+            }
+            if count == 1 {
+                return Err(OfdError::Invalid("invalid PDF ASCII85 final group".into()));
+            }
+            if count > 1 {
+                group[count..].fill(84);
+                let mut value = 0_u64;
+                for digit in group {
+                    value = value * 85 + u64::from(digit);
+                }
+                let value = u32::try_from(value)
+                    .map_err(|_| OfdError::Invalid("PDF ASCII85 value overflow".into()))?;
+                push_pdf_image_bytes(&mut output, &value.to_be_bytes()[..count - 1], limit)?;
+            }
+            return Ok(output);
+        }
+        if byte == b'z' {
+            if count != 0 {
+                return Err(OfdError::Invalid("invalid PDF ASCII85 zero group".into()));
+            }
+            push_pdf_image_bytes(&mut output, &[0; 4], limit)?;
+            continue;
+        }
+        if !(b'!'..=b'u').contains(&byte) {
+            return Err(OfdError::Invalid("invalid PDF ASCII85 digit".into()));
+        }
+        group[count] = byte - b'!';
+        count += 1;
+        if count == 5 {
+            let mut value = 0_u64;
+            for digit in group {
+                value = value * 85 + u64::from(digit);
+            }
+            let value = u32::try_from(value)
+                .map_err(|_| OfdError::Invalid("PDF ASCII85 value overflow".into()))?;
+            push_pdf_image_bytes(&mut output, &value.to_be_bytes(), limit)?;
+            count = 0;
+        }
+    }
+    Err(OfdError::Invalid("PDF ASCII85 data has no EOD".into()))
+}
+
+#[derive(Clone)]
+struct PdfImageFilterParams {
+    predictor: u8,
+    colors: usize,
+    bits: usize,
+    columns: usize,
+    early_change: u8,
+    fax: Option<PdfFaxParams>,
+    jbig2_globals: Option<Arc<[u8]>>,
+}
+
+#[derive(Clone, Copy)]
+struct PdfImageShape {
+    width: u32,
+    height: u32,
+    channels: usize,
+    bits: u32,
+}
+
+#[derive(Clone, Copy)]
+struct PdfFaxParams {
+    k: i64,
+    columns: u32,
+    rows: u32,
+    end_of_line: bool,
+    encoded_byte_align: bool,
+    end_of_block: bool,
+    black_is_1: bool,
+}
+
+impl Default for PdfFaxParams {
+    fn default() -> Self {
+        Self {
+            k: 0,
+            columns: 1728,
+            rows: 0,
+            end_of_line: false,
+            encoded_byte_align: false,
+            end_of_block: true,
+            black_is_1: false,
+        }
+    }
+}
+
+impl Default for PdfImageFilterParams {
+    fn default() -> Self {
+        Self {
+            predictor: 1,
+            colors: 1,
+            bits: 8,
+            columns: 1,
+            early_change: 1,
+            fax: None,
+            jbig2_globals: None,
+        }
+    }
+}
+
+fn pdf_fax_filter_params(
+    dict: &lopdf::Dictionary,
+    pdf: Option<&PdfDocument>,
+) -> Result<PdfFaxParams, OfdError> {
+    let mut params = PdfFaxParams::default();
+    for (key, value) in dict.iter() {
+        let value = resolve_pdf_filter_param(pdf, value)?;
+        match key.as_slice() {
+            b"K" => {
+                params.k = value
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF CCITT K is invalid".into()))?;
+                if params.k > i64::from(u32::MAX) {
+                    return Err(OfdError::Invalid("PDF CCITT K is too large".into()));
+                }
+            }
+            b"Columns" => {
+                let number = value
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF CCITT Columns is invalid".into()))?;
+                params.columns = u32::try_from(number)
+                    .ok()
+                    .filter(|number| (1..=64_000_000).contains(number))
+                    .ok_or_else(|| OfdError::Invalid("PDF CCITT Columns is invalid".into()))?;
+            }
+            b"Rows" => {
+                let number = value
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF CCITT Rows is invalid".into()))?;
+                params.rows = u32::try_from(number)
+                    .ok()
+                    .filter(|number| *number <= 64_000_000)
+                    .ok_or_else(|| OfdError::Invalid("PDF CCITT Rows is invalid".into()))?;
+            }
+            b"EndOfLine" => {
+                params.end_of_line = value
+                    .as_bool()
+                    .map_err(|_| OfdError::Invalid("PDF CCITT EndOfLine is invalid".into()))?;
+            }
+            b"EncodedByteAlign" => {
+                params.encoded_byte_align = value.as_bool().map_err(|_| {
+                    OfdError::Invalid("PDF CCITT EncodedByteAlign is invalid".into())
+                })?;
+            }
+            b"EndOfBlock" => {
+                params.end_of_block = value
+                    .as_bool()
+                    .map_err(|_| OfdError::Invalid("PDF CCITT EndOfBlock is invalid".into()))?;
+            }
+            b"BlackIs1" => {
+                params.black_is_1 = value
+                    .as_bool()
+                    .map_err(|_| OfdError::Invalid("PDF CCITT BlackIs1 is invalid".into()))?;
+            }
+            b"DamagedRowsBeforeError" => {
+                let number = value.as_i64().map_err(|_| {
+                    OfdError::Invalid("PDF CCITT DamagedRowsBeforeError is invalid".into())
+                })?;
+                if number != 0 {
+                    return Err(OfdError::Invalid(
+                        "PDF CCITT damaged row recovery is unsupported".into(),
+                    ));
+                }
+            }
+            _ => return Err(OfdError::Invalid("unsupported PDF CCITT parameter".into())),
+        }
+    }
+    Ok(params)
+}
+
+fn resolve_pdf_filter_param<'a>(
+    pdf: Option<&'a PdfDocument>,
+    value: &'a Object,
+) -> Result<&'a Object, OfdError> {
+    if matches!(value, Object::Reference(_)) {
+        Ok(pdf
+            .ok_or_else(|| OfdError::Invalid("PDF DecodeParms is unresolved".into()))?
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF DecodeParms: {error}")))?
+            .1)
+    } else {
+        Ok(value)
+    }
+}
+
+fn resolve_pdf_image_value<'a>(
+    pdf: Option<&'a PdfDocument>,
+    value: &'a Object,
+    field: &str,
+) -> Result<&'a Object, OfdError> {
+    if matches!(value, Object::Reference(_)) {
+        Ok(pdf
+            .ok_or_else(|| OfdError::Invalid(format!("PDF image {field} is unresolved")))?
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF image {field}: {error}")))?
+            .1)
+    } else {
+        Ok(value)
+    }
+}
+
+fn resolve_pdf_image_array<'a>(
+    pdf: Option<&'a PdfDocument>,
+    value: &'a Object,
+    field: &str,
+) -> Result<&'a Vec<Object>, OfdError> {
+    resolve_pdf_image_value(pdf, value, field)?
+        .as_array()
+        .map_err(|_| OfdError::Invalid(format!("PDF image {field} is not an array")))
+}
+
+fn pdf_image_u32_field(
+    pdf: Option<&PdfDocument>,
+    dict: &lopdf::Dictionary,
+    key: &[u8],
+    owner: &str,
+) -> Result<u32, OfdError> {
+    let name = String::from_utf8_lossy(key);
+    let field = if owner.is_empty() {
+        name.into_owned()
+    } else {
+        format!("{owner} {name}")
+    };
+    let value = dict
+        .get(key)
+        .map_err(|_| OfdError::Invalid(format!("invalid PDF image {field}")))?;
+    let number = resolve_pdf_image_value(pdf, value, &field)?
+        .as_i64()
+        .map_err(|_| OfdError::Invalid(format!("invalid PDF image {field}")))?;
+    u32::try_from(number).map_err(|_| OfdError::Invalid(format!("invalid PDF image {field}")))
+}
+
+fn pdf_image_is_mask(
+    pdf: Option<&PdfDocument>,
+    dict: &lopdf::Dictionary,
+) -> Result<bool, OfdError> {
+    let Ok(value) = dict.get(b"ImageMask") else {
+        return Ok(false);
+    };
+    resolve_pdf_image_value(pdf, value, "ImageMask")?
+        .as_bool()
+        .map_err(|_| OfdError::Invalid("invalid PDF image ImageMask".into()))
+}
+
+fn pdf_image_filter_params(
+    image: &lopdf::Stream,
+    pdf: Option<&PdfDocument>,
+    filters: &[&[u8]],
+) -> Result<Vec<PdfImageFilterParams>, OfdError> {
+    let mut result = vec![PdfImageFilterParams::default(); filters.len()];
+    let Ok(value) = image.dict.get(b"DecodeParms") else {
+        return Ok(result);
+    };
+    let value = resolve_pdf_filter_param(pdf, value)?;
+    let entries = if let Ok(array) = value.as_array() {
+        if array.len() != filters.len() {
+            return Err(OfdError::Invalid("PDF DecodeParms count is invalid".into()));
+        }
+        array.iter().collect::<Vec<_>>()
+    } else if filters.len() == 1 {
+        vec![value]
+    } else {
+        return Err(OfdError::Invalid("PDF DecodeParms must be an array".into()));
+    };
+    for (index, entry) in entries.into_iter().enumerate() {
+        let entry = resolve_pdf_filter_param(pdf, entry)?;
+        if matches!(entry, Object::Null) {
+            continue;
+        }
+        if filters[index] == b"JBIG2Decode" {
+            let dict = entry
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF DecodeParms is not a dictionary".into()))?;
+            for (key, value) in dict.iter() {
+                if key != b"JBIG2Globals" {
+                    return Err(OfdError::Invalid("unsupported PDF JBIG2 parameter".into()));
+                }
+                result[index].jbig2_globals = Some(pdf_jbig2_globals(pdf, value)?.into());
+            }
+            continue;
+        }
+        if matches!(filters[index], b"CCITTFaxDecode" | b"CCF") {
+            let dict = entry
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF DecodeParms is not a dictionary".into()))?;
+            result[index].fax = Some(pdf_fax_filter_params(dict, pdf)?);
+            continue;
+        }
+        if !matches!(
+            filters[index],
+            b"FlateDecode" | b"Fl" | b"LZWDecode" | b"LZW"
+        ) {
+            return Err(OfdError::Invalid(
+                "unsupported PDF filter parameters".into(),
+            ));
+        }
+        let dict = entry
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF DecodeParms is not a dictionary".into()))?;
+        let mut params = PdfImageFilterParams::default();
+        for (key, value) in dict.iter() {
+            let number = resolve_pdf_filter_param(pdf, value)?
+                .as_i64()
+                .map_err(|_| OfdError::Invalid("PDF filter parameter is not an integer".into()))?;
+            match key.as_slice() {
+                b"Predictor" if matches!(number, 1 | 2 | 10..=15) => {
+                    params.predictor = number as u8;
+                }
+                b"Colors" if (1..=16).contains(&number) => params.colors = number as usize,
+                b"BitsPerComponent" if matches!(number, 1 | 2 | 4 | 8 | 16) => {
+                    params.bits = number as usize;
+                }
+                b"Columns" if (1..=64_000_000).contains(&number) => {
+                    params.columns = number as usize;
+                }
+                b"EarlyChange"
+                    if matches!(filters[index], b"LZWDecode" | b"LZW")
+                        && matches!(number, 0 | 1) =>
+                {
+                    params.early_change = number as u8;
+                }
+                _ => return Err(OfdError::Invalid("unsupported PDF filter parameter".into())),
+            }
+        }
+        result[index] = params;
+    }
+    Ok(result)
+}
+
+fn decode_pdf_lzw(input: &[u8], limit: usize, early_change: u8) -> Result<Vec<u8>, OfdError> {
+    let mut decoder = if early_change == 1 {
+        weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+    } else {
+        weezl::decode::Decoder::new(weezl::BitOrder::Msb, 8)
+    };
+    let mut output = Vec::new();
+    let mut consumed = 0;
+    loop {
+        let mut chunk = [0_u8; 8192];
+        let result = decoder.decode_bytes(&input[consumed..], &mut chunk);
+        consumed += result.consumed_in;
+        push_pdf_image_bytes(&mut output, &chunk[..result.consumed_out], limit)?;
+        match result.status {
+            Ok(weezl::LzwStatus::Done) => return Ok(output),
+            Err(error) => return Err(OfdError::Invalid(format!("invalid PDF LZW data: {error}"))),
+            Ok(weezl::LzwStatus::Ok | weezl::LzwStatus::NoProgress)
+                if result.consumed_in == 0 && result.consumed_out == 0 =>
+            {
+                return Err(OfdError::Invalid("truncated PDF LZW data".into()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn pdf_predictor_row_bytes(params: &PdfImageFilterParams) -> Result<usize, OfdError> {
+    params
+        .columns
+        .checked_mul(params.colors)
+        .and_then(|samples| samples.checked_mul(params.bits))
+        .and_then(|bits| bits.checked_add(7))
+        .map(|bits| bits / 8)
+        .filter(|bytes| *bytes > 0 && *bytes as u64 <= MAX_ENTRY_BYTES)
+        .ok_or_else(|| OfdError::Limit("PDF predictor row is too large".into()))
+}
+
+fn pdf_predictor_raw_limit(
+    params: &PdfImageFilterParams,
+    output_limit: usize,
+) -> Result<usize, OfdError> {
+    if params.predictor < 10 {
+        return Ok(output_limit);
+    }
+    let row_bytes = pdf_predictor_row_bytes(params)?;
+    output_limit
+        .checked_add(output_limit / row_bytes)
+        .map(|limit| limit.min((MAX_ENTRY_BYTES * 2) as usize))
+        .ok_or_else(|| OfdError::Limit("PDF predictor data is too large".into()))
+}
+
+fn read_pdf_sample(row: &[u8], sample: usize, bits: usize) -> u32 {
+    if bits == 16 {
+        let offset = sample * 2;
+        return u32::from(u16::from_be_bytes([row[offset], row[offset + 1]]));
+    }
+    let offset = sample * bits;
+    (0..bits).fold(0_u32, |value, bit| {
+        let position = offset + bit;
+        (value << 1) | u32::from((row[position / 8] >> (7 - position % 8)) & 1)
+    })
+}
+
+fn write_pdf_sample(row: &mut [u8], sample: usize, bits: usize, value: u32) {
+    let offset = sample * bits;
+    for bit in 0..bits {
+        let position = offset + bit;
+        let mask = 1 << (7 - position % 8);
+        if (value >> (bits - 1 - bit)) & 1 == 1 {
+            row[position / 8] |= mask;
+        } else {
+            row[position / 8] &= !mask;
+        }
+    }
+}
+
+fn pdf_paeth(left: u8, up: u8, upper_left: u8) -> u8 {
+    let left = i32::from(left);
+    let up = i32::from(up);
+    let upper_left = i32::from(upper_left);
+    let estimate = left + up - upper_left;
+    let left_distance = (estimate - left).abs();
+    let up_distance = (estimate - up).abs();
+    let upper_left_distance = (estimate - upper_left).abs();
+    if left_distance <= up_distance && left_distance <= upper_left_distance {
+        left as u8
+    } else if up_distance <= upper_left_distance {
+        up as u8
+    } else {
+        upper_left as u8
+    }
+}
+
+fn apply_pdf_predictor(
+    mut data: Vec<u8>,
+    params: &PdfImageFilterParams,
+    limit: usize,
+) -> Result<Vec<u8>, OfdError> {
+    if params.predictor == 1 {
+        return Ok(data);
+    }
+    let row_bytes = pdf_predictor_row_bytes(params)?;
+    if params.predictor == 2 {
+        if !data.len().is_multiple_of(row_bytes) || data.len() > limit {
+            return Err(OfdError::Invalid(
+                "PDF TIFF predictor row length is invalid".into(),
+            ));
+        }
+        let samples = params.columns * params.colors;
+        let sample_mask = (1_u32 << params.bits) - 1;
+        for row in data.chunks_exact_mut(row_bytes) {
+            for sample in params.colors..samples {
+                let value = read_pdf_sample(row, sample, params.bits);
+                let left = read_pdf_sample(row, sample - params.colors, params.bits);
+                write_pdf_sample(row, sample, params.bits, (value + left) & sample_mask);
+            }
+        }
+        return Ok(data);
+    }
+    let encoded_row_bytes = row_bytes + 1;
+    if !data.len().is_multiple_of(encoded_row_bytes) {
+        return Err(OfdError::Invalid(
+            "PDF PNG predictor row length is invalid".into(),
+        ));
+    }
+    let rows = data.len() / encoded_row_bytes;
+    let output_len = rows
+        .checked_mul(row_bytes)
+        .filter(|length| *length <= limit)
+        .ok_or_else(|| OfdError::Limit("PDF predictor data is too large".into()))?;
+    let mut output = vec![0_u8; output_len];
+    let bytes_per_pixel = (params.colors * params.bits).div_ceil(8).max(1);
+    for row_index in 0..rows {
+        let encoded = &data[row_index * encoded_row_bytes..(row_index + 1) * encoded_row_bytes];
+        let filter = encoded[0];
+        if filter > 4 {
+            return Err(OfdError::Invalid("invalid PDF PNG predictor filter".into()));
+        }
+        for column in 0..row_bytes {
+            let offset = row_index * row_bytes + column;
+            let left = if column >= bytes_per_pixel {
+                output[offset - bytes_per_pixel]
+            } else {
+                0
+            };
+            let up = if row_index > 0 {
+                output[offset - row_bytes]
+            } else {
+                0
+            };
+            let upper_left = if row_index > 0 && column >= bytes_per_pixel {
+                output[offset - row_bytes - bytes_per_pixel]
+            } else {
+                0
+            };
+            let prediction = match filter {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                4 => pdf_paeth(left, up, upper_left),
+                _ => unreachable!(),
+            };
+            output[offset] = encoded[column + 1].wrapping_add(prediction);
+        }
+    }
+    Ok(output)
+}
+
+fn decode_pdf_fax(
+    data: &[u8],
+    params: PdfFaxParams,
+    shape: PdfImageShape,
+    expected: usize,
+) -> Result<Vec<u8>, OfdError> {
+    let PdfImageShape {
+        width,
+        height,
+        channels,
+        bits,
+    } = shape;
+    if bits != 1
+        || channels != 1
+        || params.columns != width
+        || (params.rows != 0 && params.rows != height)
+    {
+        return Err(OfdError::Invalid(
+            "PDF CCITT image dimensions or sample format are invalid".into(),
+        ));
+    }
+    let row_bytes = (width as usize)
+        .checked_add(7)
+        .ok_or_else(|| OfdError::Limit("PDF CCITT image is too large".into()))?
+        / 8;
+    if row_bytes.checked_mul(height as usize) != Some(expected) {
+        return Err(OfdError::Invalid(
+            "PDF CCITT image sample length is invalid".into(),
+        ));
+    }
+    let encoding = if params.k < 0 {
+        hayro_ccitt::EncodingMode::Group4
+    } else if params.k == 0 {
+        hayro_ccitt::EncodingMode::Group3_1D
+    } else {
+        hayro_ccitt::EncodingMode::Group3_2D { k: params.k as u32 }
+    };
+    let settings = hayro_ccitt::DecodeSettings {
+        columns: width,
+        rows: height,
+        end_of_block: params.end_of_block,
+        end_of_line: params.end_of_line,
+        rows_are_byte_aligned: params.encoded_byte_align,
+        encoding,
+        invert_black: params.black_is_1,
+    };
+    let mut decoder = BilevelSamples::new(width, height)?;
+    let mut context = hayro_ccitt::DecoderContext::new(settings);
+    hayro_ccitt::decode(data, &mut decoder, &mut context)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF CCITT data: {error}")))?;
+    decoder.finish()
+}
+
+fn decode_pdf_byte_filter(
+    data: &[u8],
+    filter: &[u8],
+    params: &PdfImageFilterParams,
+    limit: usize,
+) -> Result<Vec<u8>, OfdError> {
+    match filter {
+        b"FlateDecode" | b"Fl" => {
+            let raw_limit = pdf_predictor_raw_limit(params, limit)?;
+            let mut decoder = flate2::read::ZlibDecoder::new(data).take(raw_limit as u64 + 1);
+            let mut output = Vec::new();
+            decoder.read_to_end(&mut output).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF image compression: {error}"))
+            })?;
+            if output.len() > raw_limit {
+                return Err(OfdError::Limit("PDF image data is too large".into()));
+            }
+            apply_pdf_predictor(output, params, limit)
+        }
+        b"LZWDecode" | b"LZW" => {
+            let raw_limit = pdf_predictor_raw_limit(params, limit)?;
+            let output = decode_pdf_lzw(data, raw_limit, params.early_change)?;
+            apply_pdf_predictor(output, params, limit)
+        }
+        b"RunLengthDecode" | b"RL" => decode_pdf_run_length(data, limit),
+        b"ASCIIHexDecode" | b"AHx" => decode_pdf_ascii_hex(data, limit),
+        b"ASCII85Decode" | b"A85" => decode_pdf_ascii85(data, limit),
+        _ => Err(OfdError::Invalid("unsupported PDF image filter".into())),
+    }
+}
+
+fn pdf_byte_stream_data(
+    stream: &lopdf::Stream,
+    pdf: Option<&PdfDocument>,
+    owner: &str,
+) -> Result<Vec<u8>, OfdError> {
+    if stream.content.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit(format!("PDF {owner} is too large")));
+    }
+    let filters = if stream.dict.get(b"Filter").is_ok() {
+        stream
+            .filters()
+            .map_err(|_| OfdError::Invalid(format!("invalid PDF {owner} filters")))?
+    } else {
+        Vec::new()
+    };
+    if filters.iter().any(|filter| {
+        !matches!(
+            *filter,
+            b"FlateDecode"
+                | b"Fl"
+                | b"LZWDecode"
+                | b"LZW"
+                | b"RunLengthDecode"
+                | b"RL"
+                | b"ASCIIHexDecode"
+                | b"AHx"
+                | b"ASCII85Decode"
+                | b"A85"
+        )
+    }) {
+        return Err(OfdError::Invalid(format!("unsupported PDF {owner} filter")));
+    }
+    let params = pdf_image_filter_params(stream, pdf, &filters)?;
+    let mut data = stream.content.clone();
+    for (filter, params) in filters.into_iter().zip(&params) {
+        data = decode_pdf_byte_filter(&data, filter, params, MAX_ENTRY_BYTES as usize)?;
+    }
+    Ok(data)
+}
+
+fn pdf_jbig2_globals(pdf: Option<&PdfDocument>, value: &Object) -> Result<Vec<u8>, OfdError> {
+    use justbig2::segment::{SegmentHeader, SegmentType};
+
+    let stream = resolve_pdf_filter_param(pdf, value)?
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF JBIG2Globals is not a stream".into()))?;
+    let data = pdf_byte_stream_data(stream, pdf, "JBIG2Globals")?;
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let (header, length) = SegmentHeader::parse(&data[offset..])
+            .map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF JBIG2Globals segment: {error}"))
+            })?
+            .ok_or_else(|| OfdError::Invalid("truncated PDF JBIG2Globals segment".into()))?;
+        if header.page_association != 0
+            || matches!(
+                header.seg_type,
+                Some(
+                    SegmentType::PageInformation
+                        | SegmentType::EndOfPage
+                        | SegmentType::EndOfStripe
+                        | SegmentType::EndOfFile
+                )
+            )
+        {
+            return Err(OfdError::Invalid(
+                "PDF JBIG2Globals contains a page segment".into(),
+            ));
+        }
+        offset = offset
+            .checked_add(length)
+            .and_then(|offset| offset.checked_add(header.data_length as usize))
+            .filter(|end| header.data_length != u32::MAX && *end <= data.len())
+            .ok_or_else(|| OfdError::Invalid("truncated PDF JBIG2Globals segment".into()))?;
+    }
+    Ok(data)
+}
+
+fn decode_pdf_jbig2(
+    data: &[u8],
+    globals: Option<&[u8]>,
+    shape: PdfImageShape,
+    expected: usize,
+) -> Result<Vec<u8>, OfdError> {
+    use justbig2::segment::{SegmentHeader, SegmentType};
+
+    if shape.channels != 1 || shape.bits != 1 {
+        return Err(OfdError::Invalid(
+            "PDF JBIG2 requires one-bit samples".into(),
+        ));
+    }
+    if data.len().saturating_add(globals.map_or(0, <[u8]>::len)) as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF JBIG2 data is too large".into()));
+    }
+    let mut combined = Vec::new();
+    let checked = if let Some(globals) = globals {
+        combined.extend_from_slice(globals);
+        combined.extend_from_slice(data);
+        combined.as_slice()
+    } else {
+        data
+    };
+    crate::check_jbig2_dimensions(checked, false)?;
+    let mut offset = 0usize;
+    let mut page_count = 0usize;
+    while offset < checked.len() {
+        let (header, length) = SegmentHeader::parse(&checked[offset..])
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF JBIG2 segment: {error}")))?
+            .ok_or_else(|| OfdError::Invalid("truncated PDF JBIG2 segment".into()))?;
+        offset += length;
+        let end = offset
+            .checked_add(header.data_length as usize)
+            .filter(|end| header.data_length != u32::MAX && *end <= checked.len())
+            .ok_or_else(|| OfdError::Invalid("truncated PDF JBIG2 segment".into()))?;
+        if header.seg_type == Some(SegmentType::PageInformation) {
+            page_count += 1;
+            let dimensions = checked
+                .get(offset..offset + 8)
+                .ok_or_else(|| OfdError::Invalid("truncated PDF JBIG2 page information".into()))?;
+            if header.page_association != 1
+                || dimensions[..4] != shape.width.to_be_bytes()
+                || dimensions[4..] != shape.height.to_be_bytes()
+            {
+                return Err(OfdError::Invalid(
+                    "PDF JBIG2 dimensions do not match its samples".into(),
+                ));
+            }
+        }
+        offset = end;
+    }
+    if page_count != 1 {
+        return Err(OfdError::Invalid(
+            "PDF JBIG2 must contain exactly one page".into(),
+        ));
+    }
+    let image = hayro_jbig2::Image::new_embedded(data, globals)
+        .map_err(|error| OfdError::Invalid(format!("cannot parse PDF JBIG2: {error}")))?;
+    let row_bytes = (shape.width as usize).div_ceil(8);
+    if image.width() != shape.width
+        || image.height() != shape.height
+        || row_bytes.checked_mul(shape.height as usize) != Some(expected)
+    {
+        return Err(OfdError::Invalid(
+            "PDF JBIG2 dimensions do not match its samples".into(),
+        ));
+    }
+    let mut decoder = BilevelSamples::new(shape.width, shape.height)?;
+    image
+        .decode(&mut decoder)
+        .map_err(|error| OfdError::Invalid(format!("cannot decode PDF JBIG2: {error}")))?;
+    decoder.finish()
+}
+
+fn decode_pdf_image_filters(
+    content: &[u8],
+    filters: &[&[u8]],
+    params: &[PdfImageFilterParams],
+    expected: usize,
+    shape: PdfImageShape,
+) -> Result<Vec<u8>, OfdError> {
+    if params.len() != filters.len() {
+        return Err(OfdError::Invalid(
+            "PDF image filter parameters are invalid".into(),
+        ));
+    }
+    let mut decoded = content.to_vec();
+    for (index, filter) in filters.iter().enumerate() {
+        let limit = if index + 1 == filters.len() {
+            expected
+        } else {
+            MAX_ENTRY_BYTES as usize
+        };
+        let parameter = &params[index];
+        decoded = match *filter {
+            b"CCITTFaxDecode" | b"CCF" => {
+                decode_pdf_fax(&decoded, parameter.fax.unwrap_or_default(), shape, expected)?
+            }
+            b"JBIG2Decode" => decode_pdf_jbig2(
+                &decoded,
+                parameter.jbig2_globals.as_deref(),
+                shape,
+                expected,
+            )?,
+            _ => decode_pdf_byte_filter(&decoded, filter, parameter, limit)?,
+        };
+        if decoded.len() > limit {
+            return Err(OfdError::Limit("PDF image data is too large".into()));
+        }
+    }
+    if decoded.len() != expected {
+        return Err(OfdError::Invalid(
+            "PDF image sample length is invalid".into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+fn unblend_preblended_jpeg2000(
+    image: &lopdf::Stream,
+    pdf: Option<&PdfDocument>,
+    color_space: &hayro_jpeg2000::ColorSpace,
+    decoded: image::DynamicImage,
+) -> Result<image::DynamicImage, OfdError> {
+    let channel_count = match color_space {
+        hayro_jpeg2000::ColorSpace::Gray => 1,
+        hayro_jpeg2000::ColorSpace::RGB => 3,
+        _ => {
+            return Err(OfdError::Invalid(
+                "PDF JPEG2000 preblended color space is unsupported".into(),
+            ));
+        }
+    };
+    let mut matte = [0.0_f64; 3];
+    if let Ok(value) = image.dict.get(b"Matte") {
+        let values = resolve_pdf_image_array(pdf, value, "JPEG2000 Matte")?;
+        if values.len() != channel_count {
+            return Err(OfdError::Invalid(
+                "PDF JPEG2000 Matte length is invalid".into(),
+            ));
+        }
+        for (index, value) in values.iter().enumerate() {
+            let component = f64::from(
+                resolve_pdf_image_value(pdf, value, "JPEG2000 Matte value")?
+                    .as_float()
+                    .map_err(|_| OfdError::Invalid("PDF JPEG2000 Matte value is invalid".into()))?,
+            );
+            if !component.is_finite() || !(0.0..=1.0).contains(&component) {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG2000 Matte value is invalid".into(),
+                ));
+            }
+            matte[index] = component * 255.0;
+        }
+        if channel_count == 1 {
+            let gray = matte[0];
+            matte.fill(gray);
+        }
+    }
+    let mut pixels = decoded.to_rgba8();
+    for pixel in pixels.pixels_mut() {
+        let alpha = pixel[3];
+        for channel in 0..3 {
+            pixel[channel] = if alpha == 0 {
+                0
+            } else {
+                ((f64::from(pixel[channel]) * 255.0 - matte[channel] * f64::from(255 - alpha))
+                    / f64::from(alpha))
+                .round()
+                .clamp(0.0, 255.0) as u8
+            };
+        }
+    }
+    Ok(image::DynamicImage::ImageRgba8(pixels))
+}
+
+fn jpeg_component_count(bytes: &[u8]) -> Result<usize, OfdError> {
+    if !bytes.starts_with(b"\xff\xd8") {
+        return Err(OfdError::Invalid("invalid PDF JPEG image".into()));
+    }
+    let mut offset = 2;
+    while offset < bytes.len() {
+        if bytes[offset] != 0xff {
+            break;
+        }
+        while bytes.get(offset) == Some(&0xff) {
+            offset += 1;
+        }
+        let Some(&marker) = bytes.get(offset) else {
+            break;
+        };
+        offset += 1;
+        if matches!(marker, 0xd0..=0xd9 | 0x01) {
+            continue;
+        }
+        let Some(length_bytes) = bytes.get(offset..offset + 2) else {
+            break;
+        };
+        let length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+        if length < 2 || offset + length > bytes.len() {
+            break;
+        }
+        if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            return bytes
+                .get(offset + 7)
+                .copied()
+                .map(usize::from)
+                .filter(|channels| *channels > 0)
+                .ok_or_else(|| OfdError::Invalid("invalid PDF JPEG frame".into()));
+        }
+        offset += length;
+    }
+    Err(OfdError::Invalid("PDF JPEG has no frame".into()))
+}
+
+fn jpeg_adobe_color_transform(bytes: &[u8]) -> Result<Option<(u8, usize)>, OfdError> {
+    let mut offset = 2;
+    while offset < bytes.len() {
+        if bytes[offset] != 0xff {
+            break;
+        }
+        while bytes.get(offset) == Some(&0xff) {
+            offset += 1;
+        }
+        let Some(&marker) = bytes.get(offset) else {
+            break;
+        };
+        offset += 1;
+        if marker == 0xda {
+            break;
+        }
+        if matches!(marker, 0xd0..=0xd9 | 0x01) {
+            continue;
+        }
+        let length = bytes
+            .get(offset..offset + 2)
+            .map(|value| usize::from(u16::from_be_bytes([value[0], value[1]])))
+            .ok_or_else(|| OfdError::Invalid("invalid PDF JPEG marker".into()))?;
+        if length < 2 || offset + length > bytes.len() {
+            return Err(OfdError::Invalid("invalid PDF JPEG marker length".into()));
+        }
+        if marker == 0xee && length >= 14 && &bytes[offset + 2..offset + 7] == b"Adobe" {
+            let transform_offset = offset + 13;
+            let transform = bytes[transform_offset];
+            if transform > 2 {
+                return Err(OfdError::Invalid(
+                    "unsupported PDF JPEG Adobe transform".into(),
+                ));
+            }
+            return Ok(Some((transform, transform_offset)));
+        }
+        offset += length;
+    }
+    Ok(None)
+}
+
+fn pdf_jpeg_color_transform(
+    image: &lopdf::Stream,
+    pdf: Option<&PdfDocument>,
+    channels: usize,
+) -> Result<u8, OfdError> {
+    let mut transform = if channels == 3 { 1 } else { 0 };
+    if let Ok(value) = image.dict.get(b"DecodeParms") {
+        let value = resolve_pdf_filter_param(pdf, value)?;
+        let value = if let Ok(entries) = value.as_array() {
+            if entries.len() != 1 {
+                return Err(OfdError::Invalid("PDF DecodeParms count is invalid".into()));
+            }
+            resolve_pdf_filter_param(pdf, &entries[0])?
+        } else {
+            value
+        };
+        if !matches!(value, Object::Null) {
+            let dict = value.as_dict().map_err(|_| {
+                OfdError::Invalid("PDF JPEG DecodeParms is not a dictionary".into())
+            })?;
+            for (key, value) in dict.iter() {
+                if key != b"ColorTransform" {
+                    return Err(OfdError::Invalid("unsupported PDF JPEG DecodeParms".into()));
+                }
+                let number = resolve_pdf_filter_param(pdf, value)?
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("invalid PDF JPEG ColorTransform".into()))?;
+                transform = u8::try_from(number)
+                    .ok()
+                    .filter(|value| *value <= 1)
+                    .ok_or_else(|| OfdError::Invalid("invalid PDF JPEG ColorTransform".into()))?;
+            }
+        }
+    }
+    if let Some((adobe, _)) = jpeg_adobe_color_transform(&image.content)? {
+        transform = match adobe {
+            0 | 1 => adobe,
+            2 if channels == 4 => 1,
+            _ => {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG Adobe transform is invalid".into(),
+                ))
+            }
+        };
+    }
+    Ok(transform)
+}
+
+fn decode_three_channel_jpeg_samples(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    color_transform: u8,
+) -> Result<Vec<u8>, OfdError> {
+    if color_transform == 1 {
+        return Ok(decode_mask_image(bytes, "jpeg", width, height)?
+            .to_rgb8()
+            .into_raw());
+    }
+    let mut patched = bytes.to_vec();
+    if let Some((0, offset)) = jpeg_adobe_color_transform(bytes)? {
+        // zune treats Adobe transform 0 as CMYK even for a three-component JPEG.
+        // The output is requested in the encoded component order, so only its
+        // header interpretation needs to change.
+        patched[offset] = 1;
+    }
+    let options = DecoderOptions::default()
+        .set_max_width(width as usize)
+        .set_max_height(height as usize);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&patched), options);
+    decoder
+        .decode_headers()
+        .map_err(|error| OfdError::Invalid(format!("cannot read PDF JPEG: {error}")))?;
+    if decoder.dimensions() != Some((width as usize, height as usize)) {
+        return Err(OfdError::Invalid("PDF JPEG dimensions do not match".into()));
+    }
+    let input = decoder
+        .input_colorspace()
+        .ok_or_else(|| OfdError::Invalid("PDF JPEG has no color space".into()))?;
+    if !matches!(input, JpegColorSpace::YCbCr | JpegColorSpace::RGB) {
+        return Err(OfdError::Invalid("unsupported PDF JPEG color space".into()));
+    }
+    decoder.set_options(decoder.options().jpeg_set_out_colorspace(input));
+    let samples = decoder
+        .decode()
+        .map_err(|error| OfdError::Invalid(format!("cannot decode PDF JPEG: {error}")))?;
+    if samples.len() != width as usize * height as usize * 3 {
+        return Err(OfdError::Invalid(
+            "PDF JPEG sample length does not match dimensions".into(),
+        ));
+    }
+    Ok(samples)
+}
+
+fn ycck_to_cmyk(samples: &mut [u8]) {
+    for pixel in samples.chunks_exact_mut(4) {
+        let y = f64::from(pixel[0]);
+        let cb = f64::from(pixel[1]) - 128.0;
+        let cr = f64::from(pixel[2]) - 128.0;
+        pixel[0] = 255 - (y + 1.402 * cr).round().clamp(0.0, 255.0) as u8;
+        pixel[1] = 255
+            - (y - 0.344_136 * cb - 0.714_136 * cr)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        pixel[2] = 255 - (y + 1.772 * cb).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+fn yuvk_to_cmyk(samples: &mut [u8]) {
+    for pixel in samples.chunks_exact_mut(4) {
+        let y = f64::from(pixel[0]);
+        let cb = f64::from(pixel[1]) - 128.0;
+        let cr = f64::from(pixel[2]) - 128.0;
+        pixel[0] = (y + 1.402 * cr).round().clamp(0.0, 255.0) as u8;
+        pixel[1] = (y - 0.344_136 * cb - 0.714_136 * cr)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        pixel[2] = (y + 1.772 * cb).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+fn decode_four_channel_jpeg_samples(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, OfdError> {
+    if jpeg_component_count(bytes)? != 4 {
+        return Err(OfdError::Invalid(
+            "PDF CMYK JPEG channel count does not match color space".into(),
+        ));
+    }
+    let options = DecoderOptions::default()
+        .set_max_width(width as usize)
+        .set_max_height(height as usize)
+        .jpeg_set_out_colorspace(JpegColorSpace::CMYK);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    decoder
+        .decode_headers()
+        .map_err(|error| OfdError::Invalid(format!("cannot read PDF CMYK JPEG: {error}")))?;
+    let input_space = decoder.input_colorspace();
+    if !matches!(
+        input_space,
+        Some(JpegColorSpace::CMYK | JpegColorSpace::YCCK)
+    ) || decoder.dimensions() != Some((width as usize, height as usize))
+    {
+        return Err(OfdError::Invalid(
+            "PDF CMYK JPEG dimensions or color space do not match".into(),
+        ));
+    }
+    if input_space == Some(JpegColorSpace::YCCK) {
+        decoder.set_options(
+            decoder
+                .options()
+                .jpeg_set_out_colorspace(JpegColorSpace::YCCK),
+        );
+    }
+    let mut samples = decoder
+        .decode()
+        .map_err(|error| OfdError::Invalid(format!("cannot decode PDF CMYK JPEG: {error}")))?;
+    if input_space == Some(JpegColorSpace::YCCK) {
+        ycck_to_cmyk(&mut samples);
+    }
+    if samples.len() != width as usize * height as usize * 4 {
+        return Err(OfdError::Invalid(
+            "PDF CMYK JPEG sample length does not match dimensions".into(),
+        ));
+    }
+    Ok(samples)
+}
+
+fn decode_four_channel_pdf_jpeg_samples(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    unmarked_yuvk: bool,
+) -> Result<Vec<u8>, OfdError> {
+    let mut samples = decode_four_channel_jpeg_samples(bytes, width, height)?;
+    if unmarked_yuvk {
+        yuvk_to_cmyk(&mut samples);
+    }
+    Ok(samples)
+}
+
+fn image_bytes_inner(
+    image: &lopdf::Stream,
+    allow_soft_mask: bool,
+) -> Result<(Vec<u8>, &'static str), OfdError> {
+    image_bytes_inner_with_context(image, allow_soft_mask, None, None)
+}
+
+fn image_bytes_inner_with_context(
+    image: &lopdf::Stream,
+    allow_soft_mask: bool,
+    pdf: Option<&PdfDocument>,
+    resources: Option<&Object>,
+) -> Result<(Vec<u8>, &'static str), OfdError> {
+    let rendering_intent = match image.dict.get(b"Intent") {
+        Ok(value) => {
+            let value = if let Some(pdf) = pdf {
+                pdf.dereference(value)
+                    .map_err(|error| {
+                        OfdError::Invalid(format!("invalid PDF image Intent: {error}"))
+                    })?
+                    .1
+            } else {
+                value
+            };
+            pdf_rendering_intent(
+                value
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("PDF image Intent must be a name".into()))?,
+            )
+        }
+        Err(_) => RenderingIntent::RelativeColorimetric,
+    };
+    let width = pdf_image_u32_field(pdf, &image.dict, b"Width", "")?;
+    let height = pdf_image_u32_field(pdf, &image.dict, b"Height", "")?;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 64_000_000 {
+        return Err(OfdError::Limit("PDF image dimensions are too large".into()));
+    }
+    if (!allow_soft_mask && image.dict.get(b"SMask").is_ok())
+        || (image.dict.get(b"SMask").is_ok() && image.dict.get(b"Mask").is_ok())
+        || pdf_image_is_mask(pdf, &image.dict)?
+    {
+        return Err(OfdError::Invalid(
+            "PDF image masking or decoding is not supported".into(),
+        ));
+    }
+    let filters = if image.dict.get(b"Filter").is_ok() {
+        image
+            .filters()
+            .map_err(|_| OfdError::Invalid("invalid PDF image filters".into()))?
+    } else {
+        Vec::new()
+    };
+    if image.dict.get(b"DecodeParms").is_ok()
+        && filters.iter().any(|filter| *filter == b"JPXDecode")
+    {
+        return Err(OfdError::Invalid(
+            "unsupported PDF image DecodeParms".into(),
+        ));
+    }
+    if filters == [b"JPXDecode".as_slice()] {
+        if !is_jpeg2000(&image.content) {
+            return Err(OfdError::Invalid("invalid PDF JPEG2000 image".into()));
+        }
+        let header =
+            hayro_jpeg2000::Image::new(&image.content, &hayro_jpeg2000::DecodeSettings::default())
+                .map_err(|error| {
+                    OfdError::Invalid(format!("cannot read PDF JPEG2000 image: {error}"))
+                })?;
+        if header.width() != width || header.height() != height {
+            return Err(OfdError::Invalid(
+                "PDF JPEG2000 dimensions do not match its samples".into(),
+            ));
+        }
+        let remap_space = match image.dict.get(b"ColorSpace") {
+            Ok(value) => {
+                let mapped = parse_color_space(pdf, resources, value, 0)?;
+                if mapped.channels() != usize::from(header.color_space().num_channels()) {
+                    return Err(OfdError::Invalid(
+                        "PDF JPEG2000 color space does not match its samples".into(),
+                    ));
+                }
+                if matches!(
+                    (&mapped, header.color_space()),
+                    (PdfColorSpace::Gray, hayro_jpeg2000::ColorSpace::Gray)
+                        | (PdfColorSpace::Rgb, hayro_jpeg2000::ColorSpace::RGB)
+                        | (PdfColorSpace::Cmyk, hayro_jpeg2000::ColorSpace::CMYK)
+                ) {
+                    None
+                } else {
+                    Some(mapped)
+                }
+            }
+            Err(_) => None,
+        };
+        let embedded_mask = match image.dict.get(b"SMaskInData") {
+            Ok(value) => resolve_pdf_image_value(pdf, value, "JPEG2000 SMaskInData")?
+                .as_i64()
+                .map_err(|_| OfdError::Invalid("invalid PDF JPEG2000 SMaskInData".into()))?,
+            Err(_) => 0,
+        };
+        if !matches!(embedded_mask, 0..=2) {
+            return Err(OfdError::Invalid(
+                "unsupported PDF JPEG2000 SMaskInData".into(),
+            ));
+        }
+        if embedded_mask != 0 && image.dict.get(b"SMask").is_ok() {
+            return Err(OfdError::Invalid(
+                "PDF JPEG2000 cannot combine embedded and external soft masks".into(),
+            ));
+        }
+        if embedded_mask != 0 && !header.has_alpha() {
+            return Err(OfdError::Invalid(
+                "PDF JPEG2000 has no embedded opacity channel".into(),
+            ));
+        }
+        let mut decoded = decode_jpeg2000(&image.content)?;
+        if embedded_mask == 2 {
+            decoded = unblend_preblended_jpeg2000(image, pdf, header.color_space(), decoded)?;
+        }
+        let remapped = remap_space.is_some();
+        if let Some(space) = remap_space {
+            if u64::from(width) * u64::from(height) * 4 > MAX_ENTRY_BYTES {
+                return Err(OfdError::Limit("PDF JPEG2000 image is too large".into()));
+            }
+            let channels = space.channels();
+            if channels > 4 {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG2000 default color space has too many channels".into(),
+                ));
+            }
+            let mut context = hayro_jpeg2000::DecoderContext::default();
+            let samples = header.decode(&mut context).map_err(|error| {
+                OfdError::Invalid(format!("cannot decode PDF JPEG2000 samples: {error}"))
+            })?;
+            let components = samples.components();
+            if components.len() < channels
+                || components[..channels].iter().any(|component| {
+                    component.samples().len() != width as usize * height as usize
+                        || !(1..=16).contains(&component.bit_depth())
+                })
+            {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG2000 color components are invalid".into(),
+                ));
+            }
+            let unblended = (embedded_mask == 2).then(|| decoded.to_rgb8());
+            let mut pixels = decoded.to_rgba8();
+            for (index, pixel) in pixels.pixels_mut().enumerate() {
+                let mut values = [0.0; 4];
+                for (channel, component) in components[..channels].iter().enumerate() {
+                    let sample = if let Some(unblended) = &unblended {
+                        f64::from(
+                            unblended.get_pixel(index as u32 % width, index as u32 / width)
+                                [channel],
+                        ) / 255.0
+                    } else {
+                        let maximum = (1_u32 << component.bit_depth()) - 1;
+                        f64::from(component.samples()[index]) / f64::from(maximum)
+                    };
+                    values[channel] = sample.clamp(0.0, 1.0);
+                }
+                let rgb = space.color_with_intent(&values[..channels], rendering_intent)?;
+                pixel.0[..3].copy_from_slice(&rgb);
+            }
+            decoded = image::DynamicImage::ImageRgba8(pixels);
+        }
+        if let Ok(value) = image.dict.get(b"Mask") {
+            let channels = usize::from(header.color_space().num_channels());
+            let values = resolve_pdf_image_array(pdf, value, "JPEG2000 Mask")?;
+            if values.len() != channels * 2 {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG2000 Mask length is invalid".into(),
+                ));
+            }
+            if u64::from(width) * u64::from(height) * 4 > MAX_ENTRY_BYTES {
+                return Err(OfdError::Limit("PDF masked image is too large".into()));
+            }
+            let mut context = hayro_jpeg2000::DecoderContext::default();
+            let samples = header.decode(&mut context).map_err(|error| {
+                OfdError::Invalid(format!("cannot decode PDF JPEG2000 samples: {error}"))
+            })?;
+            let components = samples.components();
+            if components.len() < channels {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG2000 Mask has too few color components".into(),
+                ));
+            }
+            if components[..channels]
+                .iter()
+                .any(|component| component.samples().len() != width as usize * height as usize)
+            {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG2000 Mask sample dimensions are invalid".into(),
+                ));
+            }
+            let mut ranges = Vec::with_capacity(channels);
+            for (pair, component) in values.chunks_exact(2).zip(components) {
+                let bits = component.bit_depth();
+                if !(1..=16).contains(&bits) {
+                    return Err(OfdError::Invalid(
+                        "unsupported PDF JPEG2000 Mask bit depth".into(),
+                    ));
+                }
+                let maximum = (1_i64 << bits) - 1;
+                let low = resolve_pdf_image_value(pdf, &pair[0], "JPEG2000 Mask value")?
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF JPEG2000 Mask value is invalid".into()))?;
+                let high = resolve_pdf_image_value(pdf, &pair[1], "JPEG2000 Mask value")?
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF JPEG2000 Mask value is invalid".into()))?;
+                if low < 0 || high < low || high > maximum {
+                    return Err(OfdError::Invalid(
+                        "PDF JPEG2000 Mask range is invalid".into(),
+                    ));
+                }
+                ranges.push((low as u32, high as u32));
+            }
+            let mut pixels = decoded.to_rgba8();
+            for (index, pixel) in pixels.pixels_mut().enumerate() {
+                let masked =
+                    components[..channels]
+                        .iter()
+                        .zip(&ranges)
+                        .all(|(component, range)| {
+                            let sample = component.samples()[index].round() as u32;
+                            range.0 <= sample && sample <= range.1
+                        });
+                if masked {
+                    pixel[3] = 0;
+                } else if embedded_mask == 0 {
+                    pixel[3] = 255;
+                }
+            }
+            let mut output = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(pixels)
+                .write_to(&mut output, image::ImageFormat::Png)
+                .map_err(|error| {
+                    OfdError::Invalid(format!("cannot encode PDF JPEG2000 image: {error}"))
+                })?;
+            return Ok((output.into_inner(), "png"));
+        }
+        if remapped || (header.has_alpha() && embedded_mask == 0) || embedded_mask == 2 {
+            let mut output = std::io::Cursor::new(Vec::new());
+            let converted = if embedded_mask == 0 {
+                image::DynamicImage::ImageRgb8(decoded.to_rgb8())
+            } else {
+                decoded
+            };
+            converted
+                .write_to(&mut output, image::ImageFormat::Png)
+                .map_err(|error| {
+                    OfdError::Invalid(format!("cannot encode PDF JPEG2000 image: {error}"))
+                })?;
+            return Ok((output.into_inner(), "png"));
+        }
+        return Ok((
+            image.content.clone(),
+            if image.content.starts_with(b"\xff\x4f\xff\x51") {
+                "j2k"
+            } else {
+                "jp2"
+            },
+        ));
+    }
+    let color_space = parse_color_space(
+        pdf,
+        resources,
+        image
+            .dict
+            .get(b"ColorSpace")
+            .map_err(|_| OfdError::Invalid("PDF image has no color space".into()))?,
+        0,
+    )?;
+    let channels = color_space.channels();
+    let png_color = match color_space {
+        PdfColorSpace::Gray => png::ColorType::Grayscale,
+        PdfColorSpace::CalGray { .. }
+        | PdfColorSpace::CalRgb { .. }
+        | PdfColorSpace::Lab { .. }
+        | PdfColorSpace::Rgb
+        | PdfColorSpace::Cmyk
+        | PdfColorSpace::Indexed { .. }
+        | PdfColorSpace::Icc { .. } => png::ColorType::Rgb,
+    };
+    let bits = pdf_image_u32_field(pdf, &image.dict, b"BitsPerComponent", "")?;
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+        return Err(OfdError::Invalid("unsupported PDF image bit depth".into()));
+    }
+    let maximum = (1_u32 << bits) - 1;
+    let mask = match image.dict.get(b"Mask") {
+        Ok(value) => {
+            let values = resolve_pdf_image_array(pdf, value, "Mask")?;
+            if values.len() != channels * 2 {
+                return Err(OfdError::Invalid("PDF image Mask length is invalid".into()));
+            }
+            let mut ranges = Vec::with_capacity(channels);
+            for pair in values.chunks_exact(2) {
+                let low = resolve_pdf_image_value(pdf, &pair[0], "Mask value")?
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF image Mask value is invalid".into()))?;
+                let high = resolve_pdf_image_value(pdf, &pair[1], "Mask value")?
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF image Mask value is invalid".into()))?;
+                if low < 0 || high < low || high > i64::from(maximum) {
+                    return Err(OfdError::Invalid("PDF image Mask range is invalid".into()));
+                }
+                ranges.push((low as u32, high as u32));
+            }
+            Some(ranges)
+        }
+        Err(_) => None,
+    };
+    if mask.is_some() && u64::from(width) * u64::from(height) * 4 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF masked image is too large".into()));
+    }
+    let decode = match image.dict.get(b"Decode") {
+        Ok(value) => {
+            let values = resolve_pdf_image_array(pdf, value, "Decode")?;
+            if values.len() != channels * 2 {
+                return Err(OfdError::Invalid(
+                    "PDF image Decode length is invalid".into(),
+                ));
+            }
+            values
+                .iter()
+                .map(|value| {
+                    let number = f64::from(
+                        resolve_pdf_image_value(pdf, value, "Decode value")?
+                            .as_float()
+                            .map_err(|_| {
+                                OfdError::Invalid("PDF image Decode value is not numeric".into())
+                            })?,
+                    );
+                    if !number.is_finite() || number.abs() > 1e9 {
+                        return Err(OfdError::Invalid(
+                            "PDF image Decode value is invalid".into(),
+                        ));
+                    }
+                    Ok(number)
+                })
+                .collect::<Result<Vec<_>, OfdError>>()?
+        }
+        Err(_) => color_space.default_decode(maximum),
+    };
+    if filters == [b"DCTDecode".as_slice()] {
+        if bits != 8 {
+            return Err(OfdError::Invalid(
+                "PDF JPEG image decoding is not supported".into(),
+            ));
+        }
+        if !image.content.starts_with(b"\xff\xd8\xff") {
+            return Err(OfdError::Invalid("invalid PDF JPEG image".into()));
+        }
+        let color_transform = pdf_jpeg_color_transform(image, pdf, channels)?;
+        let unmarked_yuvk = channels == 4
+            && color_transform == 1
+            && jpeg_adobe_color_transform(&image.content)?.is_none();
+        if matches!(
+            color_space,
+            PdfColorSpace::Icc { .. }
+                | PdfColorSpace::CalGray { .. }
+                | PdfColorSpace::CalRgb { .. }
+                | PdfColorSpace::Lab { .. }
+                | PdfColorSpace::Indexed { .. }
+        ) {
+            let sample_len = u64::from(width) * u64::from(height) * channels as u64;
+            if sample_len > MAX_ENTRY_BYTES {
+                return Err(OfdError::Limit("PDF image data is too large".into()));
+            }
+            if jpeg_component_count(&image.content)? != channels {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG channel count does not match color space".into(),
+                ));
+            }
+            let samples = if channels == 4 {
+                decode_four_channel_pdf_jpeg_samples(&image.content, width, height, unmarked_yuvk)?
+            } else {
+                if channels == 1 {
+                    decode_mask_image(&image.content, "jpeg", width, height)?
+                        .to_luma8()
+                        .into_raw()
+                } else {
+                    decode_three_channel_jpeg_samples(
+                        &image.content,
+                        width,
+                        height,
+                        color_transform,
+                    )?
+                }
+            };
+            if samples.len() != sample_len as usize {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG sample length does not match dimensions".into(),
+                ));
+            }
+            let output_channels = if mask.is_some() { 4 } else { 3 };
+            let output_len = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixels| pixels.checked_mul(output_channels))
+                .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?;
+            if output_len as u64 > MAX_ENTRY_BYTES {
+                return Err(OfdError::Limit("PDF image data is too large".into()));
+            }
+            let mut converted = Vec::with_capacity(output_len);
+            for sample in samples.chunks_exact(channels) {
+                let mut mapped = [0.0; 4];
+                for (channel, value) in sample.iter().enumerate() {
+                    let pair = &decode[channel * 2..channel * 2 + 2];
+                    let scaled = pair[0] + (pair[1] - pair[0]) * f64::from(*value) / 255.0;
+                    mapped[channel] = if matches!(
+                        color_space,
+                        PdfColorSpace::Lab { .. } | PdfColorSpace::Indexed { .. }
+                    ) {
+                        scaled
+                    } else {
+                        scaled.clamp(0.0, 1.0)
+                    };
+                }
+                let rgb = color_space.color_with_intent(&mapped[..channels], rendering_intent)?;
+                converted.extend_from_slice(&rgb);
+                if let Some(ranges) = &mask {
+                    converted.push(
+                        if sample.iter().zip(ranges).all(|(value, (low, high))| {
+                            *low <= u32::from(*value) && u32::from(*value) <= *high
+                        }) {
+                            0
+                        } else {
+                            255
+                        },
+                    );
+                }
+            }
+            let mut output = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut output, width, height);
+                encoder.set_color(if mask.is_some() {
+                    png::ColorType::Rgba
+                } else {
+                    png::ColorType::Rgb
+                });
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .and_then(|mut writer| writer.write_image_data(&converted))
+                    .map_err(|error| {
+                        OfdError::Invalid(format!("cannot encode PDF image: {error}"))
+                    })?;
+            }
+            return Ok((output, "png"));
+        }
+        if channels == 4 {
+            let default_decode = decode.chunks_exact(2).all(|pair| pair == [0.0, 1.0]);
+            let output_channels = if mask.is_some() { 4 } else { 3 };
+            let output_len = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixels| pixels.checked_mul(output_channels))
+                .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?;
+            if output_len as u64 > MAX_ENTRY_BYTES {
+                return Err(OfdError::Limit("PDF image data is too large".into()));
+            }
+            let default_rgb = if default_decode && !unmarked_yuvk {
+                Some(
+                    decode_mask_image(&image.content, "jpeg", width, height)?
+                        .to_rgb8()
+                        .into_raw(),
+                )
+            } else {
+                None
+            };
+            let samples = if mask.is_some() || !default_decode || unmarked_yuvk {
+                Some(decode_four_channel_pdf_jpeg_samples(
+                    &image.content,
+                    width,
+                    height,
+                    unmarked_yuvk,
+                )?)
+            } else {
+                None
+            };
+            let mut pixels = Vec::with_capacity(output_len);
+            for index in 0..width as usize * height as usize {
+                let color = if let Some(rgb) = &default_rgb {
+                    [rgb[index * 3], rgb[index * 3 + 1], rgb[index * 3 + 2]]
+                } else {
+                    let samples = samples.as_ref().unwrap();
+                    let sample = &samples[index * 4..index * 4 + 4];
+                    let mapped: [f64; 4] = std::array::from_fn(|channel| {
+                        let pair = &decode[channel * 2..channel * 2 + 2];
+                        (pair[0] + (pair[1] - pair[0]) * f64::from(sample[channel]) / 255.0)
+                            .clamp(0.0, 1.0)
+                    });
+                    cmyk_color(&mapped)?
+                };
+                pixels.extend_from_slice(&color);
+                if let Some(mask) = &mask {
+                    let samples = samples.as_ref().unwrap();
+                    let sample = &samples[index * 4..index * 4 + 4];
+                    pixels.push(
+                        if sample.iter().zip(mask).all(|(value, (low, high))| {
+                            *low <= u32::from(*value) && u32::from(*value) <= *high
+                        }) {
+                            0
+                        } else {
+                            255
+                        },
+                    );
+                }
+            }
+            let mut output = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut output, width, height);
+                encoder.set_color(if mask.is_some() {
+                    png::ColorType::Rgba
+                } else {
+                    png::ColorType::Rgb
+                });
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .and_then(|mut writer| writer.write_image_data(&pixels))
+                    .map_err(|error| {
+                        OfdError::Invalid(format!("cannot encode PDF image: {error}"))
+                    })?;
+            }
+            return Ok((output, "png"));
+        }
+        let default_decode = decode.chunks_exact(2).all(|pair| pair == [0.0, 1.0]);
+        if mask.is_some() || !default_decode || (channels == 3 && color_transform == 0) {
+            if jpeg_component_count(&image.content)? != channels {
+                return Err(OfdError::Invalid(
+                    "PDF JPEG channel count does not match color space".into(),
+                ));
+            }
+            let samples = if channels == 3 {
+                decode_three_channel_jpeg_samples(&image.content, width, height, color_transform)?
+            } else {
+                decode_mask_image(&image.content, "jpeg", width, height)?
+                    .to_luma8()
+                    .into_raw()
+            };
+            let output_channels = if mask.is_some() { 4 } else { 3 };
+            let output_len = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixels| pixels.checked_mul(output_channels))
+                .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?;
+            if output_len as u64 > MAX_ENTRY_BYTES {
+                return Err(OfdError::Limit("PDF image data is too large".into()));
+            }
+            let mut pixels = Vec::with_capacity(output_len);
+            for pixel in samples.chunks_exact(channels) {
+                if channels == 3 {
+                    for (channel, sample) in pixel.iter().enumerate() {
+                        let pair = &decode[channel * 2..channel * 2 + 2];
+                        let mapped = pair[0] + (pair[1] - pair[0]) * f64::from(*sample) / 255.0;
+                        pixels.push((mapped.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    }
+                } else {
+                    let mapped = decode[0] + (decode[1] - decode[0]) * f64::from(pixel[0]) / 255.0;
+                    pixels.extend_from_slice(&[(mapped.clamp(0.0, 1.0) * 255.0).round() as u8; 3]);
+                }
+                if let Some(mask) = &mask {
+                    pixels.push(
+                        if pixel.iter().zip(mask).all(|(sample, (low, high))| {
+                            *low <= u32::from(*sample) && u32::from(*sample) <= *high
+                        }) {
+                            0
+                        } else {
+                            255
+                        },
+                    );
+                }
+            }
+            let mut output = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut output, width, height);
+                encoder.set_color(if mask.is_some() {
+                    png::ColorType::Rgba
+                } else {
+                    png::ColorType::Rgb
+                });
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .and_then(|mut writer| writer.write_image_data(&pixels))
+                    .map_err(|error| {
+                        OfdError::Invalid(format!("cannot encode PDF image: {error}"))
+                    })?;
+            }
+            return Ok((output, "png"));
+        }
+        return Ok((image.content.clone(), "jpeg"));
+    }
+    let row_bits = (width as usize)
+        .checked_mul(channels)
+        .and_then(|samples| samples.checked_mul(bits as usize))
+        .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?;
+    let row_bytes = row_bits
+        .checked_add(7)
+        .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?
+        / 8;
+    let expected = row_bytes
+        .checked_mul(height as usize)
+        .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?;
+    if expected as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF image data is too large".into()));
+    }
+    let params = pdf_image_filter_params(image, pdf, &filters)?;
+    let pixels = decode_pdf_image_filters(
+        &image.content,
+        &filters,
+        &params,
+        expected,
+        PdfImageShape {
+            width,
+            height,
+            channels,
+            bits,
+        },
+    )?;
+    let converted_space = matches!(
+        color_space,
+        PdfColorSpace::Icc { .. }
+            | PdfColorSpace::CalGray { .. }
+            | PdfColorSpace::CalRgb { .. }
+            | PdfColorSpace::Lab { .. }
+    );
+    let output_channels = if matches!(
+        color_space,
+        PdfColorSpace::Cmyk
+            | PdfColorSpace::Indexed { .. }
+            | PdfColorSpace::Icc { .. }
+            | PdfColorSpace::CalGray { .. }
+            | PdfColorSpace::CalRgb { .. }
+            | PdfColorSpace::Lab { .. }
+    ) {
+        3
+    } else {
+        channels
+    };
+    let expanded_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(output_channels))
+        .ok_or_else(|| OfdError::Limit("PDF image data is too large".into()))?;
+    if expanded_len as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF image data is too large".into()));
+    }
+    let mut expanded = Vec::with_capacity(if mask.is_some() {
+        width as usize * height as usize * 4
+    } else {
+        expanded_len
+    });
+    for row in pixels.chunks_exact(row_bytes) {
+        for pixel in 0..width as usize {
+            if matches!(color_space, PdfColorSpace::Indexed { .. }) {
+                let sample = read_pdf_sample(row, pixel, bits as usize);
+                let pair = &decode[..2];
+                let index = pair[0] + (pair[1] - pair[0]) * f64::from(sample) / f64::from(maximum);
+                expanded
+                    .extend_from_slice(&color_space.color_with_intent(&[index], rendering_intent)?);
+                if let Some(ranges) = &mask {
+                    let (low, high) = ranges[0];
+                    expanded.push(if low <= sample && sample <= high {
+                        0
+                    } else {
+                        255
+                    });
+                }
+                continue;
+            }
+            let mut masked = mask.is_some();
+            let mut gray = 0_u8;
+            let mut mapped_channels = [0.0; 4];
+            for channel in 0..channels {
+                let sample_index = pixel * channels + channel;
+                let sample = read_pdf_sample(row, sample_index, bits as usize);
+                if let Some(ranges) = &mask {
+                    let (low, high) = ranges[channel];
+                    masked &= low <= sample && sample <= high;
+                }
+                let pair = &decode[channel * 2..channel * 2 + 2];
+                let mapped = pair[0] + (pair[1] - pair[0]) * f64::from(sample) / f64::from(maximum);
+                let value = (mapped.clamp(0.0, 1.0) * 255.0).round() as u8;
+                if converted_space || channels == 4 {
+                    mapped_channels[channel] = if matches!(color_space, PdfColorSpace::Lab { .. }) {
+                        mapped
+                    } else {
+                        mapped.clamp(0.0, 1.0)
+                    };
+                } else if channels == 1 && mask.is_some() {
+                    gray = value;
+                } else {
+                    expanded.push(value);
+                }
+            }
+            if converted_space {
+                expanded.extend_from_slice(
+                    &color_space
+                        .color_with_intent(&mapped_channels[..channels], rendering_intent)?,
+                );
+            } else if channels == 4 {
+                expanded.extend_from_slice(&cmyk_color(&mapped_channels)?);
+            }
+            if mask.is_some() {
+                if channels == 1 && !converted_space {
+                    expanded.extend_from_slice(&[gray; 3]);
+                }
+                expanded.push(if masked { 0 } else { 255 });
+            }
+        }
+    }
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(if mask.is_some() {
+            png::ColorType::Rgba
+        } else {
+            png_color
+        });
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&expanded))
+            .map_err(|error| OfdError::Invalid(format!("cannot encode PDF image: {error}")))?;
+    }
+    Ok((output, "png"))
+}
+
+fn decode_mask_image(
+    bytes: &[u8],
+    format: &str,
+    width: u32,
+    height: u32,
+) -> Result<image::DynamicImage, OfdError> {
+    let format = match format {
+        "png" => image::ImageFormat::Png,
+        "jpeg" => image::ImageFormat::Jpeg,
+        "jp2" | "j2k" => {
+            let decoded = decode_jpeg2000(bytes)?;
+            if decoded.width() != width || decoded.height() != height {
+                return Err(OfdError::Invalid(
+                    "PDF image dimensions do not match its samples".into(),
+                ));
+            }
+            return Ok(decoded);
+        }
+        _ => return Err(OfdError::Invalid("unsupported PDF image format".into())),
+    };
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(width);
+    limits.max_image_height = Some(height);
+    limits.max_alloc = Some(MAX_ENTRY_BYTES);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| OfdError::Invalid(format!("cannot decode PDF masked image: {error}")))?;
+    if decoded.width() != width || decoded.height() != height {
+        return Err(OfdError::Invalid(
+            "PDF image dimensions do not match its samples".into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+fn image_bytes_with_soft_mask(
+    pdf: &PdfDocument,
+    resources: &Object,
+    image: &lopdf::Stream,
+) -> Result<(Vec<u8>, &'static str), OfdError> {
+    if image.dict.get(b"Mask").is_ok() && image.dict.get(b"SMask").is_ok() {
+        return Err(OfdError::Invalid(
+            "PDF image cannot have both Mask and SMask".into(),
+        ));
+    }
+    if let Ok(reference) = image.dict.get(b"Mask") {
+        if matches!(reference, Object::Reference(_)) {
+            let (_, value) = pdf
+                .dereference(reference)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF image Mask: {error}")))?;
+            if matches!(value, Object::Stream(_)) {
+                return image_bytes_with_explicit_mask(pdf, resources, image, reference);
+            }
+        }
+    }
+    let Ok(reference) = image.dict.get(b"SMask") else {
+        return image_bytes_inner_with_context(image, false, Some(pdf), Some(resources));
+    };
+    let (_, mask) = pdf
+        .dereference(reference)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF image SMask: {error}")))?;
+    let mask = mask
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF image SMask is not a stream".into()))?;
+    if mask.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image".as_slice())
+        || mask.dict.get(b"ColorSpace").and_then(Object::as_name).ok()
+            != Some(b"DeviceGray".as_slice())
+    {
+        return Err(OfdError::Invalid(
+            "unsupported PDF image SMask properties".into(),
+        ));
+    }
+    let width = pdf_image_u32_field(Some(pdf), &image.dict, b"Width", "")?;
+    let height = pdf_image_u32_field(Some(pdf), &image.dict, b"Height", "")?;
+    if u64::from(width) * u64::from(height) * 4 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF masked image is too large".into()));
+    }
+    let mask_width = pdf_image_u32_field(Some(pdf), &mask.dict, b"Width", "SMask")?;
+    let mask_height = pdf_image_u32_field(Some(pdf), &mask.dict, b"Height", "SMask")?;
+    if mask_width == 0
+        || mask_height == 0
+        || u64::from(mask_width) * u64::from(mask_height) > MAX_ENTRY_BYTES
+    {
+        return Err(OfdError::Limit("PDF image SMask is too large".into()));
+    }
+    let interpolate = match mask.dict.get(b"Interpolate") {
+        Ok(value) => value
+            .as_bool()
+            .map_err(|_| OfdError::Invalid("invalid PDF image SMask Interpolate".into()))?,
+        Err(_) => false,
+    };
+    let matte = match mask.dict.get(b"Matte") {
+        Ok(value) => {
+            let (_, value) = pdf.dereference(value).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF image SMask Matte: {error}"))
+            })?;
+            let values = value
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF image SMask Matte is not an array".into()))?;
+            let channels = match image.dict.get(b"ColorSpace").and_then(Object::as_name) {
+                Ok(b"DeviceGray") => 1,
+                Ok(b"DeviceRGB") => 3,
+                _ => {
+                    return Err(OfdError::Invalid(
+                        "unsupported PDF image Matte color space".into(),
+                    ))
+                }
+            };
+            if values.len() != channels {
+                return Err(OfdError::Invalid(
+                    "PDF image SMask Matte length is invalid".into(),
+                ));
+            }
+            let mut components = Vec::with_capacity(channels);
+            for value in values {
+                let (_, value) = pdf.dereference(value).map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF image SMask Matte value: {error}"))
+                })?;
+                let component = f64::from(value.as_float().map_err(|_| {
+                    OfdError::Invalid("PDF image SMask Matte value is not numeric".into())
+                })?);
+                if !component.is_finite() || !(0.0..=1.0).contains(&component) {
+                    return Err(OfdError::Invalid(
+                        "PDF image SMask Matte value is invalid".into(),
+                    ));
+                }
+                components.push(component * 255.0);
+            }
+            if channels == 1 {
+                components.resize(3, components[0]);
+            }
+            Some(components)
+        }
+        Err(_) => None,
+    };
+    let (base_bytes, base_format) =
+        image_bytes_inner_with_context(image, true, Some(pdf), Some(resources))?;
+    let (mask_bytes, mask_format) =
+        image_bytes_inner_with_context(mask, false, Some(pdf), Some(resources))?;
+    let base = decode_mask_image(&base_bytes, base_format, width, height)?;
+    let mask = decode_mask_image(&mask_bytes, mask_format, mask_width, mask_height)?.to_luma8();
+    let alpha = if mask_width == width && mask_height == height {
+        mask
+    } else {
+        image::imageops::resize(
+            &mask,
+            width,
+            height,
+            if interpolate {
+                image::imageops::FilterType::Triangle
+            } else {
+                image::imageops::FilterType::Nearest
+            },
+        )
+    };
+    let mut pixels = base.to_rgba8().into_raw();
+    for (pixel, alpha) in pixels.chunks_exact_mut(4).zip(alpha.as_raw()) {
+        if let Some(matte) = &matte {
+            for channel in 0..3 {
+                pixel[channel] = if *alpha == 0 {
+                    0
+                } else {
+                    ((f64::from(pixel[channel]) * 255.0 - matte[channel] * f64::from(255 - *alpha))
+                        / f64::from(*alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+                };
+            }
+        }
+        pixel[3] = *alpha;
+    }
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&pixels))
+            .map_err(|error| OfdError::Invalid(format!("cannot encode PDF image: {error}")))?;
+    }
+    Ok((output, "png"))
+}
+
+fn decode_stencil_mask(
+    mask: &lopdf::Stream,
+    pdf: &PdfDocument,
+) -> Result<(image::GrayImage, bool), OfdError> {
+    if mask.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image".as_slice())
+        || !pdf_image_is_mask(Some(pdf), &mask.dict)?
+        || mask
+            .dict
+            .get(b"BitsPerComponent")
+            .ok()
+            .and_then(|value| {
+                resolve_pdf_image_value(Some(pdf), value, "image-mask BitsPerComponent").ok()
+            })
+            .and_then(|value| value.as_i64().ok())
+            != Some(1)
+        || mask.dict.get(b"ColorSpace").is_ok()
+        || mask.dict.get(b"Mask").is_ok()
+        || mask.dict.get(b"SMask").is_ok()
+    {
+        return Err(OfdError::Invalid(
+            "unsupported PDF image-mask properties".into(),
+        ));
+    }
+    let dimension = |key: &[u8]| {
+        let number = pdf_image_u32_field(Some(pdf), &mask.dict, key, "image-mask")?;
+        (number > 0)
+            .then_some(number)
+            .ok_or_else(|| OfdError::Invalid("invalid PDF image-mask dimensions".into()))
+    };
+    let width = dimension(b"Width")?;
+    let height = dimension(b"Height")?;
+    if u64::from(width) * u64::from(height) > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF image mask is too large".into()));
+    }
+    let inverted = match mask.dict.get(b"Decode") {
+        Ok(value) => {
+            let pair = resolve_pdf_image_array(Some(pdf), value, "image-mask Decode")?;
+            let numbers = pair
+                .iter()
+                .map(|value| {
+                    resolve_pdf_image_value(Some(pdf), value, "image-mask Decode value")?
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("invalid PDF image-mask Decode".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            match numbers.as_slice() {
+                [0.0, 1.0] => false,
+                [1.0, 0.0] => true,
+                _ => return Err(OfdError::Invalid("invalid PDF image-mask Decode".into())),
+            }
+        }
+        Err(_) => false,
+    };
+    let interpolate = match mask.dict.get(b"Interpolate") {
+        Ok(value) => value
+            .as_bool()
+            .map_err(|_| OfdError::Invalid("invalid PDF image-mask Interpolate".into()))?,
+        Err(_) => false,
+    };
+    let row_bytes = (width as usize)
+        .checked_add(7)
+        .ok_or_else(|| OfdError::Limit("PDF image-mask data is too large".into()))?
+        / 8;
+    let expected = row_bytes
+        .checked_mul(height as usize)
+        .ok_or_else(|| OfdError::Limit("PDF image-mask data is too large".into()))?;
+    if expected as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF image-mask data is too large".into()));
+    }
+    let filters = if mask.dict.get(b"Filter").is_ok() {
+        mask.filters()
+            .map_err(|_| OfdError::Invalid("invalid PDF image-mask filter".into()))?
+    } else {
+        Vec::new()
+    };
+    let params = pdf_image_filter_params(mask, Some(pdf), &filters)?;
+    let samples = decode_pdf_image_filters(
+        &mask.content,
+        &filters,
+        &params,
+        expected,
+        PdfImageShape {
+            width,
+            height,
+            channels: 1,
+            bits: 1,
+        },
+    )?;
+    let mut alpha = image::GrayImage::new(width, height);
+    for (y, row) in samples.chunks_exact(row_bytes).enumerate() {
+        for x in 0..width as usize {
+            let bit = (row[x / 8] >> (7 - x % 8)) & 1;
+            alpha.put_pixel(
+                x as u32,
+                y as u32,
+                image::Luma([if (bit == 0) ^ inverted { 255 } else { 0 }]),
+            );
+        }
+    }
+    Ok((alpha, interpolate))
+}
+
+fn image_bytes_with_explicit_mask(
+    pdf: &PdfDocument,
+    resources: &Object,
+    image: &lopdf::Stream,
+    reference: &Object,
+) -> Result<(Vec<u8>, &'static str), OfdError> {
+    let (_, mask) = pdf
+        .dereference(reference)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF image Mask: {error}")))?;
+    let mask = mask
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF image Mask is not a stream".into()))?;
+    let dimension = |key: &[u8]| {
+        image
+            .dict
+            .get(key)
+            .and_then(Object::as_i64)
+            .ok()
+            .and_then(|number| u32::try_from(number).ok())
+            .filter(|number| *number > 0)
+            .ok_or_else(|| OfdError::Invalid("invalid PDF image dimensions".into()))
+    };
+    let width = dimension(b"Width")?;
+    let height = dimension(b"Height")?;
+    if u64::from(width) * u64::from(height) * 4 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF masked image is too large".into()));
+    }
+    let (mask_alpha, interpolate) = decode_stencil_mask(mask, pdf)?;
+    let (mask_width, mask_height) = mask_alpha.dimensions();
+    let alpha = if mask_width == width && mask_height == height {
+        mask_alpha
+    } else {
+        image::imageops::resize(
+            &mask_alpha,
+            width,
+            height,
+            if interpolate {
+                image::imageops::FilterType::Triangle
+            } else {
+                image::imageops::FilterType::Nearest
+            },
+        )
+    };
+    let mut base = image.clone();
+    base.dict.remove(b"Mask");
+    let (bytes, format) = image_bytes_inner_with_context(&base, false, Some(pdf), Some(resources))?;
+    let mut pixels = decode_mask_image(&bytes, format, width, height)?
+        .to_rgba8()
+        .into_raw();
+    for (pixel, alpha) in pixels.chunks_exact_mut(4).zip(alpha.as_raw()) {
+        pixel[3] = *alpha;
+    }
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&pixels))
+            .map_err(|error| OfdError::Invalid(format!("cannot encode PDF image: {error}")))?;
+    }
+    Ok((output, "png"))
+}
+
+fn stencil_image_bytes(
+    pdf: &PdfDocument,
+    image: &lopdf::Stream,
+    fill_color: [u8; 3],
+) -> Result<(Vec<u8>, &'static str), OfdError> {
+    let (alpha, _) = decode_stencil_mask(image, pdf)?;
+    let (width, height) = alpha.dimensions();
+    if u64::from(width) * u64::from(height) * 4 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF image mask is too large".into()));
+    }
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for opacity in alpha.as_raw() {
+        pixels.extend_from_slice(&fill_color);
+        pixels.push(*opacity);
+    }
+    let mut output = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut output, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&pixels))
+            .map_err(|error| OfdError::Invalid(format!("cannot encode PDF image: {error}")))?;
+    }
+    Ok((output, "png"))
+}
+
+fn import_image(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    resources: &Object,
+    box_: [f64; 4],
+    state: &GraphicsState,
+    name: &[u8],
+) -> Result<(), OfdError> {
+    let image = image_resource(pdf, resources, name)?;
+    import_image_stream(output, page_index, pdf, resources, box_, state, image)
+}
+
+fn import_image_stream(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    resources: &Object,
+    box_: [f64; 4],
+    state: &GraphicsState,
+    image: &lopdf::Stream,
+) -> Result<(), OfdError> {
+    let top_left = state.point(0.0, 1.0, box_);
+    let top_right = state.point(1.0, 1.0, box_);
+    let bottom_left = state.point(0.0, 0.0, box_);
+    let bottom_right = state.point(1.0, 0.0, box_);
+    let corners = [top_left, top_right, bottom_left, bottom_right];
+    if corners
+        .iter()
+        .any(|(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return Err(OfdError::Limit(
+            "PDF image coordinates are too large".into(),
+        ));
+    }
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::INFINITY, f64::min);
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    let determinant = (top_right.0 - top_left.0) * (bottom_left.1 - top_left.1)
+        - (top_right.1 - top_left.1) * (bottom_left.0 - top_left.0);
+    if width <= 0.0 || height <= 0.0 || determinant == 0.0 {
+        return Err(OfdError::Invalid(
+            "PDF image transform is degenerate".into(),
+        ));
+    }
+    let (bytes, format) = if pdf_image_is_mask(Some(pdf), &image.dict)? {
+        stencil_image_bytes(pdf, image, state.fill_color)?
+    } else {
+        image_bytes_with_soft_mask(pdf, resources, image)?
+    };
+    let id = output.add_image_object(page_index, &bytes, format, [min_x, min_y, width, height])?;
+    if top_right.1 != top_left.1
+        || bottom_left.0 != top_left.0
+        || top_right.0 <= top_left.0
+        || bottom_left.1 <= top_left.1
+    {
+        output.set_page_object_ctm(
+            page_index,
+            &id,
+            Some([
+                top_right.0 - top_left.0,
+                top_right.1 - top_left.1,
+                bottom_left.0 - top_left.0,
+                bottom_left.1 - top_left.1,
+                top_left.0 - min_x,
+                top_left.1 - min_y,
+            ]),
+        )?;
+    }
+    attach_nonstroking_alpha(output, page_index, &id, "ImageObject", state.fill_alpha)?;
+    attach_blend_mode(output, page_index, &id, state.blend_mode)?;
+    attach_clips(output, page_index, &id, "ImageObject", &state.clips)?;
+    Ok(())
+}
+
+fn inline_image_stream(source: &lopdf::Stream) -> Result<lopdf::Stream, OfdError> {
+    let mut dict = lopdf::Dictionary::new();
+    for (key, value) in source.dict.iter() {
+        if key == b"Length" {
+            continue;
+        }
+        let field = match key.as_slice() {
+            b"W" | b"Width" => b"Width".as_slice(),
+            b"H" | b"Height" => b"Height".as_slice(),
+            b"BPC" | b"BitsPerComponent" => b"BitsPerComponent".as_slice(),
+            b"CS" | b"ColorSpace" => b"ColorSpace".as_slice(),
+            b"D" | b"Decode" => b"Decode".as_slice(),
+            b"IM" | b"ImageMask" => b"ImageMask".as_slice(),
+            b"I" | b"Interpolate" => b"Interpolate".as_slice(),
+            b"F" | b"Filter" => b"Filter".as_slice(),
+            b"DP" | b"DecodeParms" => b"DecodeParms".as_slice(),
+            _ => {
+                return Err(OfdError::Invalid(format!(
+                    "unsupported PDF inline image field {}",
+                    String::from_utf8_lossy(key)
+                )))
+            }
+        };
+        let value = if field == b"ColorSpace" {
+            let name = value
+                .as_name()
+                .map_err(|_| OfdError::Invalid("invalid PDF inline color space".into()))?;
+            Object::Name(
+                match name {
+                    b"G" | b"Gray" => b"DeviceGray".as_slice(),
+                    b"RGB" => b"DeviceRGB".as_slice(),
+                    b"CMYK" => b"DeviceCMYK".as_slice(),
+                    _ => name,
+                }
+                .to_vec(),
+            )
+        } else if field == b"Filter" {
+            let normalize = |value: &Object| -> Result<Object, OfdError> {
+                let name = value
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("invalid PDF inline image filter".into()))?;
+                let full = match name {
+                    b"AHx" => b"ASCIIHexDecode".as_slice(),
+                    b"A85" => b"ASCII85Decode".as_slice(),
+                    b"LZW" => b"LZWDecode".as_slice(),
+                    b"Fl" => b"FlateDecode".as_slice(),
+                    b"RL" => b"RunLengthDecode".as_slice(),
+                    b"CCF" => b"CCITTFaxDecode".as_slice(),
+                    b"DCT" => b"DCTDecode".as_slice(),
+                    name => name,
+                };
+                Ok(Object::Name(full.to_vec()))
+            };
+            match value {
+                Object::Array(items) => {
+                    Object::Array(items.iter().map(normalize).collect::<Result<_, _>>()?)
+                }
+                _ => normalize(value)?,
+            }
+        } else {
+            value.clone()
+        };
+        if dict.has(field) {
+            return Err(OfdError::Invalid("duplicate PDF inline image field".into()));
+        }
+        dict.set(field, value);
+    }
+    dict.set("Subtype", "Image");
+    Ok(lopdf::Stream::new(dict, source.content.clone()))
+}
+
+fn pdf_content_space(byte: u8) -> bool {
+    matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
+fn find_pdf_content_word(bytes: &[u8], start: usize, word: &[u8]) -> Option<usize> {
+    let mut position = start;
+    while let Some(offset) = bytes
+        .get(position..)?
+        .windows(word.len())
+        .position(|part| part == word)
+    {
+        let at = position + offset;
+        if (at == 0 || pdf_content_space(bytes[at - 1]))
+            && bytes
+                .get(at + word.len())
+                .is_none_or(|byte| pdf_content_space(*byte))
+        {
+            return Some(at);
+        }
+        position = at + 1;
+    }
+    None
+}
+
+fn find_pdf_inline_start(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut at = start;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'%' => {
+                while at < bytes.len() && !matches!(bytes[at], b'\r' | b'\n') {
+                    at += 1;
+                }
+            }
+            b'(' => {
+                let mut depth = 1;
+                at += 1;
+                while at < bytes.len() && depth > 0 {
+                    match bytes[at] {
+                        b'\\' => at = (at + 2).min(bytes.len()),
+                        b'(' => {
+                            depth += 1;
+                            at += 1;
+                        }
+                        b')' => {
+                            depth -= 1;
+                            at += 1;
+                        }
+                        _ => at += 1,
+                    }
+                }
+            }
+            b'<' if bytes.get(at + 1) != Some(&b'<') => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'>' {
+                    at += 1;
+                }
+            }
+            b'B' if bytes.get(at + 1) == Some(&b'I')
+                && (at == 0 || pdf_content_space(bytes[at - 1]))
+                && bytes
+                    .get(at + 2)
+                    .is_none_or(|byte| pdf_content_space(*byte)) =>
+            {
+                return Some(at)
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+fn decode_pdf_content_with_inline_images(
+    bytes: &[u8],
+    pdf: &PdfDocument,
+) -> Result<lopdf::content::Content<Vec<Operation>>, OfdError> {
+    if let Ok(content) = lopdf::content::Content::decode(bytes) {
+        return Ok(content);
+    }
+    let mut operations = Vec::new();
+    let mut cursor = 0;
+    let mut search = 0;
+    while let Some(start) = find_pdf_inline_start(bytes, search) {
+        let Ok(prefix) = lopdf::content::Content::decode(&bytes[cursor..start]) else {
+            search = start + 2;
+            continue;
+        };
+        let mut marker = start + 2;
+        let mut dictionary_candidates = 0;
+        let (dict, data_start) = loop {
+            let Some(at) = find_pdf_content_word(bytes, marker, b"ID") else {
+                return Err(OfdError::Invalid("PDF inline image has no ID".into()));
+            };
+            if at - start > 65_536 {
+                return Err(OfdError::Limit(
+                    "PDF inline image dictionary is too large".into(),
+                ));
+            }
+            dictionary_candidates += 1;
+            if dictionary_candidates > 128 {
+                return Err(OfdError::Limit(
+                    "PDF inline image dictionary is too complex".into(),
+                ));
+            }
+            let mut wrapped = b"<<".to_vec();
+            wrapped.extend_from_slice(&bytes[start + 2..at]);
+            wrapped.extend_from_slice(b">> DP");
+            if let Ok(parsed) = lopdf::content::Content::decode(&wrapped) {
+                if let Some(Object::Dictionary(dict)) = parsed
+                    .operations
+                    .first()
+                    .and_then(|operation| operation.operands.first())
+                {
+                    let mut data_start = at + 2;
+                    if bytes.get(data_start) == Some(&b'\r')
+                        && bytes.get(data_start + 1) == Some(&b'\n')
+                    {
+                        data_start += 2;
+                    } else if bytes
+                        .get(data_start)
+                        .is_some_and(|byte| pdf_content_space(*byte))
+                    {
+                        data_start += 1;
+                    } else {
+                        return Err(OfdError::Invalid(
+                            "PDF inline image ID has no separator".into(),
+                        ));
+                    }
+                    break (dict.clone(), data_start);
+                }
+            }
+            marker = at + 2;
+        };
+        if dict.get(b"F").is_err() && dict.get(b"Filter").is_err() {
+            return Err(OfdError::Invalid("invalid PDF inline image content".into()));
+        }
+        let mut marker = data_start;
+        let mut image_candidates = 0;
+        let (source, end) = loop {
+            let Some(at) = find_pdf_content_word(bytes, marker, b"EI") else {
+                return Err(OfdError::Invalid("PDF inline image has no valid EI".into()));
+            };
+            image_candidates += 1;
+            if image_candidates > 128 {
+                return Err(OfdError::Limit(
+                    "PDF inline image has too many EI candidates".into(),
+                ));
+            }
+            if at > data_start && at - data_start <= MAX_ENTRY_BYTES as usize {
+                let mut data_end = at - 1;
+                if bytes[data_end] == b'\n' && data_end > data_start && bytes[data_end - 1] == b'\r'
+                {
+                    data_end -= 1;
+                }
+                let source = lopdf::Stream::new(dict.clone(), bytes[data_start..data_end].to_vec());
+                if let Ok(image) = inline_image_stream(&source) {
+                    let valid = if pdf_image_is_mask(Some(pdf), &image.dict).unwrap_or(false) {
+                        decode_stencil_mask(&image, pdf).is_ok()
+                    } else {
+                        image_bytes(&image).is_ok()
+                    };
+                    if valid {
+                        break (source, at + 2);
+                    }
+                }
+            }
+            marker = at + 2;
+        };
+        operations.extend(prefix.operations);
+        operations.push(Operation {
+            operator: "BI".into(),
+            operands: vec![Object::Stream(source)],
+        });
+        cursor = end;
+        search = end;
+    }
+    if operations.is_empty() {
+        return Err(OfdError::Invalid("invalid PDF page content".into()));
+    }
+    let suffix = lopdf::content::Content::decode(&bytes[cursor..]).map_err(|error| {
+        OfdError::Invalid(format!("invalid PDF content after inline image: {error}"))
+    })?;
+    operations.extend(suffix.operations);
+    Ok(lopdf::content::Content { operations })
+}
+
+fn validate_opaque_group_image(pdf: &PdfDocument, image: &lopdf::Stream) -> Result<(), OfdError> {
+    let masked = image.dict.get(b"SMask").is_ok()
+        || image.dict.get(b"Mask").is_ok()
+        || pdf_image_is_mask(Some(pdf), &image.dict)?;
+    let embedded_alpha = match image.dict.get(b"SMaskInData") {
+        Ok(value) => resolve_pdf_image_value(Some(pdf), value, "JPEG2000 SMaskInData")?
+            .as_i64()
+            .map_err(|_| OfdError::Invalid("invalid PDF JPEG2000 SMaskInData".into()))?,
+        Err(_) => 0,
+    };
+    if masked || embedded_alpha != 0 {
+        return Err(OfdError::Invalid(
+            "PDF Form transparency group requires opaque content".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_opaque_form_content(
+    pdf: &PdfDocument,
+    resources: &Object,
+    content: &lopdf::content::Content,
+    active_forms: &mut Vec<ObjectId>,
+) -> Result<(), OfdError> {
+    for operation in &content.operations {
+        match operation.operator.as_str() {
+            "gs" => {
+                return Err(OfdError::Invalid(
+                    "PDF Form transparency group requires opaque content".into(),
+                ));
+            }
+            "BI" => {
+                let [Object::Stream(image)] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("invalid PDF inline image".into()));
+                };
+                let image = inline_image_stream(image)?;
+                validate_opaque_group_image(pdf, &image)?;
+            }
+            "Do" => {
+                let [Object::Name(name)] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF Do expects an XObject name".into()));
+                };
+                let (id, value) = resource(pdf, resources, b"XObject", name)?;
+                let stream = value
+                    .as_stream()
+                    .map_err(|_| OfdError::Invalid("PDF XObject is not a stream".into()))?;
+                let subtype = stream.dict.get(b"Subtype").and_then(Object::as_name).ok();
+                if subtype == Some(b"Image".as_slice()) {
+                    validate_opaque_group_image(pdf, stream)?;
+                    continue;
+                }
+                if subtype != Some(b"Form".as_slice()) {
+                    return Err(OfdError::Invalid(
+                        "PDF Form transparency group requires opaque content".into(),
+                    ));
+                }
+                if active_forms.len() >= 32 {
+                    return Err(OfdError::Limit("PDF Form nesting is too deep".into()));
+                }
+                if id.is_some_and(|id| active_forms.contains(&id)) {
+                    return Err(OfdError::Invalid("cyclic PDF Form XObject".into()));
+                }
+                let nested_resources = match stream.dict.get(b"Resources") {
+                    Ok(value) => {
+                        pdf.dereference(value)
+                            .map_err(|error| {
+                                OfdError::Invalid(format!("invalid PDF Form resources: {error}"))
+                            })?
+                            .1
+                    }
+                    Err(_) => resources,
+                };
+                let bytes = if stream.dict.get(b"Filter").is_ok() {
+                    stream.decompressed_content().map_err(|error| {
+                        OfdError::Invalid(format!("cannot read PDF Form content: {error}"))
+                    })?
+                } else {
+                    stream.content.clone()
+                };
+                if bytes.len() as u64 > MAX_ENTRY_BYTES {
+                    return Err(OfdError::Limit("PDF Form content is too large".into()));
+                }
+                let nested = decode_pdf_content_with_inline_images(&bytes, pdf)?;
+                if let Some(id) = id {
+                    active_forms.push(id);
+                }
+                let result =
+                    validate_opaque_form_content(pdf, nested_resources, &nested, active_forms);
+                if id.is_some() {
+                    active_forms.pop();
+                }
+                result?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn import_form(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    state: &GraphicsState,
+    name: &[u8],
+    active_forms: &mut Vec<ObjectId>,
+) -> Result<(), OfdError> {
+    let (form_id, value) = resource(page.pdf, page.resources, b"XObject", name)?;
+    let stream = value
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF Form XObject is not a stream".into()))?;
+    let has_transparency_group = if let Ok(group) = stream.dict.get(b"Group") {
+        validate_rgb_transparency_group(page.pdf, group, "Form", true)?;
+        true
+    } else {
+        false
+    };
+    if let Ok(form_type) = stream.dict.get(b"FormType") {
+        if form_type.as_i64().ok() != Some(1) {
+            return Err(OfdError::Invalid("unsupported PDF FormType".into()));
+        }
+    }
+    if active_forms.len() >= 32 {
+        return Err(OfdError::Limit("PDF Form nesting is too deep".into()));
+    }
+    if form_id.is_some_and(|id| active_forms.contains(&id)) {
+        return Err(OfdError::Invalid("cyclic PDF Form XObject".into()));
+    }
+    let mut graphics = state.clone();
+    if let Ok(matrix) = stream.dict.get(b"Matrix") {
+        let (_, matrix) = page
+            .pdf
+            .dereference(matrix)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Form matrix: {error}")))?;
+        let matrix = matrix
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF Form Matrix is not an array".into()))?;
+        let matrix: [f64; 6] = numbers(&Operation::new("Matrix", matrix.clone()), 6)?
+            .try_into()
+            .map_err(|_| OfdError::Invalid("invalid PDF Form Matrix".into()))?;
+        graphics.concat(matrix);
+    }
+    let bbox = stream
+        .dict
+        .get(b"BBox")
+        .map_err(|_| OfdError::Invalid("PDF Form has no BBox".into()))?;
+    let (_, bbox) = page
+        .pdf
+        .dereference(bbox)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Form BBox: {error}")))?;
+    let bbox = bbox
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF Form BBox is not an array".into()))?;
+    let bbox = numbers(&Operation::new("BBox", bbox.clone()), 4)?;
+    let [x1, y1, x2, y2] = [bbox[0], bbox[1], bbox[2], bbox[3]];
+    if x2 <= x1 || y2 <= y1 {
+        return Err(OfdError::Invalid("PDF Form BBox is invalid".into()));
+    }
+    let mut clip = PathBuilder::default();
+    clip.move_to(graphics.point(x1, y1, page.box_));
+    clip.line_to(graphics.point(x2, y1, page.box_))?;
+    clip.line_to(graphics.point(x2, y2, page.box_))?;
+    clip.line_to(graphics.point(x1, y2, page.box_))?;
+    clip.close();
+    install_clip(&mut graphics, &clip, false)?;
+    let resources = match stream.dict.get(b"Resources") {
+        Ok(resources) => {
+            page.pdf
+                .dereference(resources)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF Form resources: {error}")))?
+                .1
+        }
+        Err(_) => page.resources,
+    };
+    let bytes = if stream.dict.get(b"Filter").is_ok() {
+        stream
+            .decompressed_content()
+            .map_err(|error| OfdError::Invalid(format!("cannot read PDF Form content: {error}")))?
+    } else {
+        stream.content.clone()
+    };
+    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF Form content is too large".into()));
+    }
+    let content = decode_pdf_content_with_inline_images(&bytes, page.pdf)?;
+    if has_transparency_group {
+        if state.fill_alpha != 1.0 || state.stroke_alpha != 1.0 || state.blend_mode != "Normal" {
+            return Err(OfdError::Invalid(
+                "PDF Form transparency group requires opaque content".into(),
+            ));
+        }
+        let mut opaque_forms = active_forms.clone();
+        if let Some(id) = form_id {
+            opaque_forms.push(id);
+        }
+        validate_opaque_form_content(page.pdf, resources, &content, &mut opaque_forms)?;
+    }
+    let nested_page = PdfPageContext { resources, ..*page };
+    if let Some(id) = form_id {
+        active_forms.push(id);
+    }
+    let result = import_content(output, &nested_page, content, graphics, active_forms);
+    if form_id.is_some() {
+        active_forms.pop();
+    }
+    result
+}
+
+fn import_text(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    graphics: &GraphicsState,
+    state: &mut TextState,
+    elements: &[Object],
+    visible: bool,
+) -> Result<(), OfdError> {
+    state.require_active()?;
+    if elements.len() > 100_000 {
+        return Err(OfdError::Limit("PDF text array is too long".into()));
+    }
+    if !state.positioned {
+        return Err(OfdError::Invalid(
+            "PDF text needs an explicit position before each string".into(),
+        ));
+    }
+    let font_selection = state
+        .font
+        .as_ref()
+        .ok_or_else(|| OfdError::Invalid("PDF text has no selected font".into()))?;
+    let font = match font_selection {
+        PdfFontSelection::Named(name) => resource(page.pdf, page.resources, b"Font", name)?.1,
+        PdfFontSelection::Indirect(id) => page
+            .pdf
+            .get_object(*id)
+            .map_err(|_| OfdError::Invalid("PDF text font is missing".into()))?,
+    };
+    let font = font
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF text font is not a dictionary".into()))?;
+    let subtype = font.get(b"Subtype").and_then(Object::as_name).ok();
+    if subtype == Some(b"Type0".as_slice()) {
+        return import_type0_text(output, page, graphics, state, font, elements, visible);
+    }
+    let true_type = subtype == Some(b"TrueType".as_slice());
+    if subtype != Some(b"Type1".as_slice()) && !true_type {
+        return Err(OfdError::Invalid(
+            "unsupported PDF text font subtype".into(),
+        ));
+    }
+    let base = font
+        .get(b"BaseFont")
+        .and_then(Object::as_name)
+        .map_err(|_| OfdError::Invalid("PDF simple font has no BaseFont".into()))?;
+    let standard_face = [
+        b"Helvetica".as_slice(),
+        b"Helvetica-Bold".as_slice(),
+        b"Helvetica-Oblique".as_slice(),
+        b"Helvetica-BoldOblique".as_slice(),
+        b"Times-Roman".as_slice(),
+        b"Times-Bold".as_slice(),
+        b"Times-Italic".as_slice(),
+        b"Times-BoldItalic".as_slice(),
+        b"Courier".as_slice(),
+        b"Courier-Bold".as_slice(),
+        b"Courier-Oblique".as_slice(),
+        b"Courier-BoldOblique".as_slice(),
+    ]
+    .contains(&base)
+        && !true_type;
+    let unicode_map = if font.get(b"ToUnicode").is_ok() {
+        // lopdf parses ToUnicode for Identity encodings. Keep the original
+        // dictionary intact and ask its CMap parser through a temporary copy.
+        let mut mapped_font = font.clone();
+        mapped_font.set("Encoding", Object::Name(b"Identity-H".to_vec()));
+        let Encoding::UnicodeMapEncoding(map) = pdf_to_unicode_map(&mapped_font, page.pdf)? else {
+            unreachable!("pdf_to_unicode_map only returns Unicode maps")
+        };
+        Some(map)
+    } else {
+        None
+    };
+    let encoding = if unicode_map.is_none() {
+        if !standard_face && !true_type {
+            return Err(OfdError::Invalid(
+                "PDF Type1 font is not a standard Latin face".into(),
+            ));
+        }
+        if let Ok(encoding) = font.get(b"Encoding") {
+            let name = encoding.as_name().map_err(|_| {
+                OfdError::Invalid("custom PDF font encoding needs ToUnicode".into())
+            })?;
+            if name != b"StandardEncoding"
+                && name != b"WinAnsiEncoding"
+                && name != b"MacRomanEncoding"
+            {
+                return Err(OfdError::Invalid(
+                    "PDF font encoding is not supported".into(),
+                ));
+            }
+        }
+        Some(
+            font.get_font_encoding(page.pdf)
+                .map_err(|error| OfdError::Invalid(format!("cannot decode PDF font: {error}")))?,
+        )
+    } else {
+        None
+    };
+    let widths = match (font.get(b"FirstChar"), font.get(b"Widths")) {
+        (Ok(first), Ok(widths)) => {
+            let first = first
+                .as_i64()
+                .map_err(|_| OfdError::Invalid("PDF FirstChar is invalid".into()))?;
+            if !(0..=255).contains(&first) {
+                return Err(OfdError::Invalid("PDF FirstChar is invalid".into()));
+            }
+            let last = font
+                .get(b"LastChar")
+                .and_then(Object::as_i64)
+                .map_err(|_| OfdError::Invalid("PDF LastChar is invalid".into()))?;
+            if !(first..=255).contains(&last) {
+                return Err(OfdError::Invalid("PDF LastChar is invalid".into()));
+            }
+            let (_, widths) = page
+                .pdf
+                .dereference(widths)
+                .map_err(|error| OfdError::Invalid(format!("PDF Widths are invalid: {error}")))?;
+            let widths = widths
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF Widths are not an array".into()))?;
+            if widths.len() != usize::try_from(last - first + 1).unwrap_or(0) {
+                return Err(OfdError::Invalid("PDF Widths length is invalid".into()));
+            }
+            Some((first, widths))
+        }
+        (Err(_), Err(_)) => None,
+        _ => return Err(OfdError::Invalid("PDF font widths are incomplete".into())),
+    };
+    let mut text = String::new();
+    let mut simple_codes = Vec::new();
+    let mut positions = Vec::new();
+    let mut pen = 0.0;
+    let mut bytes_seen = 0_usize;
+    let mut has_adjustment = false;
+    for element in elements {
+        match element {
+            Object::String(bytes, _) => {
+                bytes_seen = bytes_seen.saturating_add(bytes.len());
+                if bytes_seen > 100_000 {
+                    return Err(OfdError::Limit("PDF text string is too long".into()));
+                }
+                if bytes.is_empty() {
+                    continue;
+                }
+                let decoded = if let Some(map) = &unicode_map {
+                    let mut decoded = String::new();
+                    for byte in bytes {
+                        let units = map.get(u32::from(*byte), 1).ok_or_else(|| {
+                            OfdError::Invalid("PDF ToUnicode mapping is incomplete".into())
+                        })?;
+                        let mapped = String::from_utf16(&units).map_err(|_| {
+                            OfdError::Invalid("PDF ToUnicode mapping is invalid UTF-16".into())
+                        })?;
+                        if mapped.chars().count() != 1 || mapped.contains('\u{fffd}') {
+                            return Err(OfdError::Invalid(
+                                "PDF ToUnicode maps one code to multiple characters".into(),
+                            ));
+                        }
+                        decoded.push_str(&mapped);
+                    }
+                    decoded
+                } else {
+                    PdfDocument::decode_text(
+                        encoding.as_ref().ok_or_else(|| {
+                            OfdError::Invalid("PDF font has no usable text encoding".into())
+                        })?,
+                        bytes,
+                    )
+                    .map_err(|error| {
+                        OfdError::Invalid(format!("cannot decode PDF text: {error}"))
+                    })?
+                };
+                if decoded.contains('\u{fffd}') || decoded.chars().count() != bytes.len() {
+                    return Err(OfdError::Invalid(
+                        "PDF text cannot be decoded losslessly".into(),
+                    ));
+                }
+                for (byte, ch) in bytes.iter().zip(decoded.chars()) {
+                    positions.push(pen);
+                    text.push(ch);
+                    simple_codes.push(*byte);
+                    if let Some((first, widths)) = widths {
+                        let index = i64::from(*byte) - first;
+                        let width = usize::try_from(index)
+                            .ok()
+                            .and_then(|index| widths.get(index))
+                            .and_then(|value| value.as_float().ok())
+                            .map(f64::from)
+                            .filter(|value| value.is_finite() && (0.0..=10_000.0).contains(value))
+                            .ok_or_else(|| {
+                                OfdError::Invalid("PDF glyph width is invalid".into())
+                            })?;
+                        pen += width * state.size_pt / 1000.0
+                            + state.char_spacing
+                            + if *byte == b' ' {
+                                state.word_spacing
+                            } else {
+                                0.0
+                            };
+                    }
+                }
+            }
+            Object::Integer(_) | Object::Real(_) => {
+                let adjustment = f64::from(
+                    element
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF TJ spacing is invalid".into()))?,
+                );
+                if !adjustment.is_finite() {
+                    return Err(OfdError::Invalid("PDF TJ spacing is invalid".into()));
+                }
+                if adjustment != 0.0 {
+                    has_adjustment = true;
+                }
+                pen -= adjustment * state.size_pt / 1000.0;
+            }
+            _ => return Err(OfdError::Invalid("PDF TJ element is invalid".into())),
+        }
+        if !pen.is_finite() || pen.abs() > 1e9 {
+            return Err(OfdError::Invalid(
+                "PDF text position exceeds numeric range".into(),
+            ));
+        }
+    }
+    if widths.is_none()
+        && !text.is_empty()
+        && (has_adjustment || state.char_spacing != 0.0 || state.word_spacing != 0.0)
+    {
+        return Err(OfdError::Invalid(
+            "PDF text spacing requires explicit font widths".into(),
+        ));
+    }
+    finish_import_text(
+        output,
+        page,
+        graphics,
+        state,
+        ImportedTextRun {
+            font,
+            text: &text,
+            cids: None,
+            simple_codes: Some(&simple_codes),
+            positions: &positions,
+            pen,
+            has_widths: widths.is_some(),
+        },
+        visible,
+    )
+}
+
+struct ImportedTextRun<'a> {
+    font: &'a lopdf::Dictionary,
+    text: &'a str,
+    cids: Option<&'a [u16]>,
+    simple_codes: Option<&'a [u8]>,
+    positions: &'a [f64],
+    pen: f64,
+    has_widths: bool,
+}
+
+fn embedded_pdf_font_id(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    font: &lopdf::Dictionary,
+    text: &str,
+    cids: Option<&[u16]>,
+    simple_codes: Option<&[u8]>,
+) -> Result<Option<String>, OfdError> {
+    let true_type =
+        font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"TrueType".as_slice());
+    if cids.is_none() && (!true_type || simple_codes.is_none()) {
+        return Ok(None);
+    }
+    let descendant = if font.get(b"Subtype").and_then(Object::as_name).ok()
+        == Some(b"Type0".as_slice())
+    {
+        let descendants = font
+            .get(b"DescendantFonts")
+            .map_err(|_| OfdError::Invalid("PDF Type0 font has no DescendantFonts".into()))?;
+        let (_, descendants) = pdf
+            .dereference(descendants)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF DescendantFonts: {error}")))?;
+        let descendants = descendants
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF DescendantFonts is not an array".into()))?;
+        let Some(descendant) = descendants.first() else {
+            return Ok(None);
+        };
+        pdf.dereference(descendant)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF descendant font: {error}")))?
+            .1
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF descendant font is not a dictionary".into()))?
+    } else {
+        font
+    };
+    if !true_type
+        && descendant.get(b"Subtype").and_then(Object::as_name).ok()
+            != Some(b"CIDFontType2".as_slice())
+    {
+        return Ok(None);
+    }
+    let Ok(descriptor) = descendant.get(b"FontDescriptor") else {
+        return Ok(None);
+    };
+    let descriptor = pdf
+        .dereference(descriptor)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF FontDescriptor: {error}")))?
+        .1
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF FontDescriptor is not a dictionary".into()))?;
+    let (stream, is_opentype) = if let Ok(value) = descriptor.get(b"FontFile2") {
+        (value, false)
+    } else if let Ok(value) = descriptor.get(b"FontFile3") {
+        (value, true)
+    } else {
+        return Ok(None);
+    };
+    let stream = pdf
+        .dereference(stream)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF embedded font: {error}")))?
+        .1
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF embedded font is not a stream".into()))?;
+    if is_opentype
+        && stream.dict.get(b"Subtype").and_then(Object::as_name).ok()
+            != Some(b"OpenType".as_slice())
+    {
+        return Ok(None);
+    }
+    let Ok(bytes) = stream.get_plain_content() else {
+        return Ok(None);
+    };
+    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF embedded font is too large".into()));
+    }
+    let Ok(face) = ttf_parser::Face::parse(&bytes, 0) else {
+        return Ok(None);
+    };
+    let cid_to_gid = if let Some(value) = descendant.get(b"CIDToGIDMap").ok().filter(|_| !true_type)
+    {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF CIDToGIDMap: {error}")))?;
+        match value {
+            Object::Name(name) if name == b"Identity" => None,
+            Object::Stream(stream) => {
+                let Ok(data) = stream.get_plain_content() else {
+                    return Ok(None);
+                };
+                if data.len() as u64 > MAX_ENTRY_BYTES {
+                    return Err(OfdError::Limit("PDF CIDToGIDMap is too large".into()));
+                }
+                Some(data)
+            }
+            _ => return Ok(None),
+        }
+    } else {
+        None
+    };
+    let mapped = if let Some(cids) = cids {
+        cids.len() == text.chars().count()
+            && text.chars().zip(cids).all(|(ch, cid)| {
+                let expected = cid_to_gid.as_ref().map_or(Some(*cid), |map| {
+                    map.get(usize::from(*cid) * 2..usize::from(*cid) * 2 + 2)
+                        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                });
+                face.glyph_index(ch).map(|glyph| glyph.0) == expected
+            })
+    } else {
+        let codes = simple_codes.unwrap_or_default();
+        let encoding_name = font.get(b"Encoding").and_then(Object::as_name).ok();
+        if !matches!(
+            encoding_name,
+            Some(b"WinAnsiEncoding" | b"StandardEncoding" | b"MacRomanEncoding")
+        ) {
+            return Ok(None);
+        }
+        let mut standard_font = font.clone();
+        standard_font.remove(b"ToUnicode");
+        let Ok(encoding) = standard_font.get_font_encoding(pdf) else {
+            return Ok(None);
+        };
+        codes.len() == text.chars().count()
+            && PdfDocument::decode_text(&encoding, codes).ok().as_deref() == Some(text)
+            && text.chars().all(|ch| face.glyph_index(ch).is_some())
+    };
+    if !mapped {
+        return Ok(None);
+    }
+    for (index, existing) in output.fonts()?.iter().enumerate() {
+        if existing.embedded_path.is_some() && output.font_data(index)? == bytes {
+            return Ok(Some(existing.id.clone()));
+        }
+    }
+    let name = face
+        .names()
+        .into_iter()
+        .find(|name| name.name_id == ttf_parser::name_id::FAMILY && name.is_unicode())
+        .and_then(|name| name.to_string())
+        .or_else(|| {
+            font.get(b"BaseFont")
+                .and_then(Object::as_name)
+                .ok()
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+        })
+        .map(|name| {
+            name.chars()
+                .filter(|ch| !ch.is_control())
+                .collect::<String>()
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "PDF embedded font".into());
+    Ok(Some(output.add_embedded_font(&name, &bytes)?.to_string()))
+}
+
+fn finish_import_text(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    graphics: &GraphicsState,
+    state: &mut TextState,
+    run: ImportedTextRun<'_>,
+    visible: bool,
+) -> Result<(), OfdError> {
+    let ImportedTextRun {
+        font,
+        text,
+        cids,
+        simple_codes,
+        positions,
+        pen,
+        has_widths,
+    } = run;
+    let [a, b, c, d, x, y] = state.matrix;
+    let [ga, gb, gc, gd, _, _] = graphics.ctm;
+    let x_axis = [ga * a + gc * b, gb * a + gd * b];
+    let y_axis = [ga * c + gc * d, gb * c + gd * d];
+    let scale = x_axis[0].hypot(x_axis[1]);
+    let y_scale = y_axis[0].hypot(y_axis[1]);
+    let determinant = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+    if !scale.is_finite()
+        || !y_scale.is_finite()
+        || scale <= 0.0
+        || y_scale <= 0.0
+        || !determinant.is_finite()
+        || determinant.abs() <= 1e-9 * scale * y_scale
+    {
+        return Err(OfdError::Invalid("PDF text matrix is degenerate".into()));
+    }
+    let size = state.size_pt * scale * MM_PER_PT;
+    if !size.is_finite() || size <= 0.0 {
+        return Err(OfdError::Invalid("PDF text has an invalid size".into()));
+    }
+    // OFD HScale is positive; a negative PDF Tz mirrors the text x-axis.
+    let horizontal_sign = state.h_scale.signum();
+    let horizontal_scale = state.h_scale.abs();
+    let matrix = [
+        horizontal_sign * x_axis[0] / scale,
+        -horizontal_sign * x_axis[1] / scale,
+        -y_axis[0] / scale,
+        y_axis[1] / scale,
+    ];
+    if matrix.iter().any(|value| !value.is_finite()) {
+        return Err(OfdError::Invalid("PDF text matrix is invalid".into()));
+    }
+    let first_offset = positions.first().copied().unwrap_or(0.0);
+    let (page_x, baseline_y) = graphics.point(
+        x + a * first_offset * state.h_scale + c * state.rise,
+        y + b * first_offset * state.h_scale + d * state.rise,
+        page.box_,
+    );
+    if !visible && state.render_mode >= 4 && !text.is_empty() {
+        return Err(OfdError::Invalid(
+            "hidden PDF text clipping is unsupported".into(),
+        ));
+    }
+    if visible && !text.is_empty() {
+        let font_id = embedded_pdf_font_id(output, page.pdf, font, text, cids, simple_codes)?;
+        let delta_x = has_widths.then(|| {
+            positions
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]) * horizontal_scale * scale * MM_PER_PT)
+                .collect::<Vec<_>>()
+        });
+        let page_width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
+        let page_height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
+        let text_width = positions
+            .iter()
+            .copied()
+            .fold(pen, f64::max)
+            .mul_add(scale * horizontal_scale * MM_PER_PT, size);
+        let local_width = page_width.hypot(page_height).max(text_width).max(size);
+        let local_height = size * 1.5;
+        let [ma, mb, mc, md] = matrix;
+        let top_x = page_x - mc * size;
+        let top_y = baseline_y - md * size;
+        let corners = [
+            (top_x, top_y),
+            (top_x + ma * local_width, top_y + mb * local_width),
+            (top_x + mc * local_height, top_y + md * local_height),
+            (
+                top_x + ma * local_width + mc * local_height,
+                top_y + mb * local_width + md * local_height,
+            ),
+        ];
+        let min_x = corners
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::INFINITY, f64::min);
+        let max_x = corners
+            .iter()
+            .map(|point| point.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = corners
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = corners
+            .iter()
+            .map(|point| point.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let boundary = [min_x, min_y, max_x - min_x, max_y - min_y];
+        if boundary.iter().any(|value| !value.is_finite())
+            || boundary[2] <= 0.0
+            || boundary[3] <= 0.0
+        {
+            return Err(OfdError::Invalid("PDF text boundary is invalid".into()));
+        }
+        let id = output.add_text_object_with_delta_x(
+            page.index,
+            text,
+            boundary,
+            size,
+            font_id.as_deref(),
+            delta_x.as_deref(),
+        )?;
+        let ctm = [ma, mb, mc, md, top_x - min_x, top_y - min_y];
+        if (ctm[0] - 1.0).abs() > 1e-9
+            || ctm[1].abs() > 1e-9
+            || ctm[2].abs() > 1e-9
+            || (ctm[3] - 1.0).abs() > 1e-9
+            || ctm[4].abs() > 1e-9
+            || ctm[5].abs() > 1e-9
+        {
+            output.set_page_object_ctm(page.index, &id, Some(ctm))?;
+        }
+        if horizontal_scale != 1.0 {
+            output.set_page_object_attribute(
+                page.index,
+                &id,
+                "HScale",
+                Some(&horizontal_scale.to_string()),
+            )?;
+        }
+        attach_text_paint(output, page.index, &id, graphics, state.render_mode)?;
+        attach_blend_mode(output, page.index, &id, graphics.blend_mode)?;
+        attach_clips(output, page.index, &id, "TextObject", &graphics.clips)?;
+        if state.render_mode >= 4 {
+            state
+                .clip_areas
+                .push(imported_text_clip_shape(output, page.index, &id)?);
+        }
+    }
+    if state.render_mode >= 4 {
+        state.clip_requested = true;
+    }
+    if has_widths || text.is_empty() {
+        state.matrix[4] += a * pen * state.h_scale;
+        state.matrix[5] += b * pen * state.h_scale;
+    }
+    state.positioned = has_widths || text.is_empty();
+    Ok(())
+}
+
+fn pdf_to_unicode_map<'a>(
+    font: &'a lopdf::Dictionary,
+    pdf: &PdfDocument,
+) -> Result<Encoding<'a>, OfdError> {
+    let original_error = match font.get_font_encoding(pdf) {
+        Ok(Encoding::UnicodeMapEncoding(map)) => return Ok(Encoding::UnicodeMapEncoding(map)),
+        Ok(_) => return Err(OfdError::Invalid("PDF ToUnicode is not a CMap".into())),
+        Err(error) => error,
+    };
+    let source = font
+        .get(b"ToUnicode")
+        .and_then(|value| pdf.dereference(value).map(|(_, value)| value))
+        .and_then(Object::as_stream)
+        .and_then(lopdf::Stream::get_plain_content)
+        .map_err(|_| {
+            OfdError::Invalid(format!("cannot decode PDF ToUnicode map: {original_error}"))
+        })?;
+    if source.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF ToUnicode map is too large".into()));
+    }
+    // lopdf's CMap parser rejects these standard metadata keys even though
+    // they do not affect the code-to-Unicode mappings.
+    let mut normalized = Vec::with_capacity(source.len());
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        let metadata = std::str::from_utf8(line).ok().map(str::trim);
+        let skip = metadata.is_some_and(|metadata| {
+            let parts: Vec<_> = metadata.split_ascii_whitespace().collect();
+            matches!(parts.as_slice(), ["/CMapVersion" | "/WMode", _, "def"])
+        });
+        if !skip {
+            normalized.extend_from_slice(line);
+        }
+    }
+    if normalized.len() == source.len() {
+        return Err(OfdError::Invalid(format!(
+            "cannot decode PDF ToUnicode map: {original_error}"
+        )));
+    }
+    let mut normalized_font = font.clone();
+    normalized_font.set(
+        "ToUnicode",
+        Object::Stream(lopdf::Stream::new(lopdf::Dictionary::new(), normalized)),
+    );
+    match normalized_font.get_font_encoding(pdf) {
+        Ok(Encoding::UnicodeMapEncoding(map)) => Ok(Encoding::UnicodeMapEncoding(map)),
+        Ok(_) => Err(OfdError::Invalid("PDF ToUnicode is not a CMap".into())),
+        Err(error) => Err(OfdError::Invalid(format!(
+            "cannot decode PDF ToUnicode map: {error}"
+        ))),
+    }
+}
+
+fn import_type0_text(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    graphics: &GraphicsState,
+    state: &mut TextState,
+    font: &lopdf::Dictionary,
+    elements: &[Object],
+    visible: bool,
+) -> Result<(), OfdError> {
+    if font.get(b"Encoding").and_then(Object::as_name).ok() != Some(b"Identity-H".as_slice()) {
+        return Err(OfdError::Invalid(
+            "PDF Type0 encoding is not Identity-H".into(),
+        ));
+    }
+    let Encoding::UnicodeMapEncoding(map) = pdf_to_unicode_map(font, page.pdf)? else {
+        unreachable!("pdf_to_unicode_map only returns Unicode maps")
+    };
+    let descendants = font
+        .get(b"DescendantFonts")
+        .map_err(|_| OfdError::Invalid("PDF Type0 font has no DescendantFonts".into()))?;
+    let (_, descendants) = page
+        .pdf
+        .dereference(descendants)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF DescendantFonts: {error}")))?;
+    let descendants = descendants
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF DescendantFonts is not an array".into()))?;
+    if descendants.len() != 1 {
+        return Err(OfdError::Invalid(
+            "PDF Type0 font needs one descendant".into(),
+        ));
+    }
+    let (_, descendant) = page
+        .pdf
+        .dereference(&descendants[0])
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF descendant font: {error}")))?;
+    let descendant = descendant
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF descendant font is not a dictionary".into()))?;
+    let descendant_subtype = descendant.get(b"Subtype").and_then(Object::as_name).ok();
+    if descendant_subtype != Some(b"CIDFontType0".as_slice())
+        && descendant_subtype != Some(b"CIDFontType2".as_slice())
+    {
+        return Err(OfdError::Invalid("unsupported PDF CID font subtype".into()));
+    }
+    let default_width = match descendant.get(b"DW") {
+        Ok(value) => pdf_cid_width(value)?,
+        Err(_) => 1000.0,
+    };
+    let mut widths = HashMap::new();
+    if let Ok(value) = descendant.get(b"W") {
+        let (_, value) = page
+            .pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF CID widths: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF CID W is not an array".into()))?;
+        let mut index = 0;
+        while index < values.len() {
+            let first = values[index]
+                .as_i64()
+                .map_err(|_| OfdError::Invalid("PDF CID W start is invalid".into()))?;
+            if !(0..=65535).contains(&first) {
+                return Err(OfdError::Invalid("PDF CID W start is invalid".into()));
+            }
+            index += 1;
+            let next = values
+                .get(index)
+                .ok_or_else(|| OfdError::Invalid("PDF CID W entry is incomplete".into()))?;
+            if let Ok(width_array) = next.as_array() {
+                if width_array.is_empty() || width_array.len() > 65536 - first as usize {
+                    return Err(OfdError::Invalid("PDF CID W range is invalid".into()));
+                }
+                for (offset, value) in width_array.iter().enumerate() {
+                    widths.insert(first as u16 + offset as u16, pdf_cid_width(value)?);
+                }
+                index += 1;
+            } else {
+                let last = next
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF CID W end is invalid".into()))?;
+                if !(first..=65535).contains(&last) {
+                    return Err(OfdError::Invalid("PDF CID W range is invalid".into()));
+                }
+                index += 1;
+                let width =
+                    pdf_cid_width(values.get(index).ok_or_else(|| {
+                        OfdError::Invalid("PDF CID W entry is incomplete".into())
+                    })?)?;
+                for cid in first..=last {
+                    widths.insert(cid as u16, width);
+                }
+                index += 1;
+            }
+        }
+    }
+
+    let mut text = String::new();
+    let mut cids = Vec::new();
+    let mut positions = Vec::new();
+    let mut pen = 0.0;
+    let mut bytes_seen = 0_usize;
+    for element in elements {
+        match element {
+            Object::String(bytes, _) => {
+                bytes_seen = bytes_seen.saturating_add(bytes.len());
+                if bytes_seen > 100_000 || bytes.len() % 2 != 0 {
+                    return Err(OfdError::Invalid(
+                        "PDF Type0 text has invalid code length".into(),
+                    ));
+                }
+                for pair in bytes.chunks_exact(2) {
+                    let cid = u16::from_be_bytes([pair[0], pair[1]]);
+                    let units = map.get(u32::from(cid), 2).ok_or_else(|| {
+                        OfdError::Invalid("PDF Type0 ToUnicode mapping is incomplete".into())
+                    })?;
+                    let decoded = String::from_utf16(&units).map_err(|_| {
+                        OfdError::Invalid("PDF Type0 ToUnicode is invalid UTF-16".into())
+                    })?;
+                    if decoded.chars().count() != 1 || decoded.contains('\u{fffd}') {
+                        return Err(OfdError::Invalid(
+                            "PDF Type0 code maps to multiple characters".into(),
+                        ));
+                    }
+                    positions.push(pen);
+                    text.push_str(&decoded);
+                    cids.push(cid);
+                    pen += widths.get(&cid).copied().unwrap_or(default_width) * state.size_pt
+                        / 1000.0
+                        + state.char_spacing;
+                }
+            }
+            Object::Integer(_) | Object::Real(_) => {
+                let adjustment = f64::from(
+                    element
+                        .as_float()
+                        .map_err(|_| OfdError::Invalid("PDF TJ spacing is invalid".into()))?,
+                );
+                if !adjustment.is_finite() {
+                    return Err(OfdError::Invalid("PDF TJ spacing is invalid".into()));
+                }
+                pen -= adjustment * state.size_pt / 1000.0;
+            }
+            _ => return Err(OfdError::Invalid("PDF TJ element is invalid".into())),
+        }
+        if !pen.is_finite() || pen.abs() > 1e9 {
+            return Err(OfdError::Invalid(
+                "PDF text position exceeds numeric range".into(),
+            ));
+        }
+    }
+    finish_import_text(
+        output,
+        page,
+        graphics,
+        state,
+        ImportedTextRun {
+            font,
+            text: &text,
+            cids: Some(&cids),
+            simple_codes: None,
+            positions: &positions,
+            pen,
+            has_widths: true,
+        },
+        visible,
+    )
+}
+
+fn pdf_cid_width(value: &Object) -> Result<f64, OfdError> {
+    let width = f64::from(
+        value
+            .as_float()
+            .map_err(|_| OfdError::Invalid("PDF CID width is not numeric".into()))?,
+    );
+    if !width.is_finite() || !(0.0..=10_000.0).contains(&width) {
+        return Err(OfdError::Invalid("PDF CID width is invalid".into()));
+    }
+    Ok(width)
+}
+
+fn import_page(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    id: ObjectId,
+    box_: [f64; 4],
+    user_unit: f64,
+) -> Result<(), OfdError> {
+    let page = pdf
+        .get_dictionary(id)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF page: {error}")))?;
+    let requires_opaque_content = page
+        .get(b"Group")
+        .ok()
+        .map(|group| validate_rgb_transparency_group(pdf, group, "page", true))
+        .transpose()?
+        .unwrap_or(false);
+    let bytes = pdf
+        .get_page_content(id)
+        .map_err(|error| OfdError::Invalid(format!("cannot read PDF page content: {error}")))?;
+    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF page content is too large".into()));
+    }
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let content = decode_pdf_content_with_inline_images(&bytes, pdf)?;
+    let mut state = GraphicsState {
+        ctm: [user_unit, 0.0, 0.0, user_unit, 0.0, 0.0],
+        ..GraphicsState::default()
+    };
+    let empty_resources = Object::Dictionary(lopdf::Dictionary::new());
+    let resources = inherited_object(pdf, id, b"Resources")?.unwrap_or(&empty_resources);
+    if requires_opaque_content {
+        validate_opaque_form_content(pdf, resources, &content, &mut Vec::new())?;
+    }
+    let gray_space = selected_color_space(pdf, resources, b"DeviceGray")?;
+    state.fill_color = gray_space.color(&[0.0])?;
+    state.stroke_color = state.fill_color;
+    state.fill_space = gray_space.clone();
+    state.stroke_space = gray_space;
+    let page_context = PdfPageContext {
+        pdf,
+        box_,
+        index: page_index,
+        resources,
+    };
+    import_content(output, &page_context, content, state, &mut Vec::new())
+}
+
+fn import_content(
+    output: &mut OfdDocument,
+    page_context: &PdfPageContext<'_>,
+    content: lopdf::content::Content<Vec<Operation>>,
+    mut state: GraphicsState,
+    active_forms: &mut Vec<ObjectId>,
+) -> Result<(), OfdError> {
+    if content.operations.len() > 1_000_000 {
+        return Err(OfdError::Limit("PDF content has too many operators".into()));
+    }
+    let pdf = page_context.pdf;
+    let optional_content_enabled = pdf_has_optional_content(pdf)?;
+    let box_ = page_context.box_;
+    let page_index = page_context.index;
+    let mut stack = Vec::new();
+    let mut path = PathBuilder::default();
+    let mut pending_clip = None;
+    let mut text = TextState::default();
+    let mut compatibility_depth = 0_usize;
+    let mut marked_content = Vec::new();
+    for operation in content.operations {
+        if text.active
+            && matches!(
+                operation.operator.as_str(),
+                "m" | "l"
+                    | "c"
+                    | "v"
+                    | "y"
+                    | "h"
+                    | "re"
+                    | "S"
+                    | "s"
+                    | "f"
+                    | "f*"
+                    | "F"
+                    | "B"
+                    | "B*"
+                    | "b"
+                    | "b*"
+                    | "BI"
+                    | "Do"
+                    | "sh"
+                    | "n"
+                    | "W"
+                    | "W*"
+            )
+        {
+            return Err(OfdError::Invalid(
+                "PDF drawing inside text is not supported".into(),
+            ));
+        }
+        if pending_clip.is_some()
+            && matches!(
+                operation.operator.as_str(),
+                "m" | "l" | "c" | "v" | "y" | "h" | "re" | "q" | "Q"
+            )
+        {
+            return Err(OfdError::Invalid(
+                "PDF clipping path must end before another path or graphics state".into(),
+            ));
+        }
+        let visible = marked_content.iter().all(|(_, visible)| *visible);
+        let values;
+        match operation.operator.as_str() {
+            "ri" => {
+                let [intent] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF ri expects one name".into()));
+                };
+                state.set_rendering_intent(pdf_rendering_intent(
+                    intent
+                        .as_name()
+                        .map_err(|_| OfdError::Invalid("PDF ri expects one name".into()))?,
+                ))?;
+            }
+            "BX" => {
+                if !operation.operands.is_empty() {
+                    return Err(OfdError::Invalid("PDF BX has operands".into()));
+                }
+                if compatibility_depth >= 256 {
+                    return Err(OfdError::Limit(
+                        "PDF compatibility nesting is too deep".into(),
+                    ));
+                }
+                compatibility_depth += 1;
+            }
+            "EX" => {
+                if !operation.operands.is_empty() || compatibility_depth == 0 {
+                    return Err(OfdError::Invalid(
+                        "unbalanced PDF compatibility section".into(),
+                    ));
+                }
+                compatibility_depth -= 1;
+            }
+            "MP" | "BMC" => {
+                let [tag] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF marked-content tag is invalid".into(),
+                    ));
+                };
+                tag.as_name()
+                    .map_err(|_| OfdError::Invalid("PDF marked-content tag is invalid".into()))?;
+                if operation.operator == "BMC" {
+                    if marked_content.len() >= 256 {
+                        return Err(OfdError::Limit(
+                            "PDF marked-content nesting is too deep".into(),
+                        ));
+                    }
+                    marked_content.push((text.active, true));
+                }
+            }
+            "DP" | "BDC" => {
+                let [tag, properties] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF marked-content properties are invalid".into(),
+                    ));
+                };
+                let tag = tag
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("PDF marked-content tag is invalid".into()))?;
+                let visible = if tag == b"OC" && !optional_content_enabled {
+                    true
+                } else {
+                    let property_name = properties.as_name().ok();
+                    let (property_id, properties) = if let Some(name) = property_name {
+                        let (id, value) =
+                            resource(pdf, page_context.resources, b"Properties", name)?;
+                        (id, value)
+                    } else {
+                        (None, properties)
+                    };
+                    if tag == b"OC" {
+                        if property_name.is_none() {
+                            return Err(OfdError::Invalid(
+                                "PDF optional content must use a named property".into(),
+                            ));
+                        }
+                        if let Some(id) = property_id {
+                            optional_content_visible(pdf, id)?
+                        } else {
+                            optional_content_value_visible(pdf, properties)?
+                        }
+                    } else {
+                        properties.as_dict().map_err(|_| {
+                            OfdError::Invalid("PDF marked-content properties are invalid".into())
+                        })?;
+                        true
+                    }
+                };
+                if operation.operator == "BDC" {
+                    if marked_content.len() >= 256 {
+                        return Err(OfdError::Limit(
+                            "PDF marked-content nesting is too deep".into(),
+                        ));
+                    }
+                    marked_content.push((text.active, visible));
+                }
+            }
+            "EMC" => {
+                if !operation.operands.is_empty()
+                    || marked_content.pop().map(|(active, _)| active) != Some(text.active)
+                {
+                    return Err(OfdError::Invalid("unbalanced PDF marked content".into()));
+                }
+            }
+            "q" => {
+                if text.active {
+                    return Err(OfdError::Invalid(
+                        "PDF graphics state changes inside text are not supported".into(),
+                    ));
+                }
+                if stack.len() >= 256 {
+                    return Err(OfdError::Limit(
+                        "PDF graphics state nesting is too deep".into(),
+                    ));
+                }
+                stack.push((state.clone(), text.clone()));
+            }
+            "Q" => {
+                if text.active {
+                    return Err(OfdError::Invalid(
+                        "PDF graphics state changes inside text are not supported".into(),
+                    ));
+                }
+                let (graphics, saved_text) = stack
+                    .pop()
+                    .ok_or_else(|| OfdError::Invalid("unbalanced PDF graphics state".into()))?;
+                state = graphics;
+                text = saved_text;
+            }
+            "cm" => {
+                if text.active {
+                    return Err(OfdError::Invalid(
+                        "PDF page transform changes inside text are not supported".into(),
+                    ));
+                }
+                values = numbers(&operation, 6)?;
+                state.concat(
+                    values
+                        .try_into()
+                        .map_err(|_| OfdError::Invalid("invalid PDF matrix".into()))?,
+                );
+            }
+            "w" => {
+                state.line_width = numbers(&operation, 1)?[0];
+                if state.line_width < 0.0 {
+                    return Err(OfdError::Invalid("negative PDF line width".into()));
+                }
+            }
+            "J" => {
+                state.line_cap = match numbers(&operation, 1)?[0] {
+                    0.0 => PathLineCap::Butt,
+                    1.0 => PathLineCap::Round,
+                    2.0 => PathLineCap::Square,
+                    _ => return Err(OfdError::Invalid("invalid PDF line cap".into())),
+                };
+            }
+            "j" => {
+                state.line_join = match numbers(&operation, 1)?[0] {
+                    0.0 => PathLineJoin::Miter,
+                    1.0 => PathLineJoin::Round,
+                    2.0 => PathLineJoin::Bevel,
+                    _ => return Err(OfdError::Invalid("invalid PDF line join".into())),
+                };
+            }
+            "M" => {
+                state.miter_limit = numbers(&operation, 1)?[0];
+                if state.miter_limit <= 0.0 {
+                    return Err(OfdError::Invalid("invalid PDF miter limit".into()));
+                }
+            }
+            "i" => {
+                let flatness = numbers(&operation, 1)?[0];
+                if !(0.0..=100.0).contains(&flatness) {
+                    return Err(OfdError::Invalid("invalid PDF flatness tolerance".into()));
+                }
+                // The OFD path keeps the original Bezier curves. Flattening is
+                // deferred to the renderer, so this rasterization hint does
+                // not alter the imported path geometry.
+            }
+            "d" => {
+                let [pattern, phase] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF dash expects an array and phase".into(),
+                    ));
+                };
+                (state.dash_pattern, state.dash_phase) = parse_pdf_dash(pattern, phase)?;
+            }
+            "gs" => {
+                let [name] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF gs expects one resource name".into()));
+                };
+                let name = name
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("PDF gs has no resource name".into()))?;
+                apply_ext_gstate(pdf, page_context.resources, name, &mut state, &mut text)?;
+            }
+            "rg" | "RG" => {
+                values = numbers(&operation, 3)?;
+                let space = selected_color_space(pdf, page_context.resources, b"DeviceRGB")?;
+                let selected = space.color_with_intent(&values, state.rendering_intent)?;
+                if operation.operator == "rg" {
+                    state.fill_space = space;
+                    state.fill_color = selected;
+                    state.fill_components = values;
+                } else {
+                    state.stroke_space = space;
+                    state.stroke_color = selected;
+                    state.stroke_components = values;
+                }
+            }
+            "g" | "G" => {
+                values = numbers(&operation, 1)?;
+                let space = selected_color_space(pdf, page_context.resources, b"DeviceGray")?;
+                let selected = space.color_with_intent(&values, state.rendering_intent)?;
+                if operation.operator == "g" {
+                    state.fill_space = space;
+                    state.fill_color = selected;
+                    state.fill_components = values;
+                } else {
+                    state.stroke_space = space;
+                    state.stroke_color = selected;
+                    state.stroke_components = values;
+                }
+            }
+            "k" | "K" => {
+                values = numbers(&operation, 4)?;
+                let space = selected_color_space(pdf, page_context.resources, b"DeviceCMYK")?;
+                let selected = space.color_with_intent(&values, state.rendering_intent)?;
+                if operation.operator == "k" {
+                    state.fill_space = space;
+                    state.fill_color = selected;
+                    state.fill_components = values;
+                } else {
+                    state.stroke_space = space;
+                    state.stroke_color = selected;
+                    state.stroke_components = values;
+                }
+            }
+            "cs" | "CS" => {
+                let [name] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF color space selection expects one name".into(),
+                    ));
+                };
+                let name = name
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("PDF color space is not a name".into()))?;
+                let space = selected_color_space(pdf, page_context.resources, name)?;
+                let components = space.initial_components();
+                let initial_color = space.color_with_intent(&components, state.rendering_intent)?;
+                if operation.operator == "cs" {
+                    state.fill_space = space;
+                    state.fill_color = initial_color;
+                    state.fill_components = components;
+                } else {
+                    state.stroke_space = space;
+                    state.stroke_color = initial_color;
+                    state.stroke_components = components;
+                }
+            }
+            "sc" | "SC" | "scn" | "SCN" => {
+                let nonstroking = matches!(operation.operator.as_str(), "sc" | "scn");
+                let space = if nonstroking {
+                    &state.fill_space
+                } else {
+                    &state.stroke_space
+                };
+                values = numbers(&operation, space.channels())?;
+                let selected = space.color_with_intent(&values, state.rendering_intent)?;
+                if nonstroking {
+                    state.fill_color = selected;
+                    state.fill_components = values;
+                } else {
+                    state.stroke_color = selected;
+                    state.stroke_components = values;
+                }
+            }
+            "m" => {
+                values = numbers(&operation, 2)?;
+                path.move_to(state.point(values[0], values[1], box_));
+            }
+            "l" => {
+                values = numbers(&operation, 2)?;
+                path.line_to(state.point(values[0], values[1], box_))?;
+            }
+            "c" => {
+                values = numbers(&operation, 6)?;
+                path.curve_to(
+                    state.point(values[0], values[1], box_),
+                    state.point(values[2], values[3], box_),
+                    state.point(values[4], values[5], box_),
+                )?;
+            }
+            "v" => {
+                values = numbers(&operation, 4)?;
+                let start = path
+                    .current
+                    .ok_or_else(|| OfdError::Invalid("PDF curve has no current point".into()))?;
+                path.curve_to(
+                    start,
+                    state.point(values[0], values[1], box_),
+                    state.point(values[2], values[3], box_),
+                )?;
+            }
+            "y" => {
+                values = numbers(&operation, 4)?;
+                let end = state.point(values[2], values[3], box_);
+                path.curve_to(state.point(values[0], values[1], box_), end, end)?;
+            }
+            "h" => path.close(),
+            "re" => {
+                values = numbers(&operation, 4)?;
+                let [x, y, w, h] = [values[0], values[1], values[2], values[3]];
+                path.move_to(state.point(x, y, box_));
+                path.line_to(state.point(x + w, y, box_))?;
+                path.line_to(state.point(x + w, y + h, box_))?;
+                path.line_to(state.point(x, y + h, box_))?;
+                path.close();
+            }
+            "S" | "s" | "f" | "f*" | "F" | "B" | "B*" | "b" | "b*" => {
+                if matches!(operation.operator.as_str(), "s" | "b" | "b*") {
+                    path.close();
+                }
+                let fill = matches!(
+                    operation.operator.as_str(),
+                    "f" | "f*" | "F" | "B" | "B*" | "b" | "b*"
+                );
+                let stroke = matches!(
+                    operation.operator.as_str(),
+                    "S" | "s" | "B" | "B*" | "b" | "b*"
+                );
+                let even_odd = matches!(operation.operator.as_str(), "f*" | "B*" | "b*");
+                let new_clip = pending_clip.take().map(|even_odd| PdfClip::Path {
+                    commands: path.commands.clone(),
+                    even_odd,
+                });
+                paint(
+                    output,
+                    page_index,
+                    box_,
+                    &mut path,
+                    &state,
+                    PdfPaint {
+                        fill,
+                        stroke,
+                        even_odd,
+                    },
+                    visible,
+                )?;
+                if let Some(clip) = new_clip {
+                    if state.clips.len() >= 256 {
+                        return Err(OfdError::Limit(
+                            "PDF clipping path nesting is too deep".into(),
+                        ));
+                    }
+                    state.clips.push(clip);
+                }
+            }
+            "W" | "W*" => {
+                if !operation.operands.is_empty() || pending_clip.is_some() {
+                    return Err(OfdError::Invalid(
+                        "PDF clipping operator is malformed".into(),
+                    ));
+                }
+                if path.commands.is_empty() {
+                    return Err(OfdError::Invalid("PDF clipping path is empty".into()));
+                }
+                pending_clip = Some(operation.operator == "W*");
+            }
+            "BI" => {
+                if !path.commands.is_empty() {
+                    return Err(OfdError::Invalid(
+                        "PDF inline image overlaps an unfinished path".into(),
+                    ));
+                }
+                let [image] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("invalid PDF inline image".into()));
+                };
+                let image = image
+                    .as_stream()
+                    .map_err(|_| OfdError::Invalid("invalid PDF inline image".into()))?;
+                if visible {
+                    let image = inline_image_stream(image)?;
+                    import_image_stream(
+                        output,
+                        page_index,
+                        pdf,
+                        page_context.resources,
+                        box_,
+                        &state,
+                        &image,
+                    )?;
+                }
+            }
+            "Do" => {
+                if !path.commands.is_empty() {
+                    return Err(OfdError::Invalid(
+                        "PDF image overlaps an unfinished path".into(),
+                    ));
+                }
+                let [name] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF Do expects one XObject name".into()));
+                };
+                let name = name
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("PDF Do has no XObject name".into()))?;
+                let (_, xobject) = resource(pdf, page_context.resources, b"XObject", name)?;
+                let xobject = xobject
+                    .as_stream()
+                    .map_err(|_| OfdError::Invalid("PDF XObject is not a stream".into()))?;
+                let subtype = xobject
+                    .dict
+                    .get(b"Subtype")
+                    .and_then(Object::as_name)
+                    .map_err(|_| OfdError::Invalid("PDF XObject has no subtype".into()))?;
+                let object_visible = if optional_content_enabled {
+                    if let Ok(group) = xobject.dict.get(b"OC") {
+                        optional_content_value_visible(pdf, group)?
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+                if !visible || !object_visible {
+                    continue;
+                }
+                match subtype {
+                    b"Image" => import_image(
+                        output,
+                        page_index,
+                        pdf,
+                        page_context.resources,
+                        box_,
+                        &state,
+                        name,
+                    )?,
+                    b"Form" => import_form(output, page_context, &state, name, active_forms)?,
+                    _ => return Err(OfdError::Invalid("unsupported PDF XObject subtype".into())),
+                }
+            }
+            "sh" => {
+                if !path.commands.is_empty() {
+                    return Err(OfdError::Invalid(
+                        "PDF shading overlaps an unfinished path".into(),
+                    ));
+                }
+                let [name] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF sh expects one shading name".into()));
+                };
+                let name = name
+                    .as_name()
+                    .map_err(|_| OfdError::Invalid("PDF sh has no shading name".into()))?;
+                import_pdf_shading(output, page_context, &state, name, visible)?;
+            }
+            "BT" => {
+                if !path.commands.is_empty() {
+                    return Err(OfdError::Invalid(
+                        "PDF text overlaps an unfinished path".into(),
+                    ));
+                }
+                text.begin()?;
+            }
+            "ET" => {
+                text.require_active()?;
+                if marked_content.last().is_some_and(|(active, _)| *active) {
+                    return Err(OfdError::Invalid("PDF marked content crosses ET".into()));
+                }
+                if text.clip_requested {
+                    if state.clips.len() >= 256 {
+                        return Err(OfdError::Limit(
+                            "PDF clipping path nesting is too deep".into(),
+                        ));
+                    }
+                    if text.clip_areas.is_empty() {
+                        text.clip_areas.push("<ofd:Text Boundary=\"0 0 1 1\" Size=\"1\"><ofd:TextCode X=\"0\" Y=\"1\"/></ofd:Text>".into());
+                    }
+                    state.clips.push(PdfClip::Text {
+                        areas: std::mem::take(&mut text.clip_areas),
+                    });
+                }
+                text.active = false;
+                text.positioned = false;
+                text.clip_requested = false;
+            }
+            "Tf" => {
+                let [name, size] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF Tf expects a font and size".into()));
+                };
+                text.font = Some(PdfFontSelection::Named(
+                    name.as_name()
+                        .map_err(|_| OfdError::Invalid("PDF Tf has no font name".into()))?
+                        .to_vec(),
+                ));
+                text.size_pt = f64::from(
+                    size.as_float()
+                        .map_err(|_| OfdError::Invalid("PDF Tf has no font size".into()))?,
+                );
+                if !text.size_pt.is_finite() || text.size_pt <= 0.0 {
+                    return Err(OfdError::Invalid("PDF text font size is invalid".into()));
+                }
+            }
+            "Tm" => {
+                text.require_active()?;
+                values = numbers(&operation, 6)?;
+                text.matrix = values
+                    .try_into()
+                    .map_err(|_| OfdError::Invalid("invalid PDF text matrix".into()))?;
+                text.line_matrix = text.matrix;
+                text.positioned = true;
+            }
+            "Td" | "TD" => {
+                text.require_active()?;
+                values = numbers(&operation, 2)?;
+                let [a, b, c, d, x, y] = text.line_matrix;
+                text.line_matrix[4] = x + a * values[0] + c * values[1];
+                text.line_matrix[5] = y + b * values[0] + d * values[1];
+                text.matrix = text.line_matrix;
+                if operation.operator == "TD" {
+                    text.leading = -values[1];
+                }
+                text.positioned = true;
+            }
+            "TL" => {
+                text.leading = numbers(&operation, 1)?[0];
+            }
+            "Tc" => {
+                text.char_spacing = numbers(&operation, 1)?[0];
+            }
+            "Tw" => {
+                text.word_spacing = numbers(&operation, 1)?[0];
+            }
+            "Tz" => {
+                let value = numbers(&operation, 1)?[0];
+                if value == 0.0 {
+                    return Err(OfdError::Invalid("PDF Tz must be nonzero".into()));
+                }
+                text.h_scale = value / 100.0;
+            }
+            "Tr" => {
+                let value = numbers(&operation, 1)?[0];
+                text.render_mode = match value {
+                    0.0 => 0,
+                    1.0 => 1,
+                    2.0 => 2,
+                    3.0 => 3,
+                    4.0 => 4,
+                    5.0 => 5,
+                    6.0 => 6,
+                    7.0 => 7,
+                    _ => {
+                        return Err(OfdError::Invalid(
+                            "PDF text rendering mode is not supported".into(),
+                        ))
+                    }
+                };
+                if text.clip_requested && text.render_mode < 4 {
+                    return Err(OfdError::Invalid(
+                        "PDF text clipping mode changed before ET".into(),
+                    ));
+                }
+            }
+            "Ts" => {
+                text.rise = numbers(&operation, 1)?[0];
+            }
+            "T*" => {
+                text.next_line()?;
+            }
+            "Tj" => {
+                let [value] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF Tj expects one string".into()));
+                };
+                if value.as_str().is_err() {
+                    return Err(OfdError::Invalid("PDF Tj is not a string".into()));
+                }
+                import_text(
+                    output,
+                    page_context,
+                    &state,
+                    &mut text,
+                    std::slice::from_ref(value),
+                    visible,
+                )?;
+            }
+            "TJ" => {
+                let [value] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF TJ expects one array".into()));
+                };
+                let values = value
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF TJ is not an array".into()))?;
+                import_text(output, page_context, &state, &mut text, values, visible)?;
+            }
+            "'" => {
+                let [value] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid("PDF ' expects one string".into()));
+                };
+                if value.as_str().is_err() {
+                    return Err(OfdError::Invalid("PDF ' is not a string".into()));
+                }
+                text.next_line()?;
+                import_text(
+                    output,
+                    page_context,
+                    &state,
+                    &mut text,
+                    std::slice::from_ref(value),
+                    visible,
+                )?;
+            }
+            "\"" => {
+                let [word, character, value] = operation.operands.as_slice() else {
+                    return Err(OfdError::Invalid(
+                        "PDF \" expects spacing and string".into(),
+                    ));
+                };
+                if value.as_str().is_err() {
+                    return Err(OfdError::Invalid("PDF \" is not a string".into()));
+                }
+                let word = f64::from(
+                    word.as_float()
+                        .map_err(|_| OfdError::Invalid("PDF word spacing is invalid".into()))?,
+                );
+                let character =
+                    f64::from(character.as_float().map_err(|_| {
+                        OfdError::Invalid("PDF character spacing is invalid".into())
+                    })?);
+                if !word.is_finite()
+                    || !character.is_finite()
+                    || word.abs() > 1e9
+                    || character.abs() > 1e9
+                {
+                    return Err(OfdError::Limit("PDF text spacing is too large".into()));
+                }
+                text.word_spacing = word;
+                text.char_spacing = character;
+                text.next_line()?;
+                import_text(
+                    output,
+                    page_context,
+                    &state,
+                    &mut text,
+                    std::slice::from_ref(value),
+                    visible,
+                )?;
+            }
+            "n" => {
+                if let Some(even_odd) = pending_clip.take() {
+                    install_clip(&mut state, &path, even_odd)?;
+                }
+                path = PathBuilder::default();
+            }
+            other => {
+                if compatibility_depth == 0 || is_known_unsupported_pdf_operator(other) {
+                    return Err(OfdError::Invalid(format!(
+                        "unsupported PDF operator {other}"
+                    )));
+                }
+            }
+        }
+    }
+    if compatibility_depth != 0 {
+        return Err(OfdError::Invalid(
+            "unbalanced PDF compatibility section".into(),
+        ));
+    }
+    if !marked_content.is_empty() {
+        return Err(OfdError::Invalid("unbalanced PDF marked content".into()));
+    }
+    if !stack.is_empty() {
+        return Err(OfdError::Invalid("unbalanced PDF graphics state".into()));
+    }
+    if text.active {
+        return Err(OfdError::Invalid("unterminated PDF text object".into()));
+    }
+    if pending_clip.is_some() {
+        return Err(OfdError::Invalid("unterminated PDF clipping path".into()));
+    }
+    Ok(())
+}
+
+fn is_known_unsupported_pdf_operator(operator: &str) -> bool {
+    matches!(operator, "ID" | "EI" | "d0" | "d1")
+}
+
+fn decode_pdf_link_uri(raw: &[u8]) -> Result<String, OfdError> {
+    let decoded = if let Some(payload) = raw.strip_prefix(b"\xfe\xff") {
+        decode_pdf_link_utf16(payload, u16::from_be_bytes)?
+    } else if let Some(payload) = raw.strip_prefix(b"\xff\xfe") {
+        decode_pdf_link_utf16(payload, u16::from_le_bytes)?
+    } else {
+        let payload = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
+        std::str::from_utf8(payload)
+            .map_err(|_| OfdError::Invalid("PDF URI Link URI is not UTF-8".into()))?
+            .to_owned()
+    };
+    if decoded.chars().any(|ch| !crate::is_xml_char(ch)) {
+        return Err(OfdError::Invalid(
+            "PDF URI Link URI contains invalid XML characters".into(),
+        ));
+    }
+    Ok(decoded)
+}
+
+fn decode_pdf_link_utf16(
+    payload: &[u8],
+    read_unit: fn([u8; 2]) -> u16,
+) -> Result<String, OfdError> {
+    let chunks = payload.chunks_exact(2);
+    if !chunks.remainder().is_empty() {
+        return Err(OfdError::Invalid(
+            "PDF URI Link URI is truncated UTF-16".into(),
+        ));
+    }
+    let units = chunks
+        .map(|chunk| read_unit([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units)
+        .map_err(|_| OfdError::Invalid("PDF URI Link URI is invalid UTF-16".into()))
+}
+
+fn pdf_link_number(pdf: &PdfDocument, value: &Object) -> Result<f64, OfdError> {
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF link coordinate: {error}")))?;
+    let number = value
+        .as_float()
+        .map_err(|_| OfdError::Invalid("PDF link coordinate is not numeric".into()))?
+        as f64;
+    if !number.is_finite() || number.abs() > 1e9 {
+        return Err(OfdError::Limit("PDF link coordinate is too large".into()));
+    }
+    Ok(number)
+}
+
+fn pdf_link_point(page: &PdfPageImport, x: f64, y: f64) -> (f64, f64) {
+    let x = (x * page.user_unit - page.box_[0]) * MM_PER_PT;
+    let y = (page.box_[3] - y * page.user_unit) * MM_PER_PT;
+    match page.rotation {
+        90 => (page.height_mm - y, x),
+        180 => (page.width_mm - x, page.height_mm - y),
+        270 => (y, page.width_mm - x),
+        _ => (x, y),
+    }
+}
+
+fn pdf_link_boundary(
+    pdf: &PdfDocument,
+    page: &PdfPageImport,
+    values: &[Object],
+) -> Result<[f64; 4], OfdError> {
+    if values.len() != 4 {
+        return Err(OfdError::Invalid(
+            "PDF Link Rect must have four numbers".into(),
+        ));
+    }
+    let [x1, y1, x2, y2] = [
+        pdf_link_number(pdf, &values[0])?,
+        pdf_link_number(pdf, &values[1])?,
+        pdf_link_number(pdf, &values[2])?,
+        pdf_link_number(pdf, &values[3])?,
+    ];
+    if x2 <= x1 || y2 <= y1 {
+        return Err(OfdError::Invalid(
+            "PDF Link Rect has invalid dimensions".into(),
+        ));
+    }
+    let a = pdf_link_point(page, x1, y1);
+    let b = pdf_link_point(page, x2, y2);
+    let boundary = [
+        a.0.min(b.0),
+        a.1.min(b.1),
+        (a.0 - b.0).abs(),
+        (a.1 - b.1).abs(),
+    ];
+    if boundary.iter().any(|value| !value.is_finite()) || boundary[2] <= 0.0 || boundary[3] <= 0.0 {
+        return Err(OfdError::Limit(
+            "PDF Link Rect is outside supported range".into(),
+        ));
+    }
+    Ok(boundary)
+}
+
+fn pdf_link_quads(
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+    page: &PdfPageImport,
+    rect: &[Object],
+) -> Result<Vec<[[f64; 2]; 4]>, OfdError> {
+    let Ok(quads) = annotation.get(b"QuadPoints") else {
+        return Ok(Vec::new());
+    };
+    let (_, quads) = pdf
+        .dereference(quads)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Link QuadPoints: {error}")))?;
+    let values = quads
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF Link QuadPoints is not an array".into()))?;
+    if values.len() % 8 != 0 {
+        return Err(OfdError::Invalid(
+            "PDF Link QuadPoints length is not divisible by eight".into(),
+        ));
+    }
+    if values.len() > 80_000 {
+        return Err(OfdError::Limit(
+            "PDF Link has too many quadrilaterals".into(),
+        ));
+    }
+    let [x1, y1, x2, y2] = [
+        pdf_link_number(pdf, &rect[0])?,
+        pdf_link_number(pdf, &rect[1])?,
+        pdf_link_number(pdf, &rect[2])?,
+        pdf_link_number(pdf, &rect[3])?,
+    ];
+    let mut areas = Vec::with_capacity(values.len() / 8);
+    for values in values.chunks_exact(8) {
+        let mut area = [[0.0; 2]; 4];
+        for (index, point) in area.iter_mut().enumerate() {
+            let x = pdf_link_number(pdf, &values[index * 2])?;
+            let y = pdf_link_number(pdf, &values[index * 2 + 1])?;
+            if x < x1 - 1e-6 || x > x2 + 1e-6 || y < y1 - 1e-6 || y > y2 + 1e-6 {
+                return Ok(Vec::new());
+            }
+            let (page_x, page_y) = pdf_link_point(page, x, y);
+            *point = [page_x, page_y];
+        }
+        if crate::convex_quad_turn(area).is_none() {
+            return Err(OfdError::Invalid(
+                "PDF Link QuadPoints has a degenerate quadrilateral".into(),
+            ));
+        }
+        areas.push(area);
+    }
+    Ok(areas)
+}
+
+fn pdf_annotation_flags(
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+    kind: &str,
+) -> Result<i64, OfdError> {
+    let Ok(flags) = annotation.get(b"F") else {
+        return Ok(0);
+    };
+    let (_, flags) = pdf
+        .dereference(flags)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF {kind} flags: {error}")))?;
+    let flags = flags
+        .as_i64()
+        .map_err(|_| OfdError::Invalid(format!("invalid PDF {kind} flags")))?;
+    if !(0..=u32::MAX as i64).contains(&flags) {
+        return Err(OfdError::Invalid(format!("invalid PDF {kind} flags")));
+    }
+    Ok(flags)
+}
+
+fn import_pdf_annotation_flags(
+    output: &mut OfdDocument,
+    page_index: usize,
+    annotation_id: &str,
+    flags: i64,
+) -> Result<(), OfdError> {
+    if flags & 4 == 0 {
+        output.set_annotation_print(page_index, annotation_id, false)?;
+    }
+    if flags & (1 | 2 | 32) != 0 {
+        output.set_annotation_visible(page_index, annotation_id, false)?;
+    }
+    if flags & 8 != 0 {
+        output.set_annotation_no_zoom(page_index, annotation_id, true)?;
+    }
+    if flags & 16 != 0 {
+        output.set_annotation_no_rotate(page_index, annotation_id, true)?;
+    }
+    if flags & 128 != 0 {
+        output.set_annotation_read_only(page_index, annotation_id, true)?;
+    }
+    if flags & !(1 | 2 | 4 | 8 | 16 | 32 | 128) != 0 {
+        output.set_annotation_parameter(
+            page_index,
+            annotation_id,
+            "PDFFlags",
+            &flags.to_string(),
+        )?;
+    }
+    Ok(())
+}
+
+fn pdf_annotation_subtype<'a>(
+    pdf: &'a PdfDocument,
+    annotation: &'a lopdf::Dictionary,
+) -> Result<Option<&'a [u8]>, OfdError> {
+    let Ok(subtype) = annotation.get(b"Subtype") else {
+        return Ok(None);
+    };
+    let (_, subtype) = pdf
+        .dereference(subtype)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF annotation subtype: {error}")))?;
+    Ok(subtype.as_name().ok())
+}
+
+fn pdf_name_tree_destination<'a>(
+    pdf: &'a PdfDocument,
+    root: &'a Object,
+    name: &[u8],
+) -> Result<Option<&'a Object>, OfdError> {
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    let mut count = 0;
+    while let Some(node) = pending.pop() {
+        count += 1;
+        if count > 10_000 {
+            return Err(OfdError::Limit(
+                "PDF destination name tree is too large".into(),
+            ));
+        }
+        let (id, node) = pdf.dereference(node).map_err(|error| {
+            OfdError::Invalid(format!("invalid PDF destination name tree: {error}"))
+        })?;
+        if id.is_some_and(|id| !visited.insert(id)) {
+            return Err(OfdError::Invalid(
+                "PDF destination name tree has a cycle or repeated node".into(),
+            ));
+        }
+        let node = node.as_dict().map_err(|_| {
+            OfdError::Invalid("PDF destination name tree node is not a dictionary".into())
+        })?;
+        if let Ok(names) = node.get(b"Names") {
+            let (_, names) = pdf.dereference(names).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF destination names: {error}"))
+            })?;
+            let names = names
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF destination Names is not an array".into()))?;
+            if names.len() > 20_000 {
+                return Err(OfdError::Limit("PDF destination Names is too large".into()));
+            }
+            if names.len() % 2 != 0 {
+                return Err(OfdError::Invalid(
+                    "PDF destination Names has an odd length".into(),
+                ));
+            }
+            for pair in names.chunks_exact(2) {
+                let Object::String(key, _) = &pair[0] else {
+                    return Err(OfdError::Invalid(
+                        "PDF destination name is not a string".into(),
+                    ));
+                };
+                if key == name {
+                    return Ok(Some(&pair[1]));
+                }
+            }
+        }
+        if let Ok(kids) = node.get(b"Kids") {
+            let (_, kids) = pdf.dereference(kids).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF destination Kids: {error}"))
+            })?;
+            let kids = kids
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF destination Kids is not an array".into()))?;
+            if kids.len() > 10_000 {
+                return Err(OfdError::Limit("PDF destination Kids is too large".into()));
+            }
+            pending.extend(kids.iter());
+        }
+    }
+    Ok(None)
+}
+
+fn pdf_named_destination<'a>(
+    pdf: &'a PdfDocument,
+    name: &[u8],
+    name_object: bool,
+) -> Result<&'a Object, OfdError> {
+    let catalog = pdf
+        .catalog()
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF catalog: {error}")))?;
+    let legacy = || -> Result<Option<&'a Object>, OfdError> {
+        let Ok(dests) = catalog.get(b"Dests") else {
+            return Ok(None);
+        };
+        let (_, dests) = pdf
+            .dereference(dests)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Dests dictionary: {error}")))?;
+        let dests = dests
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF Dests is not a dictionary".into()))?;
+        Ok(dests.get(name).ok())
+    };
+    let tree = || -> Result<Option<&'a Object>, OfdError> {
+        let Ok(names) = catalog.get(b"Names") else {
+            return Ok(None);
+        };
+        let (_, names) = pdf
+            .dereference(names)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Names dictionary: {error}")))?;
+        let names = names
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF Names is not a dictionary".into()))?;
+        let Ok(root) = names.get(b"Dests") else {
+            return Ok(None);
+        };
+        pdf_name_tree_destination(pdf, root, name)
+    };
+    let found = if name_object {
+        match legacy()? {
+            Some(value) => Some(value),
+            None => tree()?,
+        }
+    } else {
+        match tree()? {
+            Some(value) => Some(value),
+            None => legacy()?,
+        }
+    };
+    found.ok_or_else(|| OfdError::Invalid("PDF Link named destination is missing".into()))
+}
+
+fn pdf_link_destination(
+    pdf: &PdfDocument,
+    value: &Object,
+    pages: &[PdfPageImport],
+    output_page_ids: &[String],
+) -> Result<DestinationInfo, OfdError> {
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Link destination: {error}")))?;
+    let value = match value {
+        Object::Name(name) => pdf_named_destination(pdf, name, true)?,
+        Object::String(name, _) => pdf_named_destination(pdf, name, false)?,
+        _ => value,
+    };
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Link destination: {error}")))?;
+    let value = if let Object::Dictionary(dictionary) = value {
+        dictionary
+            .get(b"D")
+            .map_err(|_| OfdError::Invalid("PDF Link destination dictionary has no D".into()))?
+    } else {
+        value
+    };
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Link destination: {error}")))?;
+    let items = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF Link destination is not an array".into()))?;
+    if items.len() < 2 {
+        return Err(OfdError::Invalid(
+            "PDF Link destination is incomplete".into(),
+        ));
+    }
+    let target_ref = items[0]
+        .as_reference()
+        .map_err(|_| OfdError::Invalid("PDF Link destination page is not a reference".into()))?;
+    let index = pages
+        .iter()
+        .position(|page| page.id == target_ref)
+        .ok_or_else(|| OfdError::Invalid("PDF Link destination page is missing".into()))?;
+    let page = &pages[index];
+    let (_, kind) = pdf.dereference(&items[1]).map_err(|error| {
+        OfdError::Invalid(format!("invalid PDF Link destination type: {error}"))
+    })?;
+    let kind = kind
+        .as_name()
+        .map_err(|_| OfdError::Invalid("PDF Link destination type is invalid".into()))?;
+    let mut destination = DestinationInfo {
+        page_id: output_page_ids[index].clone(),
+        kind: String::new(),
+        left: None,
+        top: None,
+        right: None,
+        bottom: None,
+        zoom: None,
+    };
+    match kind {
+        b"Fit" if items.len() == 2 => destination.kind = "Fit".into(),
+        b"XYZ" if items.len() == 5 => {
+            let (_, x_value) = pdf.dereference(&items[2]).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF Link destination coordinate: {error}"))
+            })?;
+            let (_, y_value) = pdf.dereference(&items[3]).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF Link destination coordinate: {error}"))
+            })?;
+            let (_, zoom_value) = pdf.dereference(&items[4]).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF Link destination zoom: {error}"))
+            })?;
+            let x = if matches!(x_value, Object::Null) {
+                page.box_[0] / page.user_unit
+            } else {
+                pdf_link_number(pdf, x_value)?
+            };
+            let y = if matches!(y_value, Object::Null) {
+                page.box_[3] / page.user_unit
+            } else {
+                pdf_link_number(pdf, y_value)?
+            };
+            let (left, top) = pdf_link_point(page, x, y);
+            destination.kind = "XYZ".into();
+            destination.left = Some(left);
+            destination.top = Some(top);
+            if !matches!(zoom_value, Object::Null) {
+                destination.zoom = Some(pdf_link_number(pdf, zoom_value)?);
+            }
+        }
+        b"FitH" if items.len() == 3 => {
+            let y = pdf_link_number(pdf, &items[2])?;
+            let (left, top) = pdf_link_point(page, page.box_[0] / page.user_unit, y);
+            if matches!(page.rotation, 90 | 270) {
+                destination.kind = "FitV".into();
+                destination.left = Some(left);
+            } else {
+                destination.kind = "FitH".into();
+                destination.top = Some(top);
+            }
+        }
+        b"FitV" if items.len() == 3 => {
+            let x = pdf_link_number(pdf, &items[2])?;
+            let (left, top) = pdf_link_point(page, x, page.box_[3] / page.user_unit);
+            if matches!(page.rotation, 90 | 270) {
+                destination.kind = "FitH".into();
+                destination.top = Some(top);
+            } else {
+                destination.kind = "FitV".into();
+                destination.left = Some(left);
+            }
+        }
+        b"FitR" if items.len() == 6 => {
+            let a = pdf_link_point(
+                page,
+                pdf_link_number(pdf, &items[2])?,
+                pdf_link_number(pdf, &items[3])?,
+            );
+            let b = pdf_link_point(
+                page,
+                pdf_link_number(pdf, &items[4])?,
+                pdf_link_number(pdf, &items[5])?,
+            );
+            destination.kind = "FitR".into();
+            destination.left = Some(a.0.min(b.0));
+            destination.top = Some(a.1.min(b.1));
+            destination.right = Some(a.0.max(b.0));
+            destination.bottom = Some(a.1.max(b.1));
+        }
+        _ => {
+            return Err(OfdError::Invalid(
+                "unsupported PDF Link destination type".into(),
+            ))
+        }
+    }
+    Ok(destination)
+}
+
+fn import_pdf_text_markup(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+    boundary: [f64; 4],
+    quads: &[[[f64; 2]; 4]],
+    kind: &str,
+) -> Result<String, OfdError> {
+    if quads.is_empty() {
+        return Err(OfdError::Invalid(format!(
+            "PDF {kind} requires valid QuadPoints"
+        )));
+    }
+    let mut color = if kind == "Highlight" {
+        [255, 255, 0]
+    } else {
+        [0; 3]
+    };
+    if let Ok(value) = annotation.get(b"C") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF {kind} color: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid(format!("PDF {kind} color is not an array")))?;
+        if values.len() != 3 {
+            return Err(OfdError::Invalid(format!(
+                "PDF {kind} color must have three components"
+            )));
+        }
+        for (target, value) in color.iter_mut().zip(values) {
+            let component = pdf_link_number(pdf, value)?;
+            if !(0.0..=1.0).contains(&component) {
+                return Err(OfdError::Invalid(format!(
+                    "PDF {kind} color is outside 0..1"
+                )));
+            }
+            *target = (component * 255.0).round() as u8;
+        }
+    }
+    let opacity = if let Ok(value) = annotation.get(b"CA") {
+        let value = pdf_link_number(pdf, value)?;
+        if !(0.0..=1.0).contains(&value) {
+            return Err(OfdError::Invalid(format!(
+                "PDF {kind} opacity is outside 0..1"
+            )));
+        }
+        (value * 255.0).round() as u8
+    } else {
+        255
+    };
+    let mut commands = String::new();
+    let mut append_polygon = |points: [[f64; 2]; 4]| {
+        for (index, point) in points.iter().enumerate() {
+            let x = point[0] - boundary[0];
+            let y = point[1] - boundary[1];
+            if index == 0 {
+                commands.push_str(&format!("M {x} {y} "));
+            } else {
+                commands.push_str(&format!("L {x} {y} "));
+            }
+        }
+        commands.push_str("C ");
+    };
+    let mut total_squiggly_segments = 0usize;
+    for quad in quads {
+        if kind == "Squiggly" {
+            let distance = |a: [f64; 2], b: [f64; 2]| (b[0] - a[0]).hypot(b[1] - a[1]);
+            let width = distance(quad[0], quad[1]);
+            let height = distance(quad[0], quad[3]).max(1e-9);
+            let segments = ((width / height) * 4.0).ceil().clamp(4.0, 64.0) as usize;
+            total_squiggly_segments += segments;
+            if total_squiggly_segments > 10_000 {
+                return Err(OfdError::Limit(
+                    "PDF Squiggly has too many path segments".into(),
+                ));
+            }
+            let point = |along: f64, across: f64| {
+                let bottom = [
+                    quad[0][0] + (quad[1][0] - quad[0][0]) * along,
+                    quad[0][1] + (quad[1][1] - quad[0][1]) * along,
+                ];
+                let top = [
+                    quad[3][0] + (quad[2][0] - quad[3][0]) * along,
+                    quad[3][1] + (quad[2][1] - quad[3][1]) * along,
+                ];
+                [
+                    bottom[0] + (top[0] - bottom[0]) * across,
+                    bottom[1] + (top[1] - bottom[1]) * across,
+                ]
+            };
+            for index in 0..segments {
+                let start = index as f64 / segments as f64;
+                let end = (index + 1) as f64 / segments as f64;
+                let start_height = if index % 2 == 0 { 0.06 } else { 0.16 };
+                let end_height = if index % 2 == 0 { 0.16 } else { 0.06 };
+                append_polygon([
+                    point(start, start_height - 0.035),
+                    point(end, end_height - 0.035),
+                    point(end, end_height + 0.035),
+                    point(start, start_height + 0.035),
+                ]);
+            }
+            continue;
+        }
+        let points = if kind == "Highlight" {
+            *quad
+        } else {
+            let (lower, upper) = if kind == "Underline" {
+                (0.03, 0.13)
+            } else {
+                (0.45, 0.55)
+            };
+            let between = |a: [f64; 2], b: [f64; 2], fraction: f64| {
+                [
+                    a[0] + (b[0] - a[0]) * fraction,
+                    a[1] + (b[1] - a[1]) * fraction,
+                ]
+            };
+            [
+                between(quad[0], quad[3], lower),
+                between(quad[1], quad[2], lower),
+                between(quad[1], quad[2], upper),
+                between(quad[0], quad[3], upper),
+            ]
+        };
+        append_polygon(points);
+    }
+    let id = output.add_styled_path_annotation(
+        page_index,
+        commands.trim_end(),
+        boundary,
+        PathStyle {
+            fill: true,
+            stroke: false,
+            fill_color: Some(color),
+            fill_alpha: Some(opacity),
+            ..PathStyle::default()
+        },
+        if kind == "Highlight" {
+            "Highlight"
+        } else {
+            "Path"
+        },
+    )?;
+    if kind != "Highlight" {
+        output.set_annotation_subtype(page_index, &id, Some(kind))?;
+    }
+    let points = quads
+        .iter()
+        .flat_map(|quad| quad.iter().flat_map(|point| point.iter()))
+        .enumerate()
+        .map(|(index, value)| {
+            let axis = index % 2;
+            ((value - boundary[axis]) / boundary[axis + 2]).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    output.set_annotation_parameter(page_index, &id, "PDFMarkupQuads", &points)?;
+    output.set_annotation_parameter(
+        page_index,
+        &id,
+        "PDFMarkupColor",
+        &format!("{} {} {}", color[0], color[1], color[2]),
+    )?;
+    output.set_annotation_parameter(page_index, &id, "PDFMarkupOpacity", &opacity.to_string())?;
+    Ok(id)
+}
+
+fn import_pdf_text_note(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+    boundary: [f64; 4],
+) -> Result<String, OfdError> {
+    let icon = if let Ok(value) = annotation.get(b"Name") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Text Name: {error}")))?;
+        let name = value
+            .as_name()
+            .map_err(|_| OfdError::Invalid("PDF Text Name is not a name".into()))?;
+        match name {
+            b"Note" | b"Comment" | b"Help" | b"Insert" | b"Key" | b"NewParagraph"
+            | b"Paragraph" => std::str::from_utf8(name).expect("standard PDF icon names are ASCII"),
+            _ => {
+                return Err(OfdError::Invalid(
+                    "PDF Text icon name is not supported".into(),
+                ))
+            }
+        }
+    } else {
+        "Note"
+    };
+    let open = if let Ok(value) = annotation.get(b"Open") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Text Open: {error}")))?;
+        value
+            .as_bool()
+            .map_err(|_| OfdError::Invalid("PDF Text Open is not boolean".into()))?
+    } else {
+        false
+    };
+    let mut color = [255, 255, 0];
+    let has_color = if let Ok(value) = annotation.get(b"C") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Text color: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF Text color is not an array".into()))?;
+        if values.len() != 3 {
+            return Err(OfdError::Invalid(
+                "PDF Text color must have three components".into(),
+            ));
+        }
+        for (target, value) in color.iter_mut().zip(values) {
+            let component = pdf_link_number(pdf, value)?;
+            if !(0.0..=1.0).contains(&component) {
+                return Err(OfdError::Invalid("PDF Text color is outside 0..1".into()));
+            }
+            *target = (component * 255.0).round() as u8;
+        }
+        true
+    } else {
+        false
+    };
+    let opacity = if let Ok(value) = annotation.get(b"CA") {
+        let value = pdf_link_number(pdf, value)?;
+        if !(0.0..=1.0).contains(&value) {
+            return Err(OfdError::Invalid("PDF Text opacity is outside 0..1".into()));
+        }
+        Some((value * 255.0).round() as u8)
+    } else {
+        None
+    };
+    let [_, _, width, height] = boundary;
+    let id = output.add_styled_path_annotation(
+        page_index,
+        &format!("M 0 0 L {width} 0 L {width} {height} L 0 {height} C"),
+        boundary,
+        PathStyle {
+            fill: true,
+            stroke: false,
+            fill_color: Some(color),
+            fill_alpha: opacity,
+            ..PathStyle::default()
+        },
+        "Path",
+    )?;
+    output.set_annotation_subtype(page_index, &id, Some("Text"))?;
+    output.set_annotation_parameter(page_index, &id, "PDFTextIcon", icon)?;
+    output.set_annotation_parameter(
+        page_index,
+        &id,
+        "PDFTextOpen",
+        if open { "true" } else { "false" },
+    )?;
+    if has_color {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFTextColor",
+            &format!("{} {} {}", color[0], color[1], color[2]),
+        )?;
+    }
+    if let Some(opacity) = opacity {
+        output.set_annotation_parameter(page_index, &id, "PDFTextOpacity", &opacity.to_string())?;
+    }
+    Ok(id)
+}
+
+fn pdf_shape_color(
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+    key: &[u8],
+) -> Result<Option<[u8; 3]>, OfdError> {
+    let Ok(value) = annotation.get(key) else {
+        return Ok(None);
+    };
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF shape color: {error}")))?;
+    let components = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF shape color is not an array".into()))?;
+    if components.is_empty() {
+        return Ok(None);
+    }
+    let components = components
+        .iter()
+        .map(|value| pdf_link_number(pdf, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let color = match components.as_slice() {
+        [gray] => color(&[*gray])?,
+        [red, green, blue] => color(&[*red, *green, *blue])?,
+        [cyan, magenta, yellow, black] => cmyk_color(&[*cyan, *magenta, *yellow, *black])?,
+        _ => {
+            return Err(OfdError::Invalid(
+                "PDF shape color has invalid length".into(),
+            ))
+        }
+    };
+    Ok(Some(color))
+}
+
+fn pdf_shape_border(
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+    scale: f64,
+) -> Result<(f64, Option<Vec<f64>>), OfdError> {
+    let mut width = 1.0;
+    let mut dash = None;
+    if let Ok(value) = annotation.get(b"BS") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF shape BS: {error}")))?;
+        let border = value
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF shape BS is not a dictionary".into()))?;
+        if let Ok(value) = border.get(b"W") {
+            width = pdf_link_number(pdf, value)?;
+        }
+        let style = if let Ok(value) = border.get(b"S") {
+            let (_, value) = pdf.dereference(value).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF shape border style: {error}"))
+            })?;
+            value
+                .as_name()
+                .map_err(|_| OfdError::Invalid("PDF shape border style is not a name".into()))?
+        } else {
+            b"S"
+        };
+        match style {
+            b"S" => {}
+            b"D" => {
+                dash = Some(if let Ok(value) = border.get(b"D") {
+                    let (_, value) = pdf.dereference(value).map_err(|error| {
+                        OfdError::Invalid(format!("invalid PDF shape dash: {error}"))
+                    })?;
+                    let values = value
+                        .as_array()
+                        .map_err(|_| OfdError::Invalid("PDF shape dash is not an array".into()))?;
+                    values
+                        .iter()
+                        .map(|value| pdf_link_number(pdf, value))
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    vec![3.0]
+                });
+            }
+            _ => {
+                return Err(OfdError::Invalid(
+                    "PDF shape border style is unsupported".into(),
+                ))
+            }
+        }
+    } else if let Ok(value) = annotation.get(b"Border") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF shape Border: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF shape Border is not an array".into()))?;
+        if !(3..=4).contains(&values.len())
+            || pdf_link_number(pdf, &values[0])? != 0.0
+            || pdf_link_number(pdf, &values[1])? != 0.0
+        {
+            return Err(OfdError::Invalid("PDF shape Border is unsupported".into()));
+        }
+        width = pdf_link_number(pdf, &values[2])?;
+        if let Some(value) = values.get(3) {
+            let (_, value) = pdf
+                .dereference(value)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF shape dash: {error}")))?;
+            dash = Some(
+                value
+                    .as_array()
+                    .map_err(|_| OfdError::Invalid("PDF shape dash is not an array".into()))?
+                    .iter()
+                    .map(|value| pdf_link_number(pdf, value))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+    }
+    if !width.is_finite() || !(0.0..=1_000_000.0).contains(&width) {
+        return Err(OfdError::Invalid(
+            "PDF shape border width is invalid".into(),
+        ));
+    }
+    if let Some(values) = &dash {
+        if values.is_empty()
+            || values.len() > 256
+            || values
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1e6)
+        {
+            return Err(OfdError::Invalid("PDF shape dash is invalid".into()));
+        }
+    }
+    Ok((
+        width * scale,
+        dash.map(|values| values.into_iter().map(|value| value * scale).collect()),
+    ))
+}
+
+fn import_pdf_shape_annotation(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    page: &PdfPageImport,
+    annotation: &lopdf::Dictionary,
+    rect: &[Object],
+    kind: &str,
+) -> Result<String, OfdError> {
+    let boundary = pdf_link_boundary(pdf, page, rect)?;
+    if annotation.has(b"BE") {
+        return Err(OfdError::Invalid(
+            "PDF shape border effect is unsupported".into(),
+        ));
+    }
+    let scale = page.user_unit * MM_PER_PT;
+    let (width, dash) = pdf_shape_border(pdf, annotation, scale)?;
+    let stroke = if annotation.has(b"C") {
+        pdf_shape_color(pdf, annotation, b"C")?
+    } else {
+        Some([0, 0, 0])
+    };
+    let fill = pdf_shape_color(pdf, annotation, b"IC")?;
+    let opacity = if let Ok(value) = annotation.get(b"CA") {
+        let opacity = pdf_link_number(pdf, value)?;
+        if !(0.0..=1.0).contains(&opacity) {
+            return Err(OfdError::Invalid("PDF shape opacity is invalid".into()));
+        }
+        (opacity * 255.0).round() as u8
+    } else {
+        255
+    };
+    let mut insets = [0.0; 4];
+    if let Ok(value) = annotation.get(b"RD") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF shape RD: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF shape RD is not an array".into()))?;
+        if values.len() != 4 {
+            return Err(OfdError::Invalid("PDF shape RD needs four values".into()));
+        }
+        let differences = values
+            .iter()
+            .map(|value| pdf_link_number(pdf, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        if differences.iter().any(|value| *value < 0.0) {
+            return Err(OfdError::Invalid("PDF shape RD is negative".into()));
+        }
+        let outer = rect
+            .iter()
+            .map(|value| pdf_link_number(pdf, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let inner = [
+            Object::Real((outer[0] + differences[0]) as f32),
+            Object::Real((outer[1] + differences[3]) as f32),
+            Object::Real((outer[2] - differences[2]) as f32),
+            Object::Real((outer[3] - differences[1]) as f32),
+        ];
+        let inner = pdf_link_boundary(pdf, page, &inner)?;
+        insets = [
+            inner[0] - boundary[0],
+            inner[1] - boundary[1],
+            boundary[0] + boundary[2] - inner[0] - inner[2],
+            boundary[1] + boundary[3] - inner[1] - inner[3],
+        ];
+    }
+    let normalized_insets =
+        std::array::from_fn(|index| insets[index] / boundary[if index % 2 == 0 { 2 } else { 3 }]);
+    output.add_shape_annotation(
+        page_index,
+        kind,
+        boundary,
+        &ShapeAnnotationStyle {
+            stroke_color: stroke,
+            fill_color: fill,
+            line_width: width,
+            dash_sequence: dash,
+            opacity,
+            insets: normalized_insets,
+        },
+    )
+}
+
+fn import_pdf_ink_annotation(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    page: &PdfPageImport,
+    annotation: &lopdf::Dictionary,
+    boundary: [f64; 4],
+) -> Result<String, OfdError> {
+    let (_, value) = pdf
+        .dereference(
+            annotation
+                .get(b"InkList")
+                .map_err(|_| OfdError::Invalid("PDF Ink has no InkList".into()))?,
+        )
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF InkList: {error}")))?;
+    let strokes = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF InkList is not an array".into()))?;
+    if strokes.is_empty() || strokes.len() > 4096 {
+        return Err(OfdError::Invalid(
+            "PDF InkList has invalid stroke count".into(),
+        ));
+    }
+    let mut normalized_strokes = Vec::with_capacity(strokes.len());
+    for stroke in strokes {
+        let (_, stroke) = pdf
+            .dereference(stroke)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Ink stroke: {error}")))?;
+        let points = stroke
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF Ink stroke is not an array".into()))?;
+        if points.len() < 2 || points.len() % 2 != 0 || points.len() > 200_000 {
+            return Err(OfdError::Invalid(
+                "PDF Ink stroke has invalid points".into(),
+            ));
+        }
+        let mut normalized = Vec::with_capacity(points.len());
+        for pair in points.chunks_exact(2) {
+            let (x, y) = pdf_link_point(
+                page,
+                pdf_link_number(pdf, &pair[0])?,
+                pdf_link_number(pdf, &pair[1])?,
+            );
+            for coordinate in [
+                (x - boundary[0]) / boundary[2],
+                (y - boundary[1]) / boundary[3],
+            ] {
+                if !coordinate.is_finite() || !(-1e-6..=1.0 + 1e-6).contains(&coordinate) {
+                    return Err(OfdError::Invalid("PDF Ink point is outside Rect".into()));
+                }
+                normalized.push(coordinate.clamp(0.0, 1.0));
+            }
+        }
+        normalized_strokes.push(normalized);
+    }
+    let (width, dash) = pdf_shape_border(pdf, annotation, page.user_unit * MM_PER_PT)?;
+    let stroke = if annotation.has(b"C") {
+        pdf_shape_color(pdf, annotation, b"C")?
+    } else {
+        Some([0, 0, 0])
+    };
+    let opacity = if let Ok(value) = annotation.get(b"CA") {
+        let value = pdf_link_number(pdf, value)?;
+        if !(0.0..=1.0).contains(&value) {
+            return Err(OfdError::Invalid("PDF Ink opacity is invalid".into()));
+        }
+        (value * 255.0).round() as u8
+    } else {
+        255
+    };
+    let paths = normalized_strokes
+        .iter()
+        .map(|points| {
+            Ok(AnnotationPath {
+                commands: crate::pdf_ink_path(points, boundary[2], boundary[3])?,
+                boundary: [0.0, 0.0, boundary[2], boundary[3]],
+                style: crate::PathStyle {
+                    stroke: stroke.is_some(),
+                    stroke_color: stroke,
+                    line_width: width.max(0.1),
+                    dash_sequence: dash.clone(),
+                    alpha: Some(opacity),
+                    ..crate::PathStyle::default()
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, OfdError>>()?;
+    let id = output.add_multi_path_annotation(page_index, boundary, &paths)?;
+    output.set_annotation_subtype(page_index, &id, Some("Ink"))?;
+    output.set_annotation_parameter(page_index, &id, "PDFShape", "Ink")?;
+    output.set_annotation_parameter(page_index, &id, "PDFShapeWidth", &width.to_string())?;
+    output.set_annotation_parameter(page_index, &id, "PDFShapeOpacity", &opacity.to_string())?;
+    output.set_annotation_parameter(page_index, &id, "PDFShapeInsets", "0 0 0 0")?;
+    if let Some(color) = stroke {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFShapeStroke",
+            &format!("{} {} {}", color[0], color[1], color[2]),
+        )?;
+    }
+    if let Some(dash) = dash {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFShapeDash",
+            &dash
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )?;
+    }
+    let ink_list = normalized_strokes
+        .iter()
+        .map(|stroke| {
+            stroke
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    output.set_annotation_parameter(page_index, &id, "PDFInkList", &ink_list)?;
+    Ok(id)
+}
+
+fn import_pdf_poly_annotation(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    page: &PdfPageImport,
+    annotation: &lopdf::Dictionary,
+    boundary: [f64; 4],
+    kind: &str,
+) -> Result<String, OfdError> {
+    if annotation.has(b"BE") || annotation.has(b"Measure") || annotation.has(b"Path") {
+        return Err(OfdError::Invalid(
+            "PDF polygon decoration is unsupported".into(),
+        ));
+    }
+    let intent = if let Ok(value) = annotation.get(b"IT") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF polygon IT: {error}")))?;
+        let intent = value
+            .as_name()
+            .map_err(|_| OfdError::Invalid("PDF polygon IT is not a name".into()))?;
+        match (kind, intent) {
+            ("Polygon", b"PolygonDimension") => Some("PolygonDimension"),
+            ("PolyLine", b"PolyLineDimension") => Some("PolyLineDimension"),
+            _ => {
+                return Err(OfdError::Invalid(
+                    "PDF polygon intent is unsupported".into(),
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let (_, value) = pdf
+        .dereference(
+            annotation
+                .get(b"Vertices")
+                .map_err(|_| OfdError::Invalid("PDF polygon has no Vertices".into()))?,
+        )
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Vertices: {error}")))?;
+    let values = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF Vertices is not an array".into()))?;
+    let minimum = if kind == "Polygon" { 6 } else { 4 };
+    if values.len() < minimum || values.len() % 2 != 0 || values.len() > 200_000 {
+        return Err(OfdError::Invalid("PDF Vertices has invalid length".into()));
+    }
+    let mut vertices = Vec::with_capacity(values.len());
+    for pair in values.chunks_exact(2) {
+        let (x, y) = pdf_link_point(
+            page,
+            pdf_link_number(pdf, &pair[0])?,
+            pdf_link_number(pdf, &pair[1])?,
+        );
+        for coordinate in [
+            (x - boundary[0]) / boundary[2],
+            (y - boundary[1]) / boundary[3],
+        ] {
+            if !coordinate.is_finite() || !(-1e-6..=1.0 + 1e-6).contains(&coordinate) {
+                return Err(OfdError::Invalid("PDF vertex is outside Rect".into()));
+            }
+            vertices.push(coordinate.clamp(0.0, 1.0));
+        }
+    }
+    let (width, dash) = pdf_shape_border(pdf, annotation, page.user_unit * MM_PER_PT)?;
+    let stroke = if annotation.has(b"C") {
+        pdf_shape_color(pdf, annotation, b"C")?
+    } else {
+        Some([0, 0, 0])
+    };
+    let interior = pdf_shape_color(pdf, annotation, b"IC")?;
+    let opacity = if let Ok(value) = annotation.get(b"CA") {
+        let opacity = pdf_link_number(pdf, value)?;
+        if !(0.0..=1.0).contains(&opacity) {
+            return Err(OfdError::Invalid("PDF polygon opacity is invalid".into()));
+        }
+        (opacity * 255.0).round() as u8
+    } else {
+        255
+    };
+    let endings = if let Ok(value) = annotation.get(b"LE") {
+        if kind != "PolyLine" {
+            return Err(OfdError::Invalid("PDF Polygon LE is invalid".into()));
+        }
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF PolyLine LE: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF PolyLine LE is not an array".into()))?;
+        if values.len() != 2 {
+            return Err(OfdError::Invalid("PDF PolyLine LE needs two names".into()));
+        }
+        let parse = |item: &Object| -> Result<&'static str, OfdError> {
+            let (_, item) = pdf
+                .dereference(item)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF PolyLine LE: {error}")))?;
+            item.as_name()
+                .ok()
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .and_then(crate::pdf_line_ending_name)
+                .ok_or_else(|| OfdError::Invalid("PDF PolyLine LE style is invalid".into()))
+        };
+        Some([parse(&values[0])?, parse(&values[1])?])
+    } else {
+        None
+    };
+    let style = crate::PathStyle {
+        fill: kind == "Polygon" && interior.is_some(),
+        fill_color: if kind == "Polygon" { interior } else { None },
+        stroke: stroke.is_some(),
+        stroke_color: stroke,
+        line_width: width.max(0.1),
+        dash_sequence: dash.clone(),
+        alpha: Some(opacity),
+        ..crate::PathStyle::default()
+    };
+    let mut graphics = vec![AnnotationGraphic::Path(AnnotationPath {
+        commands: crate::pdf_poly_path(&vertices, boundary[2], boundary[3], kind == "Polygon")?,
+        boundary: [0.0, 0.0, boundary[2], boundary[3]],
+        style,
+    })];
+    if let Some(endings) = endings {
+        graphics.extend(pdf_polyline_ending_graphics(
+            &vertices, boundary, endings, width, stroke, interior, opacity,
+        ));
+    }
+    let id = output.add_mixed_annotation(page_index, boundary, &graphics)?;
+    output.set_annotation_subtype(page_index, &id, Some(kind))?;
+    output.set_annotation_parameter(page_index, &id, "PDFShape", kind)?;
+    output.set_annotation_parameter(page_index, &id, "PDFShapeWidth", &width.to_string())?;
+    output.set_annotation_parameter(page_index, &id, "PDFShapeOpacity", &opacity.to_string())?;
+    output.set_annotation_parameter(page_index, &id, "PDFShapeInsets", "0 0 0 0")?;
+    output.set_annotation_parameter(
+        page_index,
+        &id,
+        "PDFShapeVertices",
+        &vertices
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )?;
+    if let Some(color) = stroke {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFShapeStroke",
+            &format!("{} {} {}", color[0], color[1], color[2]),
+        )?;
+    }
+    if let Some(color) = interior {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFShapeFill",
+            &format!("{} {} {}", color[0], color[1], color[2]),
+        )?;
+    }
+    if let Some(dash) = dash {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFShapeDash",
+            &dash
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )?;
+    }
+    if let Some(endings) = endings {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFLineEndings",
+            &format!("{} {}", endings[0], endings[1]),
+        )?;
+    }
+    if let Some(intent) = intent {
+        output.set_annotation_parameter(page_index, &id, "PDFShapeIntent", intent)?;
+    }
+    Ok(id)
+}
+
+fn import_pdf_line_annotation(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    page: &PdfPageImport,
+    annotation: &lopdf::Dictionary,
+    boundary: [f64; 4],
+) -> Result<String, OfdError> {
+    for key in [b"Cap".as_slice(), b"CP", b"CO", b"BE"] {
+        if annotation.has(key) {
+            return Err(OfdError::Invalid(
+                "PDF Line decoration is unsupported".into(),
+            ));
+        }
+    }
+    let endings = if let Ok(value) = annotation.get(b"LE") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Line LE: {error}")))?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF Line LE is not an array".into()))?;
+        let [start, end] = values.as_slice() else {
+            return Err(OfdError::Invalid("PDF Line LE needs two names".into()));
+        };
+        let ending = |value: &Object| -> Result<&'static str, OfdError> {
+            let (_, value) = pdf
+                .dereference(value)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF Line LE: {error}")))?;
+            let name = value
+                .as_name()
+                .ok()
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .and_then(pdf_line_ending_name)
+                .ok_or_else(|| OfdError::Invalid("PDF Line LE style is invalid".into()))?;
+            Ok(name)
+        };
+        Some([ending(start)?, ending(end)?])
+    } else {
+        None
+    };
+    let interior = pdf_shape_color(pdf, annotation, b"IC")?;
+    if annotation.has(b"LLE") && !annotation.has(b"LL") {
+        return Err(OfdError::Invalid("PDF Line LLE requires LL".into()));
+    }
+    let read_leader = |key: &[u8], nonnegative: bool| -> Result<f64, OfdError> {
+        let Ok(value) = annotation.get(key) else {
+            return Ok(0.0);
+        };
+        let value = pdf_link_number(pdf, value)? * page.user_unit * MM_PER_PT;
+        if !value.is_finite() || value.abs() > 1e6 || (nonnegative && value < 0.0) {
+            return Err(OfdError::Invalid(format!(
+                "PDF Line {} is invalid",
+                String::from_utf8_lossy(key)
+            )));
+        }
+        Ok(value)
+    };
+    let leader = if [b"LL".as_slice(), b"LLE", b"LLO"]
+        .iter()
+        .any(|key| annotation.has(key))
+    {
+        Some([
+            read_leader(b"LL", false)?,
+            read_leader(b"LLE", true)?,
+            read_leader(b"LLO", true)?,
+        ])
+    } else {
+        None
+    };
+    let (_, value) = pdf
+        .dereference(
+            annotation
+                .get(b"L")
+                .map_err(|_| OfdError::Invalid("PDF Line has no L".into()))?,
+        )
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Line L: {error}")))?;
+    let endpoints = value
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF Line L is not an array".into()))?;
+    if endpoints.len() != 4 {
+        return Err(OfdError::Invalid("PDF Line L needs four numbers".into()));
+    }
+    let numbers = endpoints
+        .iter()
+        .map(|value| pdf_link_number(pdf, value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (x1, y1) = pdf_link_point(page, numbers[0], numbers[1]);
+    let (x2, y2) = pdf_link_point(page, numbers[2], numbers[3]);
+    let normalized = [
+        (x1 - boundary[0]) / boundary[2],
+        (y1 - boundary[1]) / boundary[3],
+        (x2 - boundary[0]) / boundary[2],
+        (y2 - boundary[1]) / boundary[3],
+    ];
+    if normalized
+        .iter()
+        .any(|value| !value.is_finite() || !(-1e-6..=1.0 + 1e-6).contains(value))
+        || (x1 == x2 && y1 == y2)
+    {
+        return Err(OfdError::Invalid("PDF Line endpoints are invalid".into()));
+    }
+    let normalized = normalized.map(|value| value.clamp(0.0, 1.0));
+    let (width, dash) = pdf_shape_border(pdf, annotation, page.user_unit * MM_PER_PT)?;
+    let stroke = if annotation.has(b"C") {
+        pdf_shape_color(pdf, annotation, b"C")?
+    } else {
+        Some([0, 0, 0])
+    };
+    let opacity = if let Ok(value) = annotation.get(b"CA") {
+        let opacity = pdf_link_number(pdf, value)?;
+        if !(0.0..=1.0).contains(&opacity) {
+            return Err(OfdError::Invalid("PDF Line opacity is invalid".into()));
+        }
+        (opacity * 255.0).round() as u8
+    } else {
+        255
+    };
+    let id = output.add_line_annotation(
+        page_index,
+        boundary,
+        [
+            normalized[0] * boundary[2],
+            normalized[1] * boundary[3],
+            normalized[2] * boundary[2],
+            normalized[3] * boundary[3],
+        ],
+        &ShapeAnnotationStyle {
+            stroke_color: stroke,
+            fill_color: None,
+            line_width: width,
+            dash_sequence: dash.clone(),
+            opacity,
+            insets: [0.0; 4],
+        },
+    )?;
+    let endpoints = [
+        normalized[0] * boundary[2],
+        normalized[1] * boundary[3],
+        normalized[2] * boundary[2],
+        normalized[3] * boundary[3],
+    ];
+    let (main, leader_paths) = pdf_line_leader_paths(endpoints, leader);
+    if let Some([length, extension, offset]) = leader {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFLineLeader",
+            &format!("{length} {extension} {offset}"),
+        )?;
+        if length != 0.0 {
+            let object_id = output.annotation_objects(page_index, &id)?[0]
+                .id
+                .clone()
+                .ok_or_else(|| OfdError::Invalid("PDF Line has no path ID".into()))?;
+            output.set_annotation_path_data(
+                page_index,
+                &id,
+                &object_id,
+                &format!("M {} {} L {} {}", main[0], main[1], main[2], main[3]),
+            )?;
+        }
+    }
+    let mut graphics = leader_paths
+        .into_iter()
+        .map(|commands| {
+            AnnotationGraphic::Path(AnnotationPath {
+                commands,
+                boundary: [0.0, 0.0, boundary[2], boundary[3]],
+                style: crate::PathStyle {
+                    line_width: width.max(0.1),
+                    stroke: stroke.is_some(),
+                    stroke_color: stroke,
+                    dash_sequence: dash.clone(),
+                    alpha: Some(opacity),
+                    ..crate::PathStyle::default()
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some([start, end]) = endings {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFLineEndings",
+            &format!("{start} {end}"),
+        )?;
+        graphics.extend(
+            [start, end]
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, ending)| {
+                    pdf_line_ending_graphic(
+                        ending,
+                        index,
+                        boundary,
+                        main,
+                        &crate::PathStyle {
+                            line_width: width,
+                            stroke_color: stroke,
+                            fill_color: interior,
+                            alpha: Some(opacity),
+                            ..crate::PathStyle::default()
+                        },
+                    )
+                }),
+        );
+    }
+    if !graphics.is_empty() {
+        output.append_annotation_objects(page_index, &id, &graphics)?;
+    }
+    if let Some([red, green, blue]) = interior {
+        output.set_annotation_parameter(
+            page_index,
+            &id,
+            "PDFShapeFill",
+            &format!("{red} {green} {blue}"),
+        )?;
+    }
+    Ok(id)
+}
+
+pub(super) fn pdf_line_leader_paths(
+    endpoints: [f64; 4],
+    leader: Option<[f64; 3]>,
+) -> ([f64; 4], Vec<String>) {
+    let Some([length, extension, offset]) = leader else {
+        return (endpoints, Vec::new());
+    };
+    if length == 0.0 {
+        return (endpoints, Vec::new());
+    }
+    let [x1, y1, x2, y2] = endpoints;
+    let line_length = (x2 - x1).hypot(y2 - y1);
+    let normal = [-(y2 - y1) / line_length, (x2 - x1) / line_length];
+    let direction = length.signum();
+    let at = |x: f64, y: f64, distance: f64| [x + normal[0] * distance, y + normal[1] * distance];
+    let main_distance = direction * offset + length;
+    let start = at(x1, y1, main_distance);
+    let end = at(x2, y2, main_distance);
+    let paths = [(x1, y1), (x2, y2)]
+        .into_iter()
+        .map(|(x, y)| {
+            let begin = at(x, y, direction * offset);
+            let finish = at(x, y, main_distance + direction * extension);
+            format!("M {} {} L {} {}", begin[0], begin[1], finish[0], finish[1])
+        })
+        .collect();
+    ([start[0], start[1], end[0], end[1]], paths)
+}
+
+pub(super) fn pdf_line_ending_graphic(
+    ending: &str,
+    index: usize,
+    boundary: [f64; 4],
+    endpoints: [f64; 4],
+    style: &crate::PathStyle,
+) -> Option<AnnotationGraphic> {
+    if ending == "None" {
+        return None;
+    }
+    let (tip, other) = if index == 0 {
+        ([endpoints[0], endpoints[1]], [endpoints[2], endpoints[3]])
+    } else {
+        ([endpoints[2], endpoints[3]], [endpoints[0], endpoints[1]])
+    };
+    let dx = other[0] - tip[0];
+    let dy = other[1] - tip[1];
+    let length = dx.hypot(dy);
+    if length <= 0.0 {
+        return None;
+    }
+    let (ux, uy) = (dx / length, dy / length);
+    let (vx, vy) = (-uy, ux);
+    let size = (style.line_width.max(0.35) * 4.0)
+        .max(1.0)
+        .min(length / 2.0);
+    let point = |along: f64, across: f64| {
+        format!(
+            "{} {}",
+            tip[0] + ux * along + vx * across,
+            tip[1] + uy * along + vy * across
+        )
+    };
+    let half = size / 2.0;
+    let commands = match ending {
+        "Square" => format!(
+            "M {} L {} L {} L {} C",
+            point(-half, -half),
+            point(half, -half),
+            point(half, half),
+            point(-half, half)
+        ),
+        "Circle" => {
+            let k = 0.552_284_749_830_793_6 * half;
+            format!(
+                "M {} B {} {} {} B {} {} {} B {} {} {} B {} {} {} C",
+                point(half, 0.0),
+                point(half, k),
+                point(k, half),
+                point(0.0, half),
+                point(-k, half),
+                point(-half, k),
+                point(-half, 0.0),
+                point(-half, -k),
+                point(-k, -half),
+                point(0.0, -half),
+                point(k, -half),
+                point(half, -k),
+                point(half, 0.0)
+            )
+        }
+        "Diamond" => format!(
+            "M {} L {} L {} L {} C",
+            point(-half, 0.0),
+            point(0.0, -half),
+            point(half, 0.0),
+            point(0.0, half)
+        ),
+        "OpenArrow" => format!(
+            "M {} L {} L {}",
+            point(size, -half),
+            point(0.0, 0.0),
+            point(size, half)
+        ),
+        "ClosedArrow" => format!(
+            "M {} L {} L {} C",
+            point(size, -half),
+            point(0.0, 0.0),
+            point(size, half)
+        ),
+        "Butt" => format!("M {} L {}", point(0.0, -half), point(0.0, half)),
+        "ROpenArrow" => format!(
+            "M {} L {} L {}",
+            point(-size, -half),
+            point(0.0, 0.0),
+            point(-size, half)
+        ),
+        "RClosedArrow" => format!(
+            "M {} L {} L {} C",
+            point(-size, -half),
+            point(0.0, 0.0),
+            point(-size, half)
+        ),
+        "Slash" => format!("M {} L {}", point(-half, -half), point(half, half)),
+        _ => return None,
+    };
+    let closed = matches!(
+        ending,
+        "Square" | "Circle" | "Diamond" | "ClosedArrow" | "RClosedArrow"
+    );
+    Some(AnnotationGraphic::Path(AnnotationPath {
+        commands,
+        boundary: [0.0, 0.0, boundary[2], boundary[3]],
+        style: crate::PathStyle {
+            fill: closed && style.fill_color.is_some(),
+            fill_color: if closed { style.fill_color } else { None },
+            stroke: style.stroke_color.is_some(),
+            stroke_color: style.stroke_color,
+            line_width: style.line_width.max(0.1),
+            alpha: style.alpha,
+            ..crate::PathStyle::default()
+        },
+    }))
+}
+
+pub(super) fn pdf_polyline_ending_graphics(
+    vertices: &[f64],
+    boundary: [f64; 4],
+    endings: [&str; 2],
+    width: f64,
+    stroke: Option<[u8; 3]>,
+    interior: Option<[u8; 3]>,
+    opacity: u8,
+) -> Vec<AnnotationGraphic> {
+    let count = vertices.len() / 2;
+    if count < 2 {
+        return Vec::new();
+    }
+    let point = |index: usize| {
+        [
+            vertices[index * 2] * boundary[2],
+            vertices[index * 2 + 1] * boundary[3],
+        ]
+    };
+    let first = point(0);
+    let second = point(1);
+    let penultimate = point(count - 2);
+    let last = point(count - 1);
+    let style = crate::PathStyle {
+        line_width: width,
+        stroke_color: stroke,
+        fill_color: interior,
+        alpha: Some(opacity),
+        ..crate::PathStyle::default()
+    };
+    [
+        (endings[0], 0, [first[0], first[1], second[0], second[1]]),
+        (
+            endings[1],
+            1,
+            [penultimate[0], penultimate[1], last[0], last[1]],
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(ending, index, endpoints)| {
+        pdf_line_ending_graphic(ending, index, boundary, endpoints, &style)
+    })
+    .collect()
+}
+
+fn import_page_links(
+    output: &mut OfdDocument,
+    page_index: usize,
+    pdf: &PdfDocument,
+    pages: &[PdfPageImport],
+    output_page_ids: &[String],
+) -> Result<(), OfdError> {
+    let page = pdf
+        .get_dictionary(pages[page_index].id)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF page: {error}")))?;
+    let Ok(annots) = page.get(b"Annots") else {
+        return Ok(());
+    };
+    let (_, annots) = pdf
+        .dereference(annots)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF annotations: {error}")))?;
+    let annots = annots
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF annotations are not an array".into()))?;
+    if annots.len() > 10_000 {
+        return Err(OfdError::Limit("PDF page has too many annotations".into()));
+    }
+    let popups = pdf_popup_annotations(pdf, annots, &pages[page_index])?;
+    let optional_content_enabled = pdf_has_optional_content(pdf)?;
+    for item in annots {
+        let annotation_ref = item.as_reference().ok();
+        let (_, item) = pdf
+            .dereference(item)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF annotation: {error}")))?;
+        let annotation = item
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF annotation is not a dictionary".into()))?;
+        let subtype = pdf_annotation_subtype(pdf, annotation)?;
+        if subtype == Some(b"FileAttachment") {
+            continue;
+        }
+        let standalone_popup = subtype == Some(b"Popup") && !annotation.has(b"Parent");
+        if subtype == Some(b"Popup") && !standalone_popup {
+            continue;
+        }
+        if !matches!(
+            subtype,
+            Some(
+                b"Link"
+                    | b"Text"
+                    | b"Highlight"
+                    | b"Underline"
+                    | b"StrikeOut"
+                    | b"Squiggly"
+                    | b"Square"
+                    | b"Circle"
+                    | b"Line"
+                    | b"Ink"
+                    | b"Polygon"
+                    | b"PolyLine"
+                    | b"Popup"
+            )
+        ) {
+            return Err(OfdError::Invalid(
+                "PDF page annotation subtype is not supported".into(),
+            ));
+        }
+        if annotation.has(b"AP") {
+            return Err(OfdError::Invalid(
+                "PDF annotation appearance is not supported".into(),
+            ));
+        }
+        if optional_content_enabled {
+            if let Ok(group) = annotation.get(b"OC") {
+                if !optional_content_value_visible(pdf, group)? {
+                    continue;
+                }
+            }
+        }
+        let rect = annotation
+            .get(b"Rect")
+            .map_err(|_| OfdError::Invalid("PDF Link has no Rect".into()))?;
+        let (_, rect) = pdf
+            .dereference(rect)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Link Rect: {error}")))?;
+        let rect = rect
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF Link Rect is not an array".into()))?;
+        let boundary = pdf_link_boundary(pdf, &pages[page_index], rect)?;
+        let quads = if matches!(
+            subtype,
+            Some(
+                b"Text"
+                    | b"Square"
+                    | b"Circle"
+                    | b"Line"
+                    | b"Ink"
+                    | b"Polygon"
+                    | b"PolyLine"
+                    | b"Popup"
+            )
+        ) {
+            Vec::new()
+        } else {
+            pdf_link_quads(pdf, annotation, &pages[page_index], rect)?
+        };
+        let kind = match subtype {
+            Some(b"Text" | b"Popup") => "Text",
+            Some(b"Square") => "Square",
+            Some(b"Circle") => "Circle",
+            Some(b"Line") => "Line",
+            Some(b"Ink") => "Ink",
+            Some(b"Polygon") => "Polygon",
+            Some(b"PolyLine") => "PolyLine",
+            Some(b"Highlight") => "Highlight",
+            Some(b"Underline") => "Underline",
+            Some(b"StrikeOut") => "StrikeOut",
+            Some(b"Squiggly") => "Squiggly",
+            _ => "Link",
+        };
+        let flags = pdf_annotation_flags(pdf, annotation, kind)?;
+        let id = if kind == "Text" {
+            import_pdf_text_note(output, page_index, pdf, annotation, boundary)?
+        } else if matches!(kind, "Square" | "Circle") {
+            import_pdf_shape_annotation(
+                output,
+                page_index,
+                pdf,
+                &pages[page_index],
+                annotation,
+                rect,
+                kind,
+            )?
+        } else if kind == "Line" {
+            import_pdf_line_annotation(
+                output,
+                page_index,
+                pdf,
+                &pages[page_index],
+                annotation,
+                boundary,
+            )?
+        } else if kind == "Ink" {
+            import_pdf_ink_annotation(
+                output,
+                page_index,
+                pdf,
+                &pages[page_index],
+                annotation,
+                boundary,
+            )?
+        } else if matches!(kind, "Polygon" | "PolyLine") {
+            import_pdf_poly_annotation(
+                output,
+                page_index,
+                pdf,
+                &pages[page_index],
+                annotation,
+                boundary,
+                kind,
+            )?
+        } else if kind != "Link" {
+            import_pdf_text_markup(output, page_index, pdf, annotation, boundary, &quads, kind)?
+        } else if let Ok(action) = annotation.get(b"A") {
+            let (_, action) = pdf
+                .dereference(action)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF Link action: {error}")))?;
+            let action = action
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF Link action is not a dictionary".into()))?;
+            let action_type = action.get(b"S").ok().map(|value| pdf.dereference(value));
+            let action_type = action_type
+                .transpose()
+                .map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF Link action type: {error}"))
+                })?
+                .and_then(|(_, value)| value.as_name().ok());
+            match action_type {
+                Some(b"URI") => {
+                    let uri = action
+                        .get(b"URI")
+                        .map_err(|_| OfdError::Invalid("PDF URI Link has no URI".into()))?;
+                    let (_, uri) = pdf.dereference(uri).map_err(|error| {
+                        OfdError::Invalid(format!("invalid PDF URI Link URI: {error}"))
+                    })?;
+                    let raw = uri.as_str().map_err(|_| {
+                        OfdError::Invalid("PDF URI Link URI is not a string".into())
+                    })?;
+                    let decoded = decode_pdf_link_uri(raw)?;
+                    output.add_uri_link_annotation_with_quads(
+                        page_index, &decoded, boundary, &quads,
+                    )?
+                }
+                Some(b"GoTo") => {
+                    let value = action.get(b"D").map_err(|_| {
+                        OfdError::Invalid("PDF GoTo Link has no destination".into())
+                    })?;
+                    let destination = pdf_link_destination(pdf, value, pages, output_page_ids)?;
+                    output.add_goto_link_annotation_with_quads(
+                        page_index,
+                        destination,
+                        boundary,
+                        &quads,
+                    )?
+                }
+                _ => {
+                    return Err(OfdError::Invalid(
+                        "PDF Link action type is not supported".into(),
+                    ))
+                }
+            }
+        } else if let Ok(value) = annotation.get(b"Dest") {
+            let destination = pdf_link_destination(pdf, value, pages, output_page_ids)?;
+            output.add_goto_link_annotation_with_quads(page_index, destination, boundary, &quads)?
+        } else {
+            return Err(OfdError::Invalid(
+                "PDF Link has no action or destination".into(),
+            ));
+        };
+        import_pdf_annotation_flags(output, page_index, &id, flags)?;
+        import_pdf_annotation_metadata(output, page_index, &id, pdf, annotation)?;
+        if standalone_popup {
+            output.set_annotation_parameter(page_index, &id, "PDFPopupStandalone", "true")?;
+        }
+        if let Some(parent_ref) = annotation_ref {
+            if let Some((boundary, open)) = popups.get(&parent_ref) {
+                output.set_annotation_parameter(
+                    page_index,
+                    &id,
+                    "PDFPopupBoundary",
+                    &format!(
+                        "{} {} {} {}",
+                        boundary[0], boundary[1], boundary[2], boundary[3]
+                    ),
+                )?;
+                output.set_annotation_parameter(
+                    page_index,
+                    &id,
+                    "PDFPopupOpen",
+                    if *open { "true" } else { "false" },
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pdf_popup_annotations(
+    pdf: &PdfDocument,
+    annots: &[Object],
+    page: &PdfPageImport,
+) -> Result<HashMap<ObjectId, ([f64; 4], bool)>, OfdError> {
+    let references: HashSet<_> = annots
+        .iter()
+        .filter_map(|item| item.as_reference().ok())
+        .collect();
+    let mut referenced_popups = HashSet::new();
+    for item in annots {
+        let (_, value) = pdf
+            .dereference(item)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF annotation: {error}")))?;
+        let annotation = value
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF annotation is not a dictionary".into()))?;
+        if let Ok(reference) = annotation.get(b"Popup").and_then(Object::as_reference) {
+            referenced_popups.insert(reference);
+        }
+    }
+    let mut popups = HashMap::new();
+    for item in annots {
+        let (_, value) = pdf
+            .dereference(item)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF annotation: {error}")))?;
+        let annotation = value
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF annotation is not a dictionary".into()))?;
+        if pdf_annotation_subtype(pdf, annotation)? != Some(b"Popup") {
+            continue;
+        }
+        let popup_ref = item
+            .as_reference()
+            .map_err(|_| OfdError::Invalid("PDF Popup must be indirect".into()))?;
+        let Ok(parent) = annotation.get(b"Parent") else {
+            if referenced_popups.contains(&popup_ref) {
+                return Err(OfdError::Invalid(
+                    "PDF Popup has no Parent but is referenced by another annotation".into(),
+                ));
+            }
+            continue;
+        };
+        let parent_ref = parent
+            .as_reference()
+            .map_err(|_| OfdError::Invalid("PDF Popup Parent is not a reference".into()))?;
+        if !references.contains(&parent_ref) || parent_ref == popup_ref {
+            return Err(OfdError::Invalid(
+                "PDF Popup Parent is not on the same page".into(),
+            ));
+        }
+        let parent = pdf
+            .get_dictionary(parent_ref)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Popup Parent: {error}")))?;
+        if !matches!(
+            pdf_annotation_subtype(pdf, parent)?,
+            Some(
+                b"Text"
+                    | b"Highlight"
+                    | b"Underline"
+                    | b"StrikeOut"
+                    | b"Squiggly"
+                    | b"Square"
+                    | b"Circle"
+                    | b"Line"
+                    | b"Ink"
+                    | b"Polygon"
+                    | b"PolyLine"
+            )
+        ) {
+            return Err(OfdError::Invalid(
+                "PDF Popup Parent subtype is not supported".into(),
+            ));
+        }
+        if let Ok(value) = parent.get(b"Popup") {
+            if value.as_reference().ok() != Some(popup_ref) {
+                return Err(OfdError::Invalid(
+                    "PDF Popup Parent has a different Popup reference".into(),
+                ));
+            }
+        }
+        let rect = annotation
+            .get(b"Rect")
+            .map_err(|_| OfdError::Invalid("PDF Popup has no Rect".into()))?;
+        let (_, rect) = pdf
+            .dereference(rect)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Popup Rect: {error}")))?;
+        let rect = rect
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF Popup Rect is not an array".into()))?;
+        let boundary = pdf_link_boundary(pdf, page, rect)?;
+        let open = if let Ok(value) = annotation.get(b"Open") {
+            let (_, value) = pdf
+                .dereference(value)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF Popup Open: {error}")))?;
+            value
+                .as_bool()
+                .map_err(|_| OfdError::Invalid("PDF Popup Open is not boolean".into()))?
+        } else {
+            false
+        };
+        if popups.insert(parent_ref, (boundary, open)).is_some() {
+            return Err(OfdError::Invalid(
+                "PDF Popup Parent has multiple popups".into(),
+            ));
+        }
+    }
+    Ok(popups)
+}
+
+fn import_pdf_annotation_metadata(
+    output: &mut OfdDocument,
+    page_index: usize,
+    annotation_id: &str,
+    pdf: &PdfDocument,
+    annotation: &lopdf::Dictionary,
+) -> Result<(), OfdError> {
+    if let Some(name) = pdf_text_field(pdf, annotation, b"NM")? {
+        output.set_annotation_parameter(page_index, annotation_id, "PDFName", &name)?;
+    }
+    if let Some(contents) = pdf_text_field(pdf, annotation, b"Contents")? {
+        output.set_annotation_remark(page_index, annotation_id, Some(&contents))?;
+    }
+    if let Some(author) = pdf_text_field(pdf, annotation, b"T")? {
+        if !author.trim().is_empty() {
+            output.set_annotation_creator(page_index, annotation_id, &author)?;
+        }
+    }
+    if let Some(modified) = pdf_text_field(pdf, annotation, b"M")? {
+        let day = pdf_info_date(&modified)
+            .map_err(|_| OfdError::Invalid("PDF annotation M date is invalid".into()))?;
+        if let Some(day) = day {
+            output.set_annotation_last_mod_date(page_index, annotation_id, &day)?;
+        }
+    }
+    Ok(())
+}
+
+fn pdf_text_field(
+    pdf: &PdfDocument,
+    info: &lopdf::Dictionary,
+    key: &[u8],
+) -> Result<Option<String>, OfdError> {
+    let Ok(value) = info.get(key) else {
+        return Ok(None);
+    };
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF text value: {error}")))?;
+    let raw = value
+        .as_str()
+        .map_err(|_| OfdError::Invalid("PDF text is not a string".into()))?;
+    if raw.starts_with(b"\xfe\xff") && (raw.len() - 2) % 2 != 0 {
+        return Err(OfdError::Invalid("PDF UTF-16 text is truncated".into()));
+    }
+    let decoded = lopdf::decode_text_string(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF text: {error}")))?;
+    if !raw.starts_with(b"\xfe\xff")
+        && !raw.starts_with(b"\xef\xbb\xbf")
+        && decoded.chars().count() != raw.len()
+    {
+        return Err(OfdError::Invalid(
+            "PDF text cannot be decoded losslessly".into(),
+        ));
+    }
+    let decoded = decoded.trim_start_matches('\u{feff}');
+    if decoded.len() > 1_000_000
+        || decoded.chars().any(|ch| {
+            ch == '\u{fffd}'
+                || !(matches!(ch, '\t' | '\n' | '\r')
+                    || (' '..='\u{d7ff}').contains(&ch)
+                    || ('\u{e000}'..='\u{fffd}').contains(&ch)
+                    || ch >= '\u{10000}')
+        })
+    {
+        return Err(OfdError::Invalid("PDF text is not valid XML".into()));
+    }
+    Ok(Some(decoded.to_owned()))
+}
+
+pub(super) fn calendar_day_valid(year: u16, month: u8, day: u8) -> bool {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    day > 0 && day <= days
+}
+
+fn pdf_info_date(value: &str) -> Result<Option<String>, OfdError> {
+    let digits = value
+        .strip_prefix("D:")
+        .unwrap_or(value)
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    let normalized = pdf_attachment_datetime(value)
+        .map_err(|_| OfdError::Invalid("PDF Info date is invalid".into()))?;
+    Ok((digits >= 8).then(|| normalized[..10].to_owned()))
+}
+
+fn import_document_info(output: &mut OfdDocument, pdf: &PdfDocument) -> Result<(), OfdError> {
+    let Ok(info) = pdf.trailer.get(b"Info") else {
+        return Ok(());
+    };
+    let (_, info) = pdf
+        .dereference(info)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Info: {error}")))?;
+    let info = info
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF Info is not a dictionary".into()))?;
+    for (pdf_name, ofd_name) in [
+        (b"Title".as_slice(), "Title"),
+        (b"Author".as_slice(), "Author"),
+        (b"Subject".as_slice(), "Subject"),
+        (b"Creator".as_slice(), "Creator"),
+    ] {
+        if let Some(value) = pdf_text_field(pdf, info, pdf_name)? {
+            output.set_document_info_field(0, ofd_name, &value)?;
+        }
+    }
+    if let Some(value) = pdf_text_field(pdf, info, b"Keywords")? {
+        if !value.trim().is_empty() {
+            output.add_document_keyword(0, &value)?;
+        }
+    }
+    for (pdf_name, ofd_name) in [
+        (b"CreationDate".as_slice(), "CreationDate"),
+        (b"ModDate".as_slice(), "ModDate"),
+    ] {
+        if let Some(value) = pdf_text_field(pdf, info, pdf_name)? {
+            if let Some(date) = pdf_info_date(&value)? {
+                output.set_document_info_field(0, ofd_name, &date)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn embedded_pdf_file_bytes(pdf: &PdfDocument, value: &Object) -> Result<Vec<u8>, OfdError> {
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF embedded file: {error}")))?;
+    let stream = value
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF embedded file is not a stream".into()))?;
+    if stream
+        .dict
+        .get(b"Type")
+        .is_ok_and(|value| value.as_name().ok() != Some(b"EmbeddedFile"))
+    {
+        return Err(OfdError::Invalid(
+            "PDF embedded file has invalid Type".into(),
+        ));
+    }
+    if stream.content.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF embedded file is too large".into()));
+    }
+    let Ok(filter) = stream.dict.get(b"Filter") else {
+        return Ok(stream.content.clone());
+    };
+    let (_, filter) = pdf
+        .dereference(filter)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF embedded file filter: {error}")))?;
+    let filter = match filter {
+        Object::Array(filters) if filters.len() == 1 => &filters[0],
+        other => other,
+    };
+    let (_, filter) = pdf
+        .dereference(filter)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF embedded file filter: {error}")))?;
+    let parameters_supported = match stream.dict.get(b"DecodeParms") {
+        Ok(parameters) => {
+            let (_, parameters) = pdf.dereference(parameters).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF embedded file DecodeParms: {error}"))
+            })?;
+            match parameters {
+                Object::Null => true,
+                Object::Array(values) if values.len() == 1 => pdf
+                    .dereference(&values[0])
+                    .is_ok_and(|(_, value)| matches!(value, Object::Null)),
+                _ => false,
+            }
+        }
+        Err(_) => true,
+    };
+    if !matches!(filter.as_name(), Ok(b"FlateDecode" | b"Fl")) || !parameters_supported {
+        return Err(OfdError::Invalid(
+            "PDF embedded file filter is unsupported".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    flate2::read::ZlibDecoder::new(stream.content.as_slice())
+        .take(MAX_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF embedded file data: {error}")))?;
+    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(OfdError::Limit("PDF embedded file is too large".into()));
+    }
+    Ok(bytes)
+}
+
+fn pdf_attachment_datetime(value: &str) -> Result<String, OfdError> {
+    let value = value.strip_prefix("D:").unwrap_or(value);
+    let digits = value.bytes().take_while(u8::is_ascii_digit).count();
+    if !matches!(digits, 4 | 6 | 8 | 10 | 12 | 14) {
+        return Err(OfdError::Invalid("PDF attachment date is invalid".into()));
+    }
+    let zone = &value[digits..];
+    if !zone.is_empty() {
+        if digits != 14 {
+            return Err(OfdError::Invalid("PDF attachment date is invalid".into()));
+        }
+        let valid_zone = if zone == "Z" {
+            true
+        } else if let Some(offset) = zone.strip_prefix('+').or_else(|| zone.strip_prefix('-')) {
+            let offset = offset.as_bytes();
+            let valid_pair = |digits: &[u8], max: u8| {
+                digits.len() == 2
+                    && digits.iter().all(u8::is_ascii_digit)
+                    && (digits[0] - b'0') * 10 + (digits[1] - b'0') <= max
+            };
+            match offset {
+                [hour0, hour1] | [hour0, hour1, b'\''] => valid_pair(&[*hour0, *hour1], 23),
+                [hour0, hour1, b'\'', minute0, minute1]
+                | [hour0, hour1, b'\'', minute0, minute1, b'\''] => {
+                    valid_pair(&[*hour0, *hour1], 23) && valid_pair(&[*minute0, *minute1], 59)
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !valid_zone {
+            return Err(OfdError::Invalid(
+                "PDF attachment date has invalid zone".into(),
+            ));
+        }
+    }
+    let parse = |start: usize, end: usize, default: u8| -> Result<u8, OfdError> {
+        if digits < end {
+            Ok(default)
+        } else {
+            value[start..end]
+                .parse::<u8>()
+                .map_err(|_| OfdError::Invalid("PDF attachment date is invalid".into()))
+        }
+    };
+    let year = value[..4]
+        .parse::<u16>()
+        .map_err(|_| OfdError::Invalid("PDF attachment date is invalid".into()))?;
+    let month = parse(4, 6, 1)?;
+    let day = parse(6, 8, 1)?;
+    let hour = parse(8, 10, 0)?;
+    let minute = parse(10, 12, 0)?;
+    let second = parse(12, 14, 0)?;
+    if !calendar_day_valid(year, month, day) || hour >= 24 || minute >= 60 || second >= 60 {
+        return Err(OfdError::Invalid("PDF attachment date is invalid".into()));
+    }
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}"
+    ))
+}
+
+fn pdf_embedded_file_metadata(
+    pdf: &PdfDocument,
+    value: &Object,
+    size: usize,
+) -> Result<AttachmentMetadata, OfdError> {
+    let (_, value) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF embedded file: {error}")))?;
+    let stream = value
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF embedded file is not a stream".into()))?;
+    let format =
+        match stream.dict.get(b"Subtype") {
+            Ok(value) => {
+                let (_, value) = pdf.dereference(value).map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF embedded file Subtype: {error}"))
+                })?;
+                let raw = value.as_name().map_err(|_| {
+                    OfdError::Invalid("PDF embedded file Subtype is not a name".into())
+                })?;
+                Some(String::from_utf8(raw.to_vec()).map_err(|_| {
+                    OfdError::Invalid("PDF embedded file Subtype is not UTF-8".into())
+                })?)
+            }
+            Err(_) => None,
+        };
+    let mut metadata = AttachmentMetadata {
+        format,
+        ..AttachmentMetadata::default()
+    };
+    if let Ok(params) = stream.dict.get(b"Params") {
+        let (_, params) = pdf.dereference(params).map_err(|error| {
+            OfdError::Invalid(format!("invalid PDF embedded file Params: {error}"))
+        })?;
+        let params = params.as_dict().map_err(|_| {
+            OfdError::Invalid("PDF embedded file Params is not a dictionary".into())
+        })?;
+        if let Ok(declared) = params.get(b"Size") {
+            let (_, declared) = pdf.dereference(declared).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF embedded file Size: {error}"))
+            })?;
+            if declared.as_i64().ok() != i64::try_from(size).ok() {
+                return Err(OfdError::Invalid(
+                    "PDF embedded file Size does not match decoded data".into(),
+                ));
+            }
+        }
+        metadata.creation_date = pdf_text_field(pdf, params, b"CreationDate")?
+            .map(|value| pdf_attachment_datetime(&value))
+            .transpose()?;
+        metadata.mod_date = pdf_text_field(pdf, params, b"ModDate")?
+            .map(|value| pdf_attachment_datetime(&value))
+            .transpose()?;
+    }
+    Ok(metadata)
+}
+
+fn import_pdf_file_spec(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    value: &Object,
+    index: usize,
+) -> Result<(), OfdError> {
+    let (_, file_spec) = pdf
+        .dereference(value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF file specification: {error}")))?;
+    let file_spec = file_spec.as_dict().map_err(|_| {
+        OfdError::Invalid("PDF embedded file specification is not a dictionary".into())
+    })?;
+    let name = match pdf_text_field(pdf, file_spec, b"UF")? {
+        Some(name) => name,
+        None => pdf_text_field(pdf, file_spec, b"F")?
+            .ok_or_else(|| OfdError::Invalid("PDF embedded file has no name".into()))?,
+    };
+    if name.trim().is_empty() {
+        return Err(OfdError::Invalid("PDF embedded file name is empty".into()));
+    }
+    let (_, ef) = pdf
+        .dereference(
+            file_spec
+                .get(b"EF")
+                .map_err(|_| OfdError::Invalid("PDF embedded file has no EF dictionary".into()))?,
+        )
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF EF: {error}")))?;
+    let ef = ef
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF EF is not a dictionary".into()))?;
+    let stream = ef
+        .get(b"UF")
+        .or_else(|_| ef.get(b"F"))
+        .map_err(|_| OfdError::Invalid("PDF EF has no embedded stream".into()))?;
+    let bytes = embedded_pdf_file_bytes(pdf, stream)?;
+    let mut metadata = pdf_embedded_file_metadata(pdf, stream, bytes.len())?;
+    if let Ok(value) = file_spec.get(b"AFRelationship") {
+        let (_, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF AFRelationship: {error}")))?;
+        let name = value
+            .as_name()
+            .map_err(|_| OfdError::Invalid("PDF AFRelationship is not a name".into()))?;
+        let name = std::str::from_utf8(name)
+            .map_err(|_| OfdError::Invalid("PDF AFRelationship is not UTF-8".into()))?;
+        if name.is_empty() {
+            return Err(OfdError::Invalid("PDF AFRelationship is empty".into()));
+        }
+        metadata.usage = Some(name.to_owned());
+    }
+    output.add_attachment(&name, &bytes)?;
+    if metadata != AttachmentMetadata::default() {
+        output.set_attachment_metadata(index, metadata)?;
+    }
+    Ok(())
+}
+
+fn import_pdf_associated_files(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    owner: &lopdf::Dictionary,
+    seen_specs: &mut HashMap<ObjectId, usize>,
+    file_count: &mut usize,
+) -> Result<(), OfdError> {
+    let Ok(files) = owner.get(b"AF") else {
+        return Ok(());
+    };
+    let (_, files) = pdf
+        .dereference(files)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF AF array: {error}")))?;
+    let files = files
+        .as_array()
+        .map_err(|_| OfdError::Invalid("PDF AF is not an array".into()))?;
+    if files.len() > 10_000 {
+        return Err(OfdError::Limit(
+            "PDF embedded file list is too large".into(),
+        ));
+    }
+    for value in files {
+        let (id, _) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF AF file: {error}")))?;
+        if id.is_some_and(|id| seen_specs.contains_key(&id)) {
+            continue;
+        }
+        if *file_count >= 10_000 {
+            return Err(OfdError::Limit(
+                "PDF embedded file list is too large".into(),
+            ));
+        }
+        import_pdf_file_spec(output, pdf, value, *file_count)?;
+        if let Some(id) = id {
+            seen_specs.insert(id, *file_count);
+        }
+        *file_count += 1;
+    }
+    Ok(())
+}
+
+fn import_pdf_font_associated_files(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    font: &lopdf::Dictionary,
+    seen_specs: &mut HashMap<ObjectId, usize>,
+    file_count: &mut usize,
+    include_descendants: bool,
+) -> Result<(), OfdError> {
+    import_pdf_associated_files(output, pdf, font, seen_specs, file_count)?;
+    if let Ok(descriptor) = font.get(b"FontDescriptor") {
+        let (_, descriptor) = pdf
+            .dereference(descriptor)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF FontDescriptor: {error}")))?;
+        let descriptor = descriptor
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF FontDescriptor is not a dictionary".into()))?;
+        import_pdf_associated_files(output, pdf, descriptor, seen_specs, file_count)?;
+    }
+    if include_descendants {
+        if let Ok(descendants) = font.get(b"DescendantFonts") {
+            let (_, descendants) = pdf.dereference(descendants).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF DescendantFonts: {error}"))
+            })?;
+            let descendants = descendants
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF DescendantFonts is not an array".into()))?;
+            if descendants.len() > 10_000 {
+                return Err(OfdError::Limit(
+                    "PDF DescendantFonts list is too large".into(),
+                ));
+            }
+            for descendant in descendants {
+                let (_, descendant) = pdf.dereference(descendant).map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF descendant font: {error}"))
+                })?;
+                let descendant = descendant.as_dict().map_err(|_| {
+                    OfdError::Invalid("PDF descendant font is not a dictionary".into())
+                })?;
+                import_pdf_font_associated_files(
+                    output, pdf, descendant, seen_specs, file_count, false,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct PdfResourceAFSeen {
+    fonts: HashSet<ObjectId>,
+    xobjects: HashSet<ObjectId>,
+    other: HashSet<ObjectId>,
+}
+
+fn import_pdf_resource_value_associated_files(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    value: &Object,
+    seen_specs: &mut HashMap<ObjectId, usize>,
+    file_count: &mut usize,
+    seen_objects: &mut HashSet<ObjectId>,
+    visits: &mut usize,
+) -> Result<(), OfdError> {
+    let mut pending = vec![(value, 0_usize)];
+    while let Some((value, depth)) = pending.pop() {
+        *visits += 1;
+        if *visits > 10_000 || depth > 32 {
+            return Err(OfdError::Limit(
+                "PDF resource list is too large or deep".into(),
+            ));
+        }
+        let (id, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF resource: {error}")))?;
+        if id.is_some_and(|id| !seen_objects.insert(id)) {
+            continue;
+        }
+        match value {
+            Object::Array(items) => pending.extend(items.iter().map(|item| (item, depth + 1))),
+            Object::Dictionary(owner) => {
+                import_pdf_associated_files(output, pdf, owner, seen_specs, file_count)?;
+            }
+            Object::Stream(stream) => {
+                import_pdf_associated_files(output, pdf, &stream.dict, seen_specs, file_count)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn import_pdf_resource_associated_files(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    page_id: ObjectId,
+    seen_specs: &mut HashMap<ObjectId, usize>,
+    file_count: &mut usize,
+    seen: &mut PdfResourceAFSeen,
+) -> Result<(), OfdError> {
+    let Some(resources) = inherited_object(pdf, page_id, b"Resources")? else {
+        return Ok(());
+    };
+    let mut pending = vec![(resources, 0_usize)];
+    let mut visits = 0;
+    while let Some((resources, depth)) = pending.pop() {
+        if depth > 32 {
+            return Err(OfdError::Limit("PDF page resources are too deep".into()));
+        }
+        let (_, resources) = pdf
+            .dereference(resources)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF page resources: {error}")))?;
+        let resources = resources
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF page resources are not a dictionary".into()))?;
+        import_pdf_associated_files(output, pdf, resources, seen_specs, file_count)?;
+        if let Ok(fonts) = resources.get(b"Font") {
+            let (_, fonts) = pdf
+                .dereference(fonts)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF Font list: {error}")))?;
+            let fonts = fonts
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF Font list is not a dictionary".into()))?;
+            import_pdf_associated_files(output, pdf, fonts, seen_specs, file_count)?;
+            for (name, value) in fonts.iter() {
+                if name == b"AF" {
+                    continue;
+                }
+                visits += 1;
+                if visits > 10_000 {
+                    return Err(OfdError::Limit("PDF resource list is too large".into()));
+                }
+                let (id, value) = pdf
+                    .dereference(value)
+                    .map_err(|error| OfdError::Invalid(format!("invalid PDF Font: {error}")))?;
+                if id.is_some_and(|id| !seen.fonts.insert(id)) {
+                    continue;
+                }
+                let font = value
+                    .as_dict()
+                    .map_err(|_| OfdError::Invalid("PDF Font is not a dictionary".into()))?;
+                import_pdf_font_associated_files(output, pdf, font, seen_specs, file_count, true)?;
+            }
+        }
+        for category in [
+            b"ExtGState".as_slice(),
+            b"ColorSpace",
+            b"Pattern",
+            b"Shading",
+            b"Properties",
+        ] {
+            let Ok(values) = resources.get(category) else {
+                continue;
+            };
+            let (_, values) = pdf.dereference(values).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF resource list: {error}"))
+            })?;
+            let values = values
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF resource list is not a dictionary".into()))?;
+            import_pdf_associated_files(output, pdf, values, seen_specs, file_count)?;
+            for (name, value) in values.iter() {
+                if name == b"AF" {
+                    continue;
+                }
+                import_pdf_resource_value_associated_files(
+                    output,
+                    pdf,
+                    value,
+                    seen_specs,
+                    file_count,
+                    &mut seen.other,
+                    &mut visits,
+                )?;
+            }
+        }
+        let Ok(xobjects) = resources.get(b"XObject") else {
+            continue;
+        };
+        let (_, xobjects) = pdf
+            .dereference(xobjects)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF XObject list: {error}")))?;
+        let xobjects = xobjects
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF XObject list is not a dictionary".into()))?;
+        import_pdf_associated_files(output, pdf, xobjects, seen_specs, file_count)?;
+        for (name, value) in xobjects.iter() {
+            if name == b"AF" {
+                continue;
+            }
+            visits += 1;
+            if visits > 10_000 {
+                return Err(OfdError::Limit("PDF XObject list is too large".into()));
+            }
+            let (id, value) = pdf
+                .dereference(value)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF XObject: {error}")))?;
+            if id.is_some_and(|id| !seen.xobjects.insert(id)) {
+                continue;
+            }
+            let stream = value
+                .as_stream()
+                .map_err(|_| OfdError::Invalid("PDF XObject is not a stream".into()))?;
+            import_pdf_associated_files(output, pdf, &stream.dict, seen_specs, file_count)?;
+            if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form") {
+                if let Ok(child_resources) = stream.dict.get(b"Resources") {
+                    pending.push((child_resources, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn import_pdf_structure_associated_files(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    catalog: &lopdf::Dictionary,
+    seen_specs: &mut HashMap<ObjectId, usize>,
+    file_count: &mut usize,
+) -> Result<(), OfdError> {
+    let Ok(root) = catalog.get(b"StructTreeRoot") else {
+        return Ok(());
+    };
+    let mut pending = vec![(root, 0_usize)];
+    let mut seen = HashSet::new();
+    let mut visits = 0;
+    while let Some((value, depth)) = pending.pop() {
+        visits += 1;
+        if visits > 10_000 || depth > 64 {
+            return Err(OfdError::Limit(
+                "PDF structure tree is too large or deep".into(),
+            ));
+        }
+        let (id, value) = pdf
+            .dereference(value)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF structure tree: {error}")))?;
+        if id.is_some_and(|id| !seen.insert(id)) {
+            continue;
+        }
+        match value {
+            Object::Array(children) => {
+                if children.len() > 10_000 {
+                    return Err(OfdError::Limit("PDF structure tree is too large".into()));
+                }
+                pending.extend(children.iter().rev().map(|child| (child, depth + 1)));
+            }
+            Object::Dictionary(node) => {
+                import_pdf_associated_files(output, pdf, node, seen_specs, file_count)?;
+                if let Ok(children) = node.get(b"K") {
+                    pending.push((children, depth + 1));
+                }
+            }
+            Object::Integer(_) => {}
+            _ => {
+                return Err(OfdError::Invalid(
+                    "PDF structure tree K has invalid type".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn import_pdf_reachable_associated_files(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    catalog: &lopdf::Dictionary,
+    seen_specs: &mut HashMap<ObjectId, usize>,
+    file_count: &mut usize,
+) -> Result<(), OfdError> {
+    let mut pending: Vec<_> = catalog.iter().map(|(_, value)| value).collect();
+    let mut seen = HashSet::new();
+    let mut visits = 0;
+    while let Some(value) = pending.pop() {
+        visits += 1;
+        if visits > 100_000 {
+            return Err(OfdError::Limit(
+                "PDF associated-file object graph is too large".into(),
+            ));
+        }
+        // A broken reference outside an AF array may belong to an unrelated
+        // optional PDF feature. Explicit AF references are checked below.
+        let Ok((id, value)) = pdf.dereference(value) else {
+            continue;
+        };
+        if id.is_some_and(|id| !seen.insert(id)) {
+            continue;
+        }
+        match value {
+            Object::Array(items) => pending.extend(items),
+            Object::Dictionary(owner) => {
+                import_pdf_associated_files(output, pdf, owner, seen_specs, file_count)?;
+                pending.extend(owner.iter().map(|(_, value)| value));
+            }
+            Object::Stream(stream) => {
+                import_pdf_associated_files(output, pdf, &stream.dict, seen_specs, file_count)?;
+                pending.extend(stream.dict.iter().map(|(_, value)| value));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn import_pdf_attachments(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    pages: &[PdfPageImport],
+) -> Result<(), OfdError> {
+    let catalog = pdf
+        .catalog()
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF catalog: {error}")))?;
+    let root = if let Ok(names) = catalog.get(b"Names") {
+        let (_, names) = pdf
+            .dereference(names)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF Names dictionary: {error}")))?;
+        let names = names
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF Names is not a dictionary".into()))?;
+        names.get(b"EmbeddedFiles").ok()
+    } else {
+        None
+    };
+    let mut pending = root.into_iter().collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    let mut seen_specs = HashMap::new();
+    let mut seen_resources = PdfResourceAFSeen::default();
+    let mut seen_page_tree_nodes = HashSet::new();
+    let mut keys = HashSet::new();
+    let mut file_count = 0;
+    let mut node_count = 0;
+    while let Some(node) = pending.pop() {
+        node_count += 1;
+        if node_count > 10_000 {
+            return Err(OfdError::Limit(
+                "PDF embedded file name tree is too large".into(),
+            ));
+        }
+        let (id, node) = pdf.dereference(node).map_err(|error| {
+            OfdError::Invalid(format!("invalid PDF embedded file name tree: {error}"))
+        })?;
+        if id.is_some_and(|id| !visited.insert(id)) {
+            return Err(OfdError::Invalid(
+                "PDF embedded file name tree has a cycle or repeated node".into(),
+            ));
+        }
+        let node = node.as_dict().map_err(|_| {
+            OfdError::Invalid("PDF embedded file name tree node is not a dictionary".into())
+        })?;
+        if let Ok(entries) = node.get(b"Names") {
+            let (_, entries) = pdf.dereference(entries).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF embedded file Names: {error}"))
+            })?;
+            let entries = entries
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF embedded file Names is not an array".into()))?;
+            if entries.len() % 2 != 0 {
+                return Err(OfdError::Invalid(
+                    "PDF embedded file Names has an odd length".into(),
+                ));
+            }
+            if entries.len() > 20_000 || file_count + entries.len() / 2 > 10_000 {
+                return Err(OfdError::Limit(
+                    "PDF embedded file list is too large".into(),
+                ));
+            }
+            for pair in entries.chunks_exact(2) {
+                let Object::String(key, _) = &pair[0] else {
+                    return Err(OfdError::Invalid(
+                        "PDF embedded file name tree key is not a string".into(),
+                    ));
+                };
+                if !keys.insert(key.clone()) {
+                    return Err(OfdError::Invalid(
+                        "PDF embedded file name tree key is duplicated".into(),
+                    ));
+                }
+                let (id, _) = pdf.dereference(&pair[1]).map_err(|error| {
+                    OfdError::Invalid(format!("invalid PDF file specification: {error}"))
+                })?;
+                if id.is_none_or(|id| !seen_specs.contains_key(&id)) {
+                    import_pdf_file_spec(output, pdf, &pair[1], file_count)?;
+                    if let Some(id) = id {
+                        seen_specs.insert(id, file_count);
+                    }
+                    file_count += 1;
+                }
+            }
+        }
+        if let Ok(kids) = node.get(b"Kids") {
+            let (_, kids) = pdf.dereference(kids).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF embedded file Kids: {error}"))
+            })?;
+            let kids = kids
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF embedded file Kids is not an array".into()))?;
+            if kids.len() > 10_000 {
+                return Err(OfdError::Limit(
+                    "PDF embedded file Kids is too large".into(),
+                ));
+            }
+            pending.extend(kids.iter().rev());
+        }
+    }
+    import_pdf_associated_files(output, pdf, catalog, &mut seen_specs, &mut file_count)?;
+    import_pdf_structure_associated_files(output, pdf, catalog, &mut seen_specs, &mut file_count)?;
+    for (page_index, source_page) in pages.iter().enumerate() {
+        let page = pdf
+            .get_dictionary(source_page.id)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF page dictionary: {error}")))?;
+        import_pdf_associated_files(output, pdf, page, &mut seen_specs, &mut file_count)?;
+        let mut parent = page.get(b"Parent").ok();
+        let mut ancestors = HashSet::new();
+        while let Some(value) = parent {
+            if ancestors.len() >= 32 {
+                return Err(OfdError::Limit("PDF page tree is too deep".into()));
+            }
+            let id = value
+                .as_reference()
+                .map_err(|_| OfdError::Invalid("invalid PDF page parent".into()))?;
+            if !ancestors.insert(id) {
+                return Err(OfdError::Invalid("PDF page tree has a cycle".into()));
+            }
+            if !seen_page_tree_nodes.insert(id) {
+                break;
+            }
+            let node = pdf
+                .get_dictionary(id)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF page tree: {error}")))?;
+            import_pdf_associated_files(output, pdf, node, &mut seen_specs, &mut file_count)?;
+            parent = node.get(b"Parent").ok();
+        }
+        import_pdf_resource_associated_files(
+            output,
+            pdf,
+            source_page.id,
+            &mut seen_specs,
+            &mut file_count,
+            &mut seen_resources,
+        )?;
+        let Ok(annots) = page.get(b"Annots") else {
+            continue;
+        };
+        let (_, annots) = pdf
+            .dereference(annots)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF annotations: {error}")))?;
+        let annots = annots
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF annotations are not an array".into()))?;
+        if annots.len() > 10_000 {
+            return Err(OfdError::Limit("PDF page has too many annotations".into()));
+        }
+        for value in annots {
+            let (_, value) = pdf
+                .dereference(value)
+                .map_err(|error| OfdError::Invalid(format!("invalid PDF annotation: {error}")))?;
+            let annotation = value
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF annotation is not a dictionary".into()))?;
+            import_pdf_associated_files(output, pdf, annotation, &mut seen_specs, &mut file_count)?;
+            if pdf_annotation_subtype(pdf, annotation)? != Some(b"FileAttachment") {
+                continue;
+            }
+            let spec = annotation
+                .get(b"FS")
+                .map_err(|_| OfdError::Invalid("PDF FileAttachment has no FS".into()))?;
+            let (id, _) = pdf.dereference(spec).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF FileAttachment FS: {error}"))
+            })?;
+            let index = if let Some(index) = id.and_then(|id| seen_specs.get(&id).copied()) {
+                index
+            } else {
+                if file_count >= 10_000 {
+                    return Err(OfdError::Limit(
+                        "PDF embedded file list is too large".into(),
+                    ));
+                }
+                import_pdf_file_spec(output, pdf, spec, file_count)?;
+                if let Some(id) = id {
+                    seen_specs.insert(id, file_count);
+                }
+                file_count += 1;
+                file_count - 1
+            };
+            let rect = annotation
+                .get(b"Rect")
+                .map_err(|_| OfdError::Invalid("PDF FileAttachment has no Rect".into()))?;
+            let (_, rect) = pdf.dereference(rect).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF FileAttachment Rect: {error}"))
+            })?;
+            let rect = rect
+                .as_array()
+                .map_err(|_| OfdError::Invalid("PDF FileAttachment Rect is not an array".into()))?;
+            let boundary = pdf_link_boundary(pdf, source_page, rect)?;
+            let attachment_id = output.attachments()?[index].id.clone();
+            let link = output.add_attachment_link_annotation(
+                page_index,
+                &attachment_id,
+                boundary,
+                None,
+            )?;
+            let flags = pdf_annotation_flags(pdf, annotation, "FileAttachment")?;
+            import_pdf_annotation_flags(output, page_index, &link, flags)?;
+            import_pdf_annotation_metadata(output, page_index, &link, pdf, annotation)?;
+        }
+    }
+    import_pdf_reachable_associated_files(output, pdf, catalog, &mut seen_specs, &mut file_count)?;
+    Ok(())
+}
+
+fn import_pdf_outlines(
+    output: &mut OfdDocument,
+    pdf: &PdfDocument,
+    pages: &[PdfPageImport],
+    output_page_ids: &[String],
+) -> Result<(), OfdError> {
+    let catalog = pdf
+        .catalog()
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF catalog: {error}")))?;
+    let Ok(root) = catalog.get(b"Outlines") else {
+        return Ok(());
+    };
+    let root_id = root
+        .as_reference()
+        .map_err(|_| OfdError::Invalid("PDF Outlines is not a reference".into()))?;
+    let (_, root) = pdf
+        .dereference(root)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF Outlines: {error}")))?;
+    let root = root
+        .as_dict()
+        .map_err(|_| OfdError::Invalid("PDF Outlines is not a dictionary".into()))?;
+    let Ok(first) = root.get(b"First") else {
+        return Ok(());
+    };
+    let first = first
+        .as_reference()
+        .map_err(|_| OfdError::Invalid("PDF outline First is not a reference".into()))?;
+    let mut stack = vec![(first, root_id, None, 0_usize)];
+    let mut visited = HashSet::new();
+    while let Some((id, expected_parent, parent_index, depth)) = stack.pop() {
+        if !visited.insert(id) {
+            return Err(OfdError::Invalid("PDF outline tree has a cycle".into()));
+        }
+        if visited.len() > 10_000 || depth > 64 {
+            return Err(OfdError::Limit("PDF outline tree is too large".into()));
+        }
+        let item = pdf
+            .get_object(id)
+            .map_err(|error| OfdError::Invalid(format!("invalid PDF outline item: {error}")))?
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF outline item is not a dictionary".into()))?;
+        if item.get(b"Parent").and_then(Object::as_reference).ok() != Some(expected_parent) {
+            return Err(OfdError::Invalid("PDF outline Parent is invalid".into()));
+        }
+        let title = pdf_text_field(pdf, item, b"Title")?
+            .ok_or_else(|| OfdError::Invalid("PDF outline has no Title".into()))?;
+        let expanded = match item.get(b"Count") {
+            Ok(count) => {
+                count
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF outline Count is invalid".into()))?
+                    >= 0
+            }
+            Err(_) => true,
+        };
+        let destination = if let Ok(value) = item.get(b"Dest") {
+            Some(pdf_link_destination(pdf, value, pages, output_page_ids)?)
+        } else if let Ok(action) = item.get(b"A") {
+            let (_, action) = pdf.dereference(action).map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF outline action: {error}"))
+            })?;
+            let action = action
+                .as_dict()
+                .map_err(|_| OfdError::Invalid("PDF outline action is not a dictionary".into()))?;
+            if action.get(b"S").and_then(Object::as_name).ok() != Some(b"GoTo".as_slice()) {
+                return Err(OfdError::Invalid("unsupported PDF outline action".into()));
+            }
+            let value = action
+                .get(b"D")
+                .map_err(|_| OfdError::Invalid("PDF outline GoTo has no destination".into()))?;
+            Some(pdf_link_destination(pdf, value, pages, output_page_ids)?)
+        } else {
+            None
+        };
+        let index = output.add_outline(0, &title, parent_index, destination, expanded)?;
+        if let Ok(next) = item.get(b"Next") {
+            let next = next
+                .as_reference()
+                .map_err(|_| OfdError::Invalid("PDF outline Next is not a reference".into()))?;
+            stack.push((next, expected_parent, parent_index, depth));
+        }
+        if let Ok(first) = item.get(b"First") {
+            let first = first
+                .as_reference()
+                .map_err(|_| OfdError::Invalid("PDF outline First is not a reference".into()))?;
+            stack.push((first, id, Some(index), depth + 1));
+        }
+    }
+    Ok(())
+}
+
+impl OfdDocument {
+    /// Import supported PDF page content into a new OFD package.
+    ///
+    /// Unsupported drawing operators and transparency return an error instead
+    /// of silently dropping content.
+    pub fn from_pdf_bytes(bytes: &[u8]) -> Result<Self, OfdError> {
+        if bytes.len() as u64 > MAX_TOTAL_BYTES {
+            return Err(OfdError::Limit("PDF input is too large".into()));
+        }
+        let pdf = PdfDocument::load_mem(bytes)
+            .map_err(|error| OfdError::Invalid(format!("cannot read PDF: {error}")))?;
+        if pdf.is_encrypted() {
+            return Err(OfdError::Invalid("encrypted PDF is not supported".into()));
+        }
+        let pages = pdf.get_pages();
+        if pages.is_empty() {
+            return Err(OfdError::Invalid("PDF has no pages".into()));
+        }
+        if pages.len() > 10_000 {
+            return Err(OfdError::Limit("PDF has too many pages".into()));
+        }
+        let mut source_pages = Vec::with_capacity(pages.len());
+        for (_, id) in pages {
+            let user_unit = page_user_unit(&pdf, id)?;
+            let rotation = page_rotation(&pdf, id)?;
+            let box_ = page_box(&pdf, id)?.map(|value| value * user_unit);
+            if box_.iter().any(|value| !value.is_finite()) {
+                return Err(OfdError::Limit("scaled PDF page box is too large".into()));
+            }
+            source_pages.push(PdfPageImport {
+                id,
+                box_,
+                user_unit,
+                rotation,
+                width_mm: (box_[2] - box_[0]) * MM_PER_PT,
+                height_mm: (box_[3] - box_[1]) * MM_PER_PT,
+            });
+        }
+        let mut output = Self::new();
+        import_document_info(&mut output, &pdf)?;
+        for page in &source_pages {
+            output.add_blank_page(page.width_mm, page.height_mm)?;
+        }
+        let output_page_ids: Vec<_> = output.pages()?.into_iter().map(|page| page.id).collect();
+        for (index, page) in source_pages.iter().enumerate() {
+            import_page(&mut output, index, &pdf, page.id, page.box_, page.user_unit)?;
+            rotate_imported_page(
+                &mut output,
+                index,
+                page.rotation,
+                page.width_mm,
+                page.height_mm,
+            )?;
+            import_page_links(&mut output, index, &pdf, &source_pages, &output_page_ids)?;
+        }
+        import_pdf_outlines(&mut output, &pdf, &source_pages, &output_page_ids)?;
+        import_pdf_attachments(&mut output, &pdf, &source_pages)?;
+        Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use lopdf::dictionary;
+    use pdf_writer::{
+        types::{ActionType, AnnotationFlags, AnnotationType},
+        Content, Filter, Finish, Name, Pdf, Rect, Ref, Str,
+    };
+
+    use super::*;
+
+    fn vector_pdf(content: &[u8]) -> Vec<u8> {
+        vector_pdf_with_options(content, false, None)
+    }
+
+    fn sampled_function(bits: u32, values: &[u32]) -> lopdf::Stream {
+        let mut samples = vec![0; (values.len() * bits as usize).div_ceil(8)];
+        for (index, value) in values.iter().enumerate() {
+            write_pdf_sample(&mut samples, index, bits as usize, *value);
+        }
+        lopdf::Stream::new(
+            dictionary! {
+                "FunctionType" => 0,
+                "Domain" => Object::Array(vec![0.into(), 1.into()]),
+                "Range" => Object::Array(vec![0.into(), 1.into()]),
+                "Size" => Object::Array(vec![(values.len() as i64).into()]),
+                "BitsPerSample" => bits as i64,
+            },
+            samples,
+        )
+    }
+
+    #[test]
+    fn sampled_shading_reads_every_supported_bit_depth() {
+        for bits in [1, 2, 4, 8, 12, 16, 24, 32] {
+            let max = ((1u64 << bits) - 1) as u32;
+            let mut pdf = PdfDocument::new();
+            let mut function = sampled_function(bits, &[0, max / 2, max]);
+            if bits == 32 {
+                for key in ["FunctionType", "BitsPerSample", "Size", "Domain", "Range"] {
+                    let value = function.dict.get(key.as_bytes()).unwrap().clone();
+                    let id = pdf.add_object(value);
+                    function.dict.set(key, Object::Reference(id));
+                }
+            }
+            let id = pdf.add_object(function);
+            let segments = pdf_shading_segments(
+                &pdf,
+                &Object::Reference(id),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+            )
+            .unwrap();
+            assert_eq!(segments.first().unwrap().color, [0; 3], "{bits}");
+            assert_eq!(segments.last().unwrap().color, [255; 3], "{bits}");
+            let middle = segments
+                .iter()
+                .find(|segment| segment.position == Some(0.5))
+                .unwrap();
+            assert_eq!(
+                middle.color,
+                [((f64::from(max / 2) / f64::from(max)) * 255.0).round() as u8; 3],
+                "{bits}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampled_shading_maps_reversed_encode_and_clips_domain_and_output() {
+        let mut function = sampled_function(8, &[0, 128, 255]);
+        function
+            .dict
+            .set("Domain", Object::Array(vec![(-2).into(), 2.into()]));
+        function
+            .dict
+            .set("Encode", Object::Array(vec![2.into(), 0.into()]));
+        function
+            .dict
+            .set("Decode", Object::Array(vec![(-1).into(), 2.into()]));
+        function.dict.set(
+            "Range",
+            Object::Array(vec![Object::Real(0.2), Object::Real(0.8)]),
+        );
+        let mut pdf = PdfDocument::new();
+        let id = pdf.add_object(function);
+        let segments = pdf_shading_segments(
+            &pdf,
+            &Object::Reference(id),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [-4.0, 4.0],
+        )
+        .unwrap();
+        assert_eq!(segments.first().unwrap().color, [204; 3]);
+        assert_eq!(segments.last().unwrap().color, [51; 3]);
+        assert!(segments
+            .iter()
+            .any(|segment| segment.position == Some(0.25) && segment.color == [204; 3]));
+        assert!(segments
+            .iter()
+            .any(|segment| segment.position == Some(0.75) && segment.color == [51; 3]));
+    }
+
+    #[test]
+    fn sampled_shading_works_inside_stitching_function() {
+        let mut pdf = PdfDocument::new();
+        let sample = pdf.add_object(sampled_function(8, &[0, 255]));
+        let function = Object::Dictionary(dictionary! {
+            "FunctionType" => 3,
+            "Domain" => Object::Array(vec![0.into(), 1.into()]),
+            "Range" => Object::Array(vec![Object::Real(0.25), Object::Real(0.75)]),
+            "Bounds" => Object::Array(vec![Object::Real(0.5)]),
+            "Encode" => Object::Array(vec![0.into(), 1.into(), 1.into(), 0.into()]),
+            "Functions" => Object::Array(vec![Object::Reference(sample), Object::Reference(sample)]),
+        });
+        let segments = pdf_shading_segments(
+            &pdf,
+            &function,
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        assert_eq!(segments.first().unwrap().color, [64; 3]);
+        assert_eq!(segments.last().unwrap().color, [64; 3]);
+        assert!(segments
+            .iter()
+            .any(|segment| segment.position == Some(0.5) && segment.color == [191; 3]));
+    }
+
+    #[test]
+    fn sampled_shading_imports_axial_and_radial_fixtures_and_matches_reference() {
+        for (source, radial) in [
+            (
+                include_bytes!("../tests/fixtures/shading-sampled-axial.pdf").as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/shading-sampled-radial.pdf").as_slice(),
+                true,
+            ),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            for color in ["#ff0000", "#00ff00", "#0000ff"] {
+                assert!(svg.contains(color), "{color}");
+            }
+            assert!(svg.contains(if radial {
+                "radialGradient"
+            } else {
+                "linearGradient"
+            }));
+            assert!(document.validate_references().unwrap().is_empty());
+            let rendered = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            if !radial {
+                let reference = image::load_from_memory(include_bytes!(
+                    "../tests/fixtures/shading-sampled-reference.png"
+                ))
+                .unwrap()
+                .to_rgb8();
+                assert_eq!(rendered.dimensions(), reference.dimensions());
+                let maximum_error = rendered
+                    .as_raw()
+                    .iter()
+                    .zip(reference.as_raw())
+                    .map(|(actual, expected)| actual.abs_diff(*expected))
+                    .max()
+                    .unwrap();
+                assert!(
+                    maximum_error <= 6,
+                    "sampled shading differs from Poppler by {maximum_error}"
+                );
+            }
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+            assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn sampled_shading_handles_constant_table_and_small_cubic_fallback() {
+        for values in [vec![127], vec![127, 127]] {
+            let mut function = sampled_function(8, &values);
+            function.dict.set("Order", 3);
+            let mut pdf = PdfDocument::new();
+            let id = pdf.add_object(function);
+            let segments = pdf_shading_segments(
+                &pdf,
+                &Object::Reference(id),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [-1.0, 2.0],
+            )
+            .unwrap();
+            assert!(segments.iter().all(|segment| segment.color == [127; 3]));
+        }
+    }
+
+    #[test]
+    fn sampled_shading_rejects_malformed_parameters_and_data() {
+        let original = sampled_function(8, &[0, 128, 200, 255]);
+        for (key, value) in [
+            ("Size", Object::Array(vec![0.into()])),
+            ("Size", Object::Array(vec![Object::Real(2.5)])),
+            ("Size", Object::Array(vec![10001.into()])),
+            ("BitsPerSample", 3.into()),
+            ("Order", 2.into()),
+            ("Order", 3.into()),
+            ("Range", Object::Array(vec![1.into(), 0.into()])),
+            ("Encode", Object::Array(vec![0.into()])),
+            ("Domain", Object::Array(vec![1.into(), 1.into()])),
+        ] {
+            let mut pdf = PdfDocument::new();
+            let mut function = original.clone();
+            function.dict.set(key, value);
+            let id = pdf.add_object(function);
+            assert!(
+                pdf_shading_segments(
+                    &pdf,
+                    &Object::Reference(id),
+                    &PdfColorSpace::Gray,
+                    RenderingIntent::RelativeColorimetric,
+                    [0.0, 1.0]
+                )
+                .is_err(),
+                "{key}"
+            );
+        }
+        for key in ["Domain", "Range", "Size", "BitsPerSample"] {
+            let mut pdf = PdfDocument::new();
+            let mut function = original.clone();
+            function.dict.remove(key.as_bytes());
+            let id = pdf.add_object(function);
+            assert!(
+                pdf_shading_segments(
+                    &pdf,
+                    &Object::Reference(id),
+                    &PdfColorSpace::Gray,
+                    RenderingIntent::RelativeColorimetric,
+                    [0.0, 1.0]
+                )
+                .is_err(),
+                "{key}"
+            );
+        }
+        let mut pdf = PdfDocument::new();
+        let mut function = original;
+        function.content.pop();
+        let id = pdf.add_object(function);
+        assert!(
+            matches!(pdf_shading_segments(&pdf, &Object::Reference(id), &PdfColorSpace::Gray, RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Invalid(message)) if message.contains("truncated PDF sampled"))
+        );
+    }
+
+    #[test]
+    fn imports_axial_shading_with_clip_and_roundtrips() {
+        let bytes = include_bytes!("../tests/fixtures/shading-axial.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("<linearGradient"), "{svg}");
+        assert!(svg.contains("<clipPath"));
+        assert!(svg.contains("#ff0000"));
+        assert!(svg.contains("#0000ff"));
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let painted_y = png.height() * 3 / 4;
+        let left = png.get_pixel(5, painted_y).0;
+        let right = png.get_pixel(png.width() - 6, painted_y).0;
+        assert!(left[0] > left[2], "left: {left:?}");
+        assert!(right[2] > right[0], "right: {right:?}");
+        let outside = png.get_pixel(png.width() / 2, png.height() / 4).0;
+        assert_eq!(outside, [255, 255, 255]);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+        assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn imports_exponential_pdf_shading_and_checks_function_domain() {
+        let source = include_bytes!("../tests/fixtures/shading-axial.pdf");
+        for (exponent, expected_red) in [(2.0, 191_u8), (0.5, 75_u8)] {
+            let mut pdf = PdfDocument::load_mem(source).unwrap();
+            pdf.get_object_mut((6, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("N", exponent);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.matches("<stop offset=").count() > 2);
+            let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            let pixel = png.get_pixel(png.width() / 2, png.height() * 3 / 4).0;
+            assert!(
+                pixel[0].abs_diff(expected_red) < 18,
+                "N={exponent}: {pixel:?}"
+            );
+            assert!(
+                pixel[2].abs_diff(255 - expected_red) < 18,
+                "N={exponent}: {pixel:?}"
+            );
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+        }
+
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set("N", 0.5);
+        function.set("Domain", Object::Array(vec![(-1).into(), 1.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("exponent is invalid"));
+
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-stitching.pdf"))
+                .unwrap();
+        let functions = pdf
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Functions")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        functions[0].as_dict_mut().unwrap().set("N", 2);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.matches("<stop offset=").count() > 4);
+        assert!(svg.contains("offset=\"0.5\""));
+        document.page_png(0, 72.0).unwrap();
+
+        let function = Object::Dictionary(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => Object::Array(vec![1.into(), 2.into()]),
+            "C0" => Object::Array(vec![1.into(), 0.into(), 0.into()]),
+            "C1" => Object::Array(vec![0.into(), 0.into(), 1.into()]),
+            "N" => -1,
+        });
+        let points = pdf_linear_function_points(
+            &PdfDocument::new(),
+            &function,
+            &PdfColorSpace::Rgb,
+            RenderingIntent::RelativeColorimetric,
+            [1.0, 2.0],
+            None,
+        )
+        .unwrap();
+        assert_eq!(points.first().unwrap().1, [0, 0, 255]);
+        assert_eq!(points.last().unwrap().1, [128, 0, 128]);
+    }
+
+    #[test]
+    fn imports_icc_shading_with_selected_rendering_intent() {
+        let profile_bytes = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-axial.pdf")).unwrap();
+        let profile_id = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile_bytes.to_vec(),
+        )));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference(profile_id),
+                ]),
+            );
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set(
+            "C0",
+            Object::Array(vec![0.3.into(), 0.2.into(), 0.1.into(), 0.2.into()]),
+        );
+        function.set("C1", Object::Array(vec![0.into(); 4]));
+        pdf.get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/Saturation ri q 10 20 72 36 re W n /Sh1 sh Q".to_vec());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let profile = ColorProfile::new_from_slice(profile_bytes).unwrap();
+        let converter = profile
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions {
+                    rendering_intent: RenderingIntent::Saturation,
+                    ..TransformOptions::default()
+                },
+            )
+            .unwrap();
+        let mut expected = [0_u8; 3];
+        converter
+            .transform(&[77, 51, 26, 51], &mut expected)
+            .unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected[0], expected[1], expected[2]
+        )));
+    }
+
+    #[test]
+    fn imports_lab_shading_with_lab_component_ranges() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-axial.pdf")).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ColorSpace", lab_space());
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set(
+            "C0",
+            Object::Array(vec![50.into(), (-100).into(), 0.into()]),
+        );
+        function.set("C1", Object::Array(vec![50.into(), 100.into(), 0.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let lab = parse_color_space(None, None, &lab_space(), 0).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        for components in [[50.0, -100.0, 0.0], [50.0, 100.0, 0.0]] {
+            let expected = lab.color(&components).unwrap();
+            assert!(svg.contains(&format!(
+                "#{:02x}{:02x}{:02x}",
+                expected[0], expected[1], expected[2]
+            )));
+        }
+    }
+
+    #[test]
+    fn clips_pdf_shading_to_bbox_and_current_path_while_ignoring_background() {
+        let bytes = include_bytes!("../tests/fixtures/shading-bbox.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.matches("<clipPath ").count() >= 2);
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let inside = png.get_pixel(36, 36).0;
+        assert_ne!(inside, [255, 255, 255]);
+        for (x, y) in [(20, 36), (60, 36), (36, 10)] {
+            assert_eq!(png.get_pixel(x, y).0, [255, 255, 255], "{x}, {y}");
+        }
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+    }
+
+    #[test]
+    fn rejects_invalid_pdf_shading_bbox() {
+        let bytes = include_bytes!("../tests/fixtures/shading-bbox.pdf");
+        for bbox in [
+            Object::Array(vec![0.into(), 0.into(), 0.into(), 10.into()]),
+            Object::Array(vec![0.into(), 0.into(), 10.into()]),
+        ] {
+            let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("BBox", bbox);
+            let mut altered = Vec::new();
+            pdf.save_to(&mut altered).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_radial_shading_in_both_radius_directions() {
+        for (name, center_is_red) in [
+            ("shading-radial.pdf", true),
+            ("shading-radial-reverse.pdf", false),
+        ] {
+            let source = std::fs::read(format!(
+                "{}/tests/fixtures/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains("<radialGradient"));
+            let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            let center = png.get_pixel(36, 36).0;
+            let edge = png.get_pixel(67, 36).0;
+            assert_eq!(center[0] > center[2], center_is_red, "{name}: {center:?}");
+            assert_eq!(edge[0] > edge[2], !center_is_red, "{name}: {edge:?}");
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+        }
+    }
+
+    #[test]
+    fn imports_stitched_linear_pdf_shading_with_reversed_subfunction() {
+        let bytes = include_bytes!("../tests/fixtures/shading-stitching.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("<linearGradient"));
+        assert!(svg.matches("offset=\"0.5\"").count() >= 2);
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let left = png.get_pixel(3, 36).0;
+        let before_bound = png.get_pixel(32, 36).0;
+        let after_bound = png.get_pixel(40, 36).0;
+        let right = png.get_pixel(68, 36).0;
+        assert!(left[0] > left[1] && left[0] > left[2], "{left:?}");
+        assert!(before_bound[1] > before_bound[2], "{before_bound:?}");
+        assert!(after_bound[2] > after_bound[1], "{after_bound:?}");
+        assert!(right.iter().all(|value| *value > 220), "{right:?}");
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+    }
+
+    #[test]
+    fn clips_stitching_function_output_before_color_conversion() {
+        let source = include_bytes!("../tests/fixtures/shading-stitching.pdf");
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set(
+            "Range",
+            Object::Array(vec![
+                0.2.into(),
+                0.8.into(),
+                0.2.into(),
+                0.8.into(),
+                0.2.into(),
+                0.8.into(),
+            ]),
+        );
+        function
+            .get_mut(b"Functions")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()[0]
+            .as_dict_mut()
+            .unwrap()
+            .set("N", 2);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.matches("<stop offset=").count() > 4);
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        for (x, expected) in [(3, [204, 51, 51]), (32, [51, 204, 51]), (40, [51, 51, 204])] {
+            let actual = png.get_pixel(x, 36).0;
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, e)| a.abs_diff(e) <= 12),
+                "x={x}: {actual:?}"
+            );
+        }
+        assert_eq!(
+            OfdDocument::from_bytes(&document.to_bytes().unwrap())
+                .unwrap()
+                .page_svg(0)
+                .unwrap(),
+            svg
+        );
+
+        let mut indirect_values = pdf
+            .get_object((6, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Range")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        indirect_values[0] = Object::Reference(pdf.add_object(indirect_values[0].clone()));
+        let range_id = pdf.add_object(Object::Array(indirect_values));
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Range", Object::Reference(range_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let indirect = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            indirect.page_png(0, 72.0).unwrap(),
+            document.page_png(0, 72.0).unwrap()
+        );
+
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Range",
+                Object::Array(vec![
+                    0.8.into(),
+                    0.2.into(),
+                    0.into(),
+                    1.into(),
+                    0.into(),
+                    1.into(),
+                ]),
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("Function Range"));
+    }
+
+    #[test]
+    fn clips_cmyk_stitching_channels_before_rgb_conversion() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-stitching.pdf"))
+                .unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set(
+            "Range",
+            Object::Array(vec![
+                0.into(),
+                0.5.into(),
+                0.into(),
+                0.5.into(),
+                0.into(),
+                1.into(),
+                0.into(),
+                1.into(),
+            ]),
+        );
+        let functions = function
+            .get_mut(b"Functions")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        functions[0].as_dict_mut().unwrap().set(
+            "C0",
+            Object::Array(vec![0.into(), 0.into(), 0.into(), 0.into()]),
+        );
+        functions[0].as_dict_mut().unwrap().set(
+            "C1",
+            Object::Array(vec![1.into(), 0.into(), 0.into(), 0.into()]),
+        );
+        functions[1].as_dict_mut().unwrap().set(
+            "C0",
+            Object::Array(vec![0.into(), 1.into(), 0.into(), 0.into()]),
+        );
+        functions[1].as_dict_mut().unwrap().set(
+            "C1",
+            Object::Array(vec![0.into(), 1.into(), 0.into(), 0.into()]),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let cyan = png.get_pixel(32, 36).0;
+        let magenta = png.get_pixel(40, 36).0;
+        assert!(
+            cyan[0].abs_diff(128) <= 8 && cyan[1] > 245 && cyan[2] > 245,
+            "{cyan:?}"
+        );
+        assert!(
+            magenta[0] > 245 && magenta[1].abs_diff(128) <= 8 && magenta[2] > 245,
+            "{magenta:?}"
+        );
+    }
+
+    #[test]
+    fn imports_nondefault_pdf_shading_domains() {
+        for name in ["shading-domain.pdf", "shading-stitching-domain.pdf"] {
+            let source = std::fs::read(format!(
+                "{}/tests/fixtures/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains("<linearGradient"));
+            let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            let left = png.get_pixel(3, 36).0;
+            let right = png.get_pixel(68, 36).0;
+            if name == "shading-domain.pdf" {
+                assert!(left[0] > left[2] && left[2] > 25, "{left:?}");
+                assert!(right[2] > right[0] && right[0] > 25, "{right:?}");
+            } else {
+                assert!(svg.matches("offset=\"0.5\"").count() >= 2);
+                let before = png.get_pixel(32, 36).0;
+                let after = png.get_pixel(40, 36).0;
+                assert!(before[1] > before[2], "{before:?}");
+                assert!(after[2] > after[1], "{after:?}");
+            }
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+        }
+    }
+
+    #[test]
+    fn clips_type2_function_inputs_to_its_domain() {
+        let source = include_bytes!("../tests/fixtures/shading-axial.pdf");
+        for exponent in [1, 2] {
+            let mut pdf = PdfDocument::load_mem(source).unwrap();
+            let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+            function.set("Domain", Object::Array(vec![0.2.into(), 0.8.into()]));
+            function.set("N", exponent);
+            let points = pdf_linear_function_points(
+                &pdf,
+                &Object::Reference((6, 0)),
+                &PdfColorSpace::Rgb,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+                None,
+            )
+            .unwrap();
+            assert!(points
+                .iter()
+                .any(|(position, _)| (*position - 0.2).abs() < 1e-5));
+            assert!(points
+                .iter()
+                .any(|(position, _)| (*position - 0.8).abs() < 1e-5));
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            let left = png.get_pixel(3, 54).0;
+            let left_plateau = png.get_pixel(10, 54).0;
+            let right_plateau = png.get_pixel(62, 54).0;
+            let right = png.get_pixel(69, 54).0;
+            assert!(
+                left.iter()
+                    .zip(left_plateau)
+                    .all(|(a, b)| a.abs_diff(b) <= 3),
+                "N={exponent}: {left:?} {left_plateau:?}"
+            );
+            assert!(
+                right
+                    .iter()
+                    .zip(right_plateau)
+                    .all(|(a, b)| a.abs_diff(b) <= 3),
+                "N={exponent}: {right:?} {right_plateau:?}"
+            );
+            assert!(left[0] > right[0] && right[2] > left[2]);
+            assert!(document.validate_references().unwrap().is_empty());
+
+            let reversed = pdf_linear_function_points(
+                &pdf,
+                &Object::Reference((6, 0)),
+                &PdfColorSpace::Rgb,
+                RenderingIntent::RelativeColorimetric,
+                [1.0, 0.0],
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                reversed.first().unwrap().1,
+                reversed
+                    .iter()
+                    .find(|(position, _)| (*position - 0.2).abs() < 1e-5)
+                    .unwrap()
+                    .1
+            );
+            assert_eq!(
+                reversed.last().unwrap().1,
+                reversed
+                    .iter()
+                    .find(|(position, _)| (*position - 0.8).abs() < 1e-5)
+                    .unwrap()
+                    .1
+            );
+        }
+    }
+
+    #[test]
+    fn clips_stitching_function_inputs_to_its_domain() {
+        let source = include_bytes!("../tests/fixtures/shading-stitching.pdf");
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let function = Object::Reference((6, 0));
+        let colors = |domain| {
+            pdf_shading_segments(
+                &pdf,
+                &function,
+                &PdfColorSpace::Rgb,
+                RenderingIntent::RelativeColorimetric,
+                domain,
+            )
+            .unwrap()
+        };
+        let segments = colors([-0.5, 1.5]);
+        assert_eq!(segments.first().unwrap().position, Some(0.0));
+        assert_eq!(segments.first().unwrap().color, [255, 0, 0]);
+        assert_eq!(segments.last().unwrap().position, Some(1.0));
+        assert_eq!(segments.last().unwrap().color, [255, 255, 255]);
+        assert!(segments
+            .iter()
+            .any(|segment| segment.position == Some(0.25) && segment.color == [255, 0, 0]));
+        assert!(segments
+            .iter()
+            .any(|segment| segment.position == Some(0.75) && segment.color == [255, 255, 255]));
+        for (domain, expected) in [([-2.0, -1.0], [255, 0, 0]), ([2.0, 3.0], [255, 255, 255])] {
+            let segments = colors(domain);
+            assert_eq!(segments.len(), 2);
+            assert!(segments.iter().all(|segment| segment.color == expected));
+        }
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Domain", Object::Array(vec![(-0.5).into(), 1.5.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains("<linearGradient"));
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_linear_shading_function_range_with_color_plateaus() {
+        let bytes = include_bytes!("../tests/fixtures/shading-range.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.matches("<stop offset=").count() > 2);
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let red = |x| png.get_pixel(x, 36).0[0];
+        assert!(red(5).abs_diff(51) <= 3, "{}", red(5));
+        assert!(red(20).abs_diff(51) <= 3, "{}", red(20));
+        assert!(red(36).abs_diff(128) <= 5, "{}", red(36));
+        assert!(red(55).abs_diff(204) <= 3, "{}", red(55));
+        assert!(red(67).abs_diff(204) <= 3, "{}", red(67));
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+    }
+
+    #[test]
+    fn imports_stitched_shading_with_ranged_subfunction() {
+        let bytes = include_bytes!("../tests/fixtures/shading-stitching-range.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.matches("<stop offset=").count() > 4);
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(png.get_pixel(3, 36).0[0].abs_diff(204) <= 4);
+        assert!(png.get_pixel(32, 36).0[0].abs_diff(51) <= 5);
+        assert!(png.get_pixel(40, 36).0[2] > png.get_pixel(40, 36).0[1]);
+    }
+
+    #[test]
+    fn imports_cmyk_function_range_with_black_ink_breakpoint() {
+        let bytes = include_bytes!("../tests/fixtures/shading-cmyk-range.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("offset=\"0.5\""));
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let quarter = png.get_pixel(18, 36).0;
+        let three_quarters = png.get_pixel(54, 36).0;
+        assert!(quarter[0].abs_diff(128) <= 5, "{quarter:?}");
+        assert!(quarter[1].abs_diff(191) <= 5, "{quarter:?}");
+        assert!(three_quarters[0] <= 5, "{three_quarters:?}");
+        assert!(three_quarters[1].abs_diff(64) <= 5, "{three_quarters:?}");
+    }
+
+    #[test]
+    fn rejects_malformed_shading_function_range() {
+        let bytes = include_bytes!("../tests/fixtures/shading-range.pdf");
+        for range in [
+            Object::Array(vec![0.into(), 1.into()]),
+            Object::Array(vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                0.into(),
+                1.into(),
+            ]),
+        ] {
+            let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+            pdf.get_object_mut((6, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Range", range);
+            let mut altered = Vec::new();
+            pdf.save_to(&mut altered).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+        }
+    }
+
+    #[test]
+    fn clips_shading_domain_outside_function_domain() {
+        let bytes = include_bytes!("../tests/fixtures/shading-domain.pdf");
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Domain", Object::Array(vec![0.into(), 2.into()]));
+        let mut altered = Vec::new();
+        pdf.save_to(&mut altered).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&altered).unwrap();
+        assert!(document.page_svg(0).unwrap().contains("<linearGradient"));
+        document.page_png(0, 72.0).unwrap();
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_stitching_bounds_and_unsupported_subfunction() {
+        let bytes = include_bytes!("../tests/fixtures/shading-stitching.pdf");
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set("Bounds", Object::Array(vec![1.into()]));
+        let mut altered = Vec::new();
+        pdf.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set("Encode", Object::Array(vec![0.into(), 1.into()]));
+        altered.clear();
+        pdf.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn rejects_radial_shading_with_unnested_circles() {
+        let bytes = include_bytes!("../tests/fixtures/shading-radial.pdf");
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Coords",
+                Object::Array(vec![
+                    46.into(),
+                    56.into(),
+                    20.into(),
+                    80.into(),
+                    56.into(),
+                    36.into(),
+                ]),
+            );
+        let mut altered = Vec::new();
+        pdf.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn imports_each_pdf_shading_extend_mode() {
+        for (name, extend, before, after) in [
+            ("none", 0, false, false),
+            ("start", 1, true, false),
+            ("end", 2, false, true),
+            ("both", 3, true, true),
+        ] {
+            let source = std::fs::read(format!(
+                "{}/tests/fixtures/shading-extend-{name}.pdf",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains("<linearGradient"));
+            let page = document.pages().unwrap().remove(0);
+            let xml = std::str::from_utf8(document.entry(&page.path).unwrap().unwrap()).unwrap();
+            assert!(
+                xml.contains(&format!("Extend=\"{extend}\"")),
+                "{name}: {xml}"
+            );
+            let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            let left = png.get_pixel(3, 36).0;
+            let right = png.get_pixel(68, 36).0;
+            assert_eq!(left[0] > left[2], before, "{name}: {left:?}");
+            assert_eq!(right[2] > right[0], after, "{name}: {right:?}");
+        }
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-extend-none.pdf"))
+                .unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Extend");
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let page = document.pages().unwrap().remove(0);
+        let xml = std::str::from_utf8(document.entry(&page.path).unwrap().unwrap()).unwrap();
+        assert!(xml.contains("Extend=\"0\""));
+    }
+
+    #[test]
+    fn reverses_radial_shading_extend_direction_with_radii() {
+        let bytes = include_bytes!("../tests/fixtures/shading-radial-reverse.pdf");
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Extend", Object::Array(vec![true.into(), false.into()]));
+        let mut altered = Vec::new();
+        pdf.save_to(&mut altered).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&altered).unwrap();
+        let page = document.pages().unwrap().remove(0);
+        let xml = std::str::from_utf8(document.entry(&page.path).unwrap().unwrap()).unwrap();
+        assert!(xml.contains("Extend=\"2\""));
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let center = png.get_pixel(36, 36).0;
+        let outside = png.get_pixel(0, 0).0;
+        assert!(center[2] > center[0], "{center:?}");
+        assert!(outside[0] > outside[2], "{outside:?}");
+    }
+
+    #[test]
+    fn rejects_malformed_shading_extend_and_invalid_exponent_domain() {
+        let bytes = include_bytes!("../tests/fixtures/shading-axial.pdf");
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Extend", Object::Array(vec![0.into(), true.into()]));
+        let mut altered = Vec::new();
+        pdf.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("N", -1);
+        altered.clear();
+        pdf.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    fn form_pdf(form_content: &[u8], bbox: Rect, nested: bool) -> Vec<u8> {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        page.resources().x_objects().pair(Name(b"Fm1"), Ref::new(5));
+        page.finish();
+        pdf.stream(Ref::new(4), b"/Fm1 Do 0 0 1 rg 0 0 10 10 re f");
+        let mut form = pdf.form_xobject(Ref::new(5), form_content);
+        form.bbox(bbox).matrix([1.0, 0.0, 0.0, 1.0, 10.0, 10.0]);
+        if nested {
+            form.resources().x_objects().pair(Name(b"Fm2"), Ref::new(6));
+        }
+        form.finish();
+        if nested {
+            pdf.form_xobject(Ref::new(6), b"1 0 0 rg 0 0 40 40 re f")
+                .bbox(Rect::new(0.0, 0.0, 10.0, 10.0));
+        }
+        pdf.finish()
+    }
+
+    fn vector_pdf_with_options(content: &[u8], annotate: bool, unit: Option<f32>) -> Vec<u8> {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(10.0, 20.0, 82.0, 92.0));
+        page.contents(Ref::new(4));
+        if annotate {
+            page.annotations([Ref::new(5)]);
+        }
+        if let Some(unit) = unit {
+            page.user_unit(unit);
+        }
+        page.finish();
+        pdf.stream(Ref::new(4), content);
+        if annotate {
+            let mut annotation = pdf.annotation(Ref::new(5));
+            annotation.subtype(AnnotationType::Square);
+            annotation.rect(Rect::new(20.0, 30.0, 30.0, 40.0));
+            annotation.finish();
+        }
+        pdf.finish()
+    }
+
+    fn image_pdf(samples: &[u8], filter: Option<Filter>, gray: bool) -> Vec<u8> {
+        image_pdf_with_transform(samples, filter, gray, [36.0, 0.0, 0.0, 36.0, 0.0, 0.0])
+    }
+
+    fn fax_pdf(data: &[u8], parameters: lopdf::Dictionary) -> Vec<u8> {
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&[0; 4], None, true)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.content = data.to_vec();
+        image.dict.set("Width", 8);
+        image.dict.set("Height", 2);
+        image.dict.set("BitsPerComponent", 1);
+        image
+            .dict
+            .set("Filter", Object::Name(b"CCITTFaxDecode".to_vec()));
+        image
+            .dict
+            .set("DecodeParms", Object::Dictionary(parameters));
+        image.dict.set("Length", data.len() as i64);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn imports_group4_fax_image_and_honors_black_is_one() {
+        let rows = [
+            [true, true, true, true, false, false, false, false],
+            [false, false, false, false, true, true, true, true],
+        ];
+        let mut encoder = fax::encoder::Encoder::new(fax::VecWriter::new());
+        for row in rows {
+            encoder
+                .encode_line(
+                    row.into_iter().map(|white| {
+                        if white {
+                            fax::Color::White
+                        } else {
+                            fax::Color::Black
+                        }
+                    }),
+                    8,
+                )
+                .unwrap();
+        }
+        let encoded = encoder.finish().unwrap().finish();
+        for (black_is_one, expected) in [(false, [255, 0]), (true, [0, 255])] {
+            let mut parameters = dictionary! {
+                "K" => -1,
+                "Columns" => 8,
+                "BlackIs1" => black_is_one,
+            };
+            if !black_is_one {
+                parameters.set("Rows", 2);
+            }
+            let source = fax_pdf(&encoded, parameters);
+            let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+            let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_luma8();
+            assert_eq!((image.width(), image.height()), (8, 2));
+            assert_eq!(
+                [image.get_pixel(0, 0)[0], image.get_pixel(7, 0)[0]],
+                expected
+            );
+            assert_eq!(
+                [image.get_pixel(0, 1)[0], image.get_pixel(7, 1)[0]],
+                [expected[1], expected[0]]
+            );
+            assert!(document.page_png(0, 72.0).unwrap().starts_with(b"\x89PNG"));
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn imports_group3_fax_images_and_asciihex_filter_chain() {
+        use fax::BitWriter;
+
+        for (k, aligned, chained) in [(0, false, false), (2, true, false), (0, false, true)] {
+            let mut writer = fax::VecWriter::new();
+            for (white, black) in [(4, 4), (0, 8)] {
+                writer.write(fax::maps::EOL).unwrap();
+                if k > 0 {
+                    writer.write(fax::Bits { data: 1, len: 1 }).unwrap();
+                }
+                writer
+                    .write(fax::maps::white::encode(white).unwrap())
+                    .unwrap();
+                writer
+                    .write(fax::maps::black::encode(black).unwrap())
+                    .unwrap();
+                if aligned {
+                    writer.pad();
+                }
+            }
+            let encoded = writer.finish();
+            let parameters = dictionary! {
+                "K" => k,
+                "Columns" => 8,
+                "Rows" => 2,
+                "EndOfLine" => true,
+                "EncodedByteAlign" => aligned,
+                "EndOfBlock" => false,
+            };
+            let source = if chained {
+                let hex = format!(
+                    "{}>",
+                    encoded
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                );
+                let mut pdf =
+                    PdfDocument::load_mem(&fax_pdf(hex.as_bytes(), parameters.clone())).unwrap();
+                let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+                image.dict.set(
+                    "Filter",
+                    Object::Array(vec![
+                        Object::Name(b"ASCIIHexDecode".to_vec()),
+                        Object::Name(b"CCITTFaxDecode".to_vec()),
+                    ]),
+                );
+                image.dict.set(
+                    "DecodeParms",
+                    Object::Array(vec![Object::Null, Object::Dictionary(parameters)]),
+                );
+                let mut bytes = Vec::new();
+                pdf.save_to(&mut bytes).unwrap();
+                bytes
+            } else {
+                fax_pdf(&encoded, parameters)
+            };
+            let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+            let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_luma8();
+            assert_eq!((image.width(), image.height()), (8, 2));
+            assert_eq!(
+                [image.get_pixel(0, 0)[0], image.get_pixel(7, 0)[0]],
+                [255, 0]
+            );
+            assert_eq!([image.get_pixel(0, 1)[0], image.get_pixel(7, 1)[0]], [0, 0]);
+        }
+    }
+
+    #[test]
+    fn imports_group3_mixed_fax_with_two_dimensional_row() {
+        use fax::BitWriter;
+
+        let mut writer = fax::VecWriter::new();
+        writer.write(fax::maps::EOL).unwrap();
+        writer.write(fax::Bits { data: 1, len: 1 }).unwrap();
+        writer.write(fax::maps::white::encode(8).unwrap()).unwrap();
+        writer.write(fax::maps::EOL).unwrap();
+        writer.write(fax::Bits { data: 0, len: 1 }).unwrap();
+        writer.write(fax::Bits { data: 1, len: 1 }).unwrap();
+        let source = fax_pdf(
+            &writer.finish(),
+            dictionary! {
+                "K" => 2,
+                "Columns" => 8,
+                "Rows" => 2,
+                "EndOfLine" => true,
+                "EndOfBlock" => false,
+            },
+        );
+        let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+        let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_luma8();
+        assert!(image.pixels().all(|pixel| pixel[0] == 255));
+    }
+
+    #[test]
+    fn rejects_invalid_fax_parameters_and_truncated_rows() {
+        let source = fax_pdf(&[0], dictionary! {"K" => -1, "Columns" => 8, "Rows" => 2});
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&source),
+            Err(OfdError::Invalid(message)) if message.contains("CCITT")
+        ));
+        let invalid_columns = fax_pdf(&[0], dictionary! {"K" => -1, "Columns" => 9, "Rows" => 2});
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&invalid_columns),
+            Err(OfdError::Invalid(message)) if message.contains("CCITT image dimensions")
+        ));
+        let damaged_rows = fax_pdf(
+            &[0],
+            dictionary! {"K" => -1, "Columns" => 8, "Rows" => 2, "DamagedRowsBeforeError" => 1},
+        );
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&damaged_rows),
+            Err(OfdError::Invalid(message)) if message.contains("damaged row recovery")
+        ));
+    }
+
+    #[test]
+    fn imports_group4_fax_explicit_image_mask() {
+        let mut encoder = fax::encoder::Encoder::new(fax::VecWriter::new());
+        for row in [
+            [fax::Color::Black, fax::Color::White],
+            [fax::Color::White, fax::Color::Black],
+        ] {
+            encoder.encode_line(row.into_iter(), 2).unwrap();
+        }
+        let encoded = encoder.finish().unwrap().finish();
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&rgb, None, false)).unwrap();
+        let mask_id = pdf.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Subtype" => Object::Name(b"Image".to_vec()),
+                "Width" => 2,
+                "Height" => 2,
+                "ImageMask" => true,
+                "BitsPerComponent" => 1,
+                "Filter" => Object::Name(b"CCITTFaxDecode".to_vec()),
+                "DecodeParms" => Object::Dictionary(dictionary! {
+                    "K" => -1,
+                    "Columns" => 2,
+                    "Rows" => 2,
+                }),
+            },
+            encoded,
+        ));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Mask", Object::Reference(mask_id));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(
+            [image.get_pixel(0, 0)[3], image.get_pixel(1, 0)[3]],
+            [255, 0]
+        );
+        assert_eq!(
+            [image.get_pixel(0, 1)[3], image.get_pixel(1, 1)[3]],
+            [0, 255]
+        );
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_jbig2_mmr_pdf_with_decode_polarity_and_color_key() {
+        let source = include_bytes!("../tests/fixtures/jbig2-mmr.pdf");
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_luma8();
+        assert_eq!(pixels.dimensions(), (8, 2));
+        for y in 0..2 {
+            for x in 0..8 {
+                assert_eq!(
+                    pixels.get_pixel(x, y)[0],
+                    if (x < 4) == (y == 0) { 255 } else { 0 }
+                );
+            }
+        }
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let stream = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stream
+            .dict
+            .set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        stream
+            .dict
+            .set("Mask", Object::Array(vec![0.into(), 0.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(7, 0)[3], 0);
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_jbig2_pdf_with_asciihex_and_flate_globals() {
+        let source = include_bytes!("../tests/fixtures/jbig2-globals.pdf");
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        let expected = document.page_image_data(0, 0).unwrap();
+        let pixels = image::load_from_memory(expected).unwrap().to_luma8();
+        assert_eq!(pixels.dimensions(), (52, 66));
+        // Independently decoded by Poppler pdfimages 24.02.0.
+        let reference = image::load_from_memory(include_bytes!(
+            "../tests/fixtures/jbig2-globals-reference.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        assert_eq!(pixels, reference);
+        assert!(pixels.pixels().any(|pixel| pixel[0] == 0));
+        assert!(pixels.pixels().any(|pixel| pixel[0] == 255));
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let globals = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        let decoded = decode_pdf_ascii_hex(&globals.content, MAX_ENTRY_BYTES as usize).unwrap();
+        let page = pdf.get_object((5, 0)).unwrap().as_stream().unwrap();
+        let mut embedded = decoded.clone();
+        embedded.extend_from_slice(
+            &decode_pdf_ascii_hex(&page.content, MAX_ENTRY_BYTES as usize).unwrap(),
+        );
+        let ofd_png = crate::jbig2_to_png(&embedded).unwrap();
+        assert_eq!(
+            image::load_from_memory(&ofd_png).unwrap().to_luma8(),
+            pixels
+        );
+        let globals = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &decoded).unwrap();
+        globals.set_content(compressor.finish().unwrap());
+        globals
+            .dict
+            .set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(imported.page_image_data(0, 0).unwrap(), expected);
+        assert!(imported.page_png(0, 72.0).unwrap().starts_with(b"\x89PNG"));
+        assert!(imported.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_pdf_jbig2_dimensions_and_globals() {
+        let source = include_bytes!("../tests/fixtures/jbig2-mmr.pdf");
+        for (field, value) in [("Width", 9), ("Height", 3), ("BitsPerComponent", 8)] {
+            let mut pdf = PdfDocument::load_mem(source).unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set(field, value);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(
+                matches!(OfdDocument::from_pdf_bytes(&bytes), Err(OfdError::Invalid(message)) if message.contains("JBIG2")),
+                "{field}"
+            );
+        }
+        let source = include_bytes!("../tests/fixtures/jbig2-globals.pdf");
+        for globals in [Object::Reference((99, 0)), Object::Integer(3)] {
+            let mut pdf = PdfDocument::load_mem(source).unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set(
+                    "DecodeParms",
+                    Object::Array(vec![
+                        Object::Null,
+                        Object::Dictionary(dictionary! {"JBIG2Globals" => globals}),
+                    ]),
+                );
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+        for kind in ["recursive", "page"] {
+            let mut pdf = PdfDocument::load_mem(source).unwrap();
+            let globals = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+            if kind == "recursive" {
+                globals
+                    .dict
+                    .set("Filter", Object::Name(b"JBIG2Decode".to_vec()));
+            } else {
+                let mut decoded =
+                    decode_pdf_ascii_hex(&globals.content, MAX_ENTRY_BYTES as usize).unwrap();
+                decoded[6] = 1;
+                globals.set_content(decoded);
+                globals.dict.remove(b"Filter");
+            }
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(
+                matches!(OfdDocument::from_pdf_bytes(&bytes), Err(OfdError::Invalid(message)) if message.contains("JBIG2Globals")),
+                "{kind}"
+            );
+        }
+    }
+
+    fn text_pdf(content: &[u8], base_font: &[u8]) -> Vec<u8> {
+        text_pdf_with_widths(content, base_font, None)
+    }
+
+    fn text_pdf_with_widths(
+        content: &[u8],
+        base_font: &[u8],
+        widths: Option<(u8, &[f32])>,
+    ) -> Vec<u8> {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        page.resources().fonts().pair(Name(b"F1"), Ref::new(5));
+        page.finish();
+        pdf.stream(Ref::new(4), content);
+        let mut font = pdf.type1_font(Ref::new(5));
+        font.base_font(Name(base_font))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+        if let Some((first, widths)) = widths {
+            font.first_char(first)
+                .last_char(first + u8::try_from(widths.len() - 1).unwrap())
+                .widths(widths.iter().copied());
+        }
+        drop(font);
+        pdf.finish()
+    }
+
+    #[test]
+    fn imports_pdf_rendering_intent_without_changing_device_rgb() {
+        for intent in [
+            "RelativeColorimetric",
+            "AbsoluteColorimetric",
+            "Perceptual",
+            "Saturation",
+            "VendorIntent",
+        ] {
+            let content = format!("/{intent} ri 1 0 0 rg 10 20 20 20 re f");
+            let document = OfdDocument::from_pdf_bytes(&vector_pdf(content.as_bytes())).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains("#ff0000"), "{intent}: {svg}");
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+        for content in ["ri", "42 ri", "/Perceptual /Saturation ri"] {
+            assert!(matches!(
+                OfdDocument::from_pdf_bytes(&vector_pdf(content.as_bytes())),
+                Err(OfdError::Invalid(message)) if message.contains("PDF ri expects one name")
+            ));
+        }
+    }
+
+    #[test]
+    fn applies_pdf_rendering_intent_to_icc_vector_colors() {
+        let profile_bytes = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let profile = ColorProfile::new_from_slice(profile_bytes).unwrap();
+        let source_color = [77_u8, 51, 26, 51];
+        let intents = [
+            ("Perceptual", RenderingIntent::Perceptual),
+            (
+                "RelativeColorimetric",
+                RenderingIntent::RelativeColorimetric,
+            ),
+            ("Saturation", RenderingIntent::Saturation),
+            (
+                "AbsoluteColorimetric",
+                RenderingIntent::AbsoluteColorimetric,
+            ),
+        ];
+        for (name, rendering_intent) in intents {
+            let content = format!("/CS1 cs /{name} ri 0.3 0.2 0.1 0.2 scn 20 30 20 20 re f");
+            let mut pdf = PdfDocument::load_mem(&vector_pdf(content.as_bytes())).unwrap();
+            let profile_id = pdf.add_object(Object::Stream(lopdf::Stream::new(
+                dictionary! {"N" => 4},
+                profile_bytes.to_vec(),
+            )));
+            pdf.get_object_mut((3, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Resources",
+                    dictionary! {
+                        "ColorSpace" => dictionary! {
+                            "CS1" => Object::Array(vec![
+                                Object::Name(b"ICCBased".to_vec()),
+                                Object::Reference(profile_id),
+                            ])
+                        }
+                    },
+                );
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let converter = profile
+                .create_transform_8bit(
+                    Layout::Rgba,
+                    &ColorProfile::new_srgb(),
+                    Layout::Rgb,
+                    TransformOptions {
+                        rendering_intent,
+                        ..TransformOptions::default()
+                    },
+                )
+                .unwrap();
+            let mut expected = [0_u8; 3];
+            converter.transform(&source_color, &mut expected).unwrap();
+            assert!(
+                document.page_svg(0).unwrap().contains(&format!(
+                    "#{:02x}{:02x}{:02x}",
+                    expected[0], expected[1], expected[2]
+                )),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn imports_pdf_compatibility_sections_and_rejects_unbalanced_markers() {
+        let bytes = text_pdf(
+            b"BX 42 /Ignored FutureOp BX (unused) NewerOp BT /F1 12 Tf 10 20 Td (A) Tj ET EX EX",
+            b"Helvetica",
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A"]);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        for content in [
+            b"42 FutureOp".as_slice(),
+            b"EX",
+            b"BX 42 FutureOp",
+            b"BX 42 FutureOp EX EX",
+            b"1 BX EX",
+            b"BX 1 EX",
+            b"BX /Shade sh EX",
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&text_pdf(content, b"Helvetica")).is_err());
+        }
+        let mut deep = b"BX ".repeat(257);
+        deep.extend_from_slice(&b"EX ".repeat(257));
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf(&deep, b"Helvetica")).is_err());
+    }
+
+    #[test]
+    fn imports_nonoptional_pdf_marked_content_and_checks_nesting() {
+        let bytes = text_pdf(
+            b"/P MP /P << /MCID 1 >> DP /P BMC BT /F1 12 Tf 10 20 Td /Span << /MCID 2 >> BDC (A) Tj EMC ET EMC",
+            b"Helvetica",
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A"]);
+
+        let source = text_pdf(
+            b"/P /TagProps BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
+            b"Helvetica",
+        );
+        let mut named = PdfDocument::load_mem(&source).unwrap();
+        let page = named.get_object_mut((3, 0)).unwrap().as_dict_mut().unwrap();
+        let resources = page.get_mut(b"Resources").unwrap().as_dict_mut().unwrap();
+        resources.set(
+            "Properties",
+            Object::Dictionary(dictionary! {
+                "TagProps" => Object::Dictionary(dictionary! {"MCID" => 1}),
+            }),
+        );
+        let mut bytes = Vec::new();
+        named.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["A"]
+        );
+
+        for content in [
+            b"EMC".as_slice(),
+            b"/P BMC",
+            b"/P BMC BT /F1 12 Tf 10 20 Td (A) Tj EMC ET",
+            b"BT /F1 12 Tf 10 20 Td /P BMC (A) Tj ET EMC",
+            b"/P /Missing BDC EMC",
+            b"/P 1 BDC EMC",
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&text_pdf(content, b"Helvetica")).is_err());
+        }
+        let mut deep = b"/P BMC ".repeat(257);
+        deep.extend_from_slice(&b"EMC ".repeat(257));
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf(&deep, b"Helvetica")).is_err());
+
+        let mut inline =
+            PdfDocument::load_mem(&text_pdf(b"/OC << /Type /OCG >> BDC EMC", b"Helvetica"))
+                .unwrap();
+        inline.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Array(vec![]),
+                "D" => Object::Dictionary(dictionary! {}),
+            }),
+        );
+        let mut bytes = Vec::new();
+        inline.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn imports_pdf_optional_content_default_visibility_and_preserves_text_advance() {
+        let content = b"BT /F1 12 Tf 10 20 Td /OC /Hidden BDC /OC /Shown BDC (A) Tj EMC EMC /OC /Shown BDC (B) Tj EMC ET /OC /Hidden BDC 1 0 0 rg 0 0 10 10 re f EMC /OC /Shown BDC 20 0 10 10 re f EMC";
+        let source = text_pdf_with_widths(content, b"Helvetica", Some((b'A', &[600.0, 600.0])));
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let hidden = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Hidden"),
+        }));
+        let shown = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Shown"),
+        }));
+        pdf.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Array(vec![Object::Reference(hidden), Object::Reference(shown)]),
+                "D" => Object::Dictionary(dictionary! {
+                    "BaseState" => Object::Name(b"OFF".to_vec()),
+                    "ON" => Object::Array(vec![Object::Reference(shown)]),
+                }),
+            }),
+        );
+        let page = pdf.get_object_mut((3, 0)).unwrap().as_dict_mut().unwrap();
+        let resources = page.get_mut(b"Resources").unwrap().as_dict_mut().unwrap();
+        resources.set(
+            "Properties",
+            Object::Dictionary(dictionary! {
+                "Hidden" => Object::Reference(hidden),
+                "Shown" => Object::Reference(shown),
+            }),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["B"]);
+        assert_eq!(document.page_paths(0).unwrap().len(), 1);
+        assert!(document.page_svg(0).unwrap().contains("#ff0000"));
+        let position = document.page_text_objects(0).unwrap()[0].boundary.unwrap()[0];
+        assert!((position - 17.2 * MM_PER_PT).abs() < 1e-6);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["B"]);
+        assert_eq!(reopened.page_paths(0).unwrap().len(), 1);
+
+        pdf.get_object_mut(shown)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Usage",
+                Object::Dictionary(dictionary! {
+                    "View" => Object::Dictionary(dictionary! {
+                        "ViewState" => Object::Name(b"OFF".to_vec()),
+                    }),
+                }),
+            );
+
+        let default = pdf
+            .catalog_mut()
+            .unwrap()
+            .get_mut(b"OCProperties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"D")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        default.set(
+            "AS",
+            Object::Array(vec![Object::Dictionary(dictionary! {
+                "Event" => Object::Name(b"View".to_vec()),
+                "Category" => Object::Array(vec![Object::Name(b"View".to_vec())]),
+                "OCGs" => Object::Array(vec![Object::Reference(shown)]),
+            })]),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["B"]
+        );
+    }
+
+    #[test]
+    fn imports_pdf_optional_content_with_indirect_configuration_values() {
+        let source = text_pdf(
+            b"BT /F1 12 Tf 10 20 Td /OC /Layer BDC (A) Tj EMC ET",
+            b"Helvetica",
+        );
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let group = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Layer"),
+        }));
+        let groups = pdf.add_object(Object::Array(vec![Object::Reference(group)]));
+        let view = pdf.add_object(Object::Name(b"View".to_vec()));
+        let intents = pdf.add_object(Object::Array(vec![Object::Reference(view)]));
+        let off = pdf.add_object(Object::Name(b"OFF".to_vec()));
+        let on = pdf.add_object(Object::Name(b"ON".to_vec()));
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Intent", Object::Reference(intents));
+        pdf.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Reference(groups),
+                "D" => Object::Dictionary(dictionary! {
+                    "Intent" => Object::Reference(view),
+                    "BaseState" => Object::Reference(off),
+                }),
+            }),
+        );
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Properties",
+                Object::Dictionary(dictionary! {"Layer" => Object::Reference(group)}),
+            );
+
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_text(0)
+            .unwrap()
+            .is_empty());
+
+        pdf.catalog_mut()
+            .unwrap()
+            .get_mut(b"OCProperties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"D")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("BaseState", Object::Reference(on));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["A"]
+        );
+    }
+
+    #[test]
+    fn imports_pdf_optional_image_xobject_visibility() {
+        let source = image_pdf(&[255, 0, 0].repeat(4), None, false);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let group = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Image layer"),
+        }));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("OC", Object::Reference(group));
+        pdf.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Array(vec![Object::Reference(group)]),
+                "D" => Object::Dictionary(dictionary! {
+                    "BaseState" => Object::Name(b"OFF".to_vec()),
+                }),
+            }),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_images(0)
+            .unwrap()
+            .is_empty());
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "OC",
+                Object::Dictionary(dictionary! {
+                    "Type" => Object::Name(b"OCMD".to_vec()),
+                    "OCGs" => Object::Array(vec![Object::Reference(group)]),
+                    "P" => Object::Name(b"AllOff".to_vec()),
+                }),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_images(0)
+                .unwrap()
+                .len(),
+            1
+        );
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("OC", Object::Reference(group));
+
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Intent", Object::Name(b"Design".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_images(0)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Intent", Object::Name(b"All".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_images(0)
+            .unwrap()
+            .is_empty());
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Intent", Object::Name(b"FutureIntent".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_images(0)
+                .unwrap()
+                .len(),
+            1
+        );
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Intent",
+                Object::Array(vec![
+                    Object::Name(b"FutureIntent".to_vec()),
+                    Object::Name(b"View".to_vec()),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_images(0)
+            .unwrap()
+            .is_empty());
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Intent", 1);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        pdf.get_object_mut(group)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Intent", Object::Name(b"Design".to_vec()));
+
+        let catalog = pdf.catalog_mut().unwrap();
+        let default = catalog
+            .get_mut(b"OCProperties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"D")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        default.set(
+            "Intent",
+            Object::Array(vec![Object::Name(b"Design".to_vec())]),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_images(0)
+            .unwrap()
+            .is_empty());
+
+        let default = pdf
+            .catalog_mut()
+            .unwrap()
+            .get_mut(b"OCProperties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"D")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        default.set("BaseState", Object::Name(b"ON".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_images(0)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn imports_pdf_optional_form_xobject_visibility() {
+        let source = form_pdf(
+            b"1 0 0 rg 0 0 10 10 re f",
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            false,
+        );
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let group = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Form layer"),
+        }));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("OC", Object::Reference(group));
+        pdf.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Array(vec![Object::Reference(group)]),
+                "D" => Object::Dictionary(dictionary! {
+                    "BaseState" => Object::Name(b"OFF".to_vec()),
+                }),
+            }),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_paths(0).unwrap().len(), 1);
+
+        let default = pdf
+            .catalog_mut()
+            .unwrap()
+            .get_mut(b"OCProperties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"D")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        default.set("BaseState", Object::Name(b"ON".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn imports_pdf_optional_link_visibility() {
+        let source = include_bytes!("../tests/fixtures/links.pdf");
+        let baseline = OfdDocument::from_pdf_bytes(source)
+            .unwrap()
+            .annotations()
+            .unwrap()
+            .len();
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let group = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Link layer"),
+        }));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("OC", Object::Reference(group));
+        pdf.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Array(vec![Object::Reference(group)]),
+                "D" => Object::Dictionary(dictionary! {
+                    "BaseState" => Object::Name(b"OFF".to_vec()),
+                }),
+            }),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .annotations()
+                .unwrap()
+                .len(),
+            baseline - 1
+        );
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "OC",
+                Object::Dictionary(dictionary! {
+                    "Type" => Object::Name(b"OCMD".to_vec()),
+                    "OCGs" => Object::Reference(group),
+                    "P" => Object::Name(b"AllOff".to_vec()),
+                }),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .annotations()
+                .unwrap()
+                .len(),
+            baseline
+        );
+    }
+
+    #[test]
+    fn imports_pdf_ocmd_policies_and_visibility_expressions() {
+        let source = text_pdf_with_widths(
+            b"BT /F1 12 Tf 10 20 Td /OC /Membership BDC (A) Tj EMC (B) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0, 600.0])),
+        );
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let on = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("On"),
+        }));
+        let off = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCG".to_vec()),
+            "Name" => Object::string_literal("Off"),
+        }));
+        let membership = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"OCMD".to_vec()),
+            "OCGs" => Object::Array(vec![Object::Reference(on), Object::Reference(off)]),
+        }));
+        pdf.catalog_mut().unwrap().set(
+            "OCProperties",
+            Object::Dictionary(dictionary! {
+                "OCGs" => Object::Array(vec![Object::Reference(on), Object::Reference(off)]),
+                "D" => Object::Dictionary(dictionary! {
+                    "BaseState" => Object::Name(b"OFF".to_vec()),
+                    "ON" => Object::Array(vec![Object::Reference(on)]),
+                }),
+            }),
+        );
+        let resources = pdf
+            .get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        resources.set(
+            "Properties",
+            Object::Dictionary(dictionary! {
+                "Membership" => Object::Reference(membership),
+            }),
+        );
+
+        for (policy, expected) in [
+            (b"AnyOn".as_slice(), ["A", "B"].as_slice()),
+            (b"AllOn", ["B"].as_slice()),
+            (b"AnyOff", ["A", "B"].as_slice()),
+            (b"AllOff", ["B"].as_slice()),
+        ] {
+            pdf.get_object_mut(membership)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("P", Object::Name(policy.to_vec()));
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            assert_eq!(
+                OfdDocument::from_pdf_bytes(&bytes)
+                    .unwrap()
+                    .page_text(0)
+                    .unwrap(),
+                expected
+            );
+        }
+
+        let direct_membership = pdf.get_object(membership).unwrap().clone();
+        let properties = pdf
+            .get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Properties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        properties.set("Membership", direct_membership);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["B"]
+        );
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Properties")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Membership", Object::Reference(membership));
+
+        let null_group = pdf.add_object(Object::Null);
+        pdf.get_object_mut(membership)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "OCGs",
+                Object::Array(vec![
+                    Object::Reference(on),
+                    Object::Null,
+                    Object::Reference(null_group),
+                    Object::Reference((999, 0)),
+                ]),
+            );
+        pdf.get_object_mut(membership)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("P", Object::Name(b"AnyOn".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["A", "B"]
+        );
+
+        pdf.get_object_mut(membership)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "VE",
+                Object::Array(vec![
+                    Object::Name(b"And".to_vec()),
+                    Object::Reference(on),
+                    Object::Array(vec![Object::Name(b"Not".to_vec()), Object::Reference(off)]),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["A", "B"]
+        );
+
+        pdf.get_object_mut(membership)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("VE", Object::Array(vec![Object::Name(b"Not".to_vec())]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+
+        let membership_dict = pdf
+            .get_object_mut(membership)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        membership_dict.remove(b"VE");
+        membership_dict.set("OCGs", Object::Reference(on));
+        membership_dict.set("P", Object::Name(b"AllOn".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["A", "B"]
+        );
+
+        pdf.get_object_mut(membership)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("P", Object::Name(b"UnknownPolicy".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn ignores_pdf_optional_content_when_catalog_has_no_ocproperties() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/optional-content.pdf"))
+                .unwrap();
+        pdf.catalog_mut().unwrap().remove(b"OCProperties");
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Properties");
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["A", "B"]
+        );
+
+        let mut image =
+            PdfDocument::load_mem(&image_pdf(&[255, 0, 0].repeat(4), None, false)).unwrap();
+        image
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("OC", Object::Name(b"Undefined".to_vec()));
+        let mut bytes = Vec::new();
+        image.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_images(0)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    fn image_pdf_with_transform(
+        samples: &[u8],
+        filter: Option<Filter>,
+        gray: bool,
+        transform: [f32; 6],
+    ) -> Vec<u8> {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        page.resources().x_objects().pair(Name(b"Im1"), Ref::new(5));
+        page.finish();
+        let mut content = Content::new();
+        content.save_state().transform(transform);
+        content.x_object(Name(b"Im1")).restore_state();
+        pdf.stream(Ref::new(4), &content.finish());
+        let mut image = pdf.image_xobject(Ref::new(5), samples);
+        image.width(
+            if matches!(filter, Some(Filter::DctDecode | Filter::JpxDecode)) {
+                32
+            } else {
+                2
+            },
+        );
+        image.height(
+            if matches!(filter, Some(Filter::DctDecode | Filter::JpxDecode)) {
+                32
+            } else {
+                2
+            },
+        );
+        image.bits_per_component(8);
+        image.color_space_name(Name(if gray { b"DeviceGray" } else { b"DeviceRGB" }));
+        if let Some(filter) = filter {
+            image.filter(filter);
+        }
+        image.finish();
+        pdf.finish()
+    }
+
+    #[test]
+    fn imports_nested_pdf_forms_with_matrix_bbox_and_state_restoration() {
+        let pdf = form_pdf(
+            b"q 0 1 0 rg /Fm2 Do Q",
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            true,
+        );
+        let document = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("<clipPath"));
+        let png =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let form_pixel = png.pixel(5, 20).unwrap();
+        assert!(form_pixel.red() > 230 && form_pixel.green() < 30);
+        let clipped_pixel = png.pixel(13, 10).unwrap();
+        assert!(clipped_pixel.red() > 230 && clipped_pixel.green() > 230);
+        let page_pixel = png.pixel(2, 23).unwrap();
+        assert!(page_pixel.blue() > 230 && page_pixel.red() < 30);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_paths(0).unwrap(),
+            document.page_paths(0).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_reference_xobject_proxy_form_without_external_file() {
+        let source = form_pdf(
+            b"1 0 0 rg 0 0 10 10 re f",
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            false,
+        );
+        let baseline = OfdDocument::from_pdf_bytes(&source).unwrap();
+        let expected = baseline.page_png(0, 25.4).unwrap();
+        for indirect in [false, true] {
+            let mut pdf = PdfDocument::load_mem(&source).unwrap();
+            let reference = lopdf::dictionary! {
+                "F" => Object::string_literal("unavailable-external.pdf"),
+                "Page" => 0,
+            };
+            let reference = if indirect {
+                Object::Reference(pdf.add_object(reference))
+            } else {
+                Object::Dictionary(reference)
+            };
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("Ref", reference);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(imported.page_paths(0).unwrap().len(), 2);
+            assert_eq!(imported.page_png(0, 25.4).unwrap(), expected);
+            assert!(imported.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn imports_rgb_form_transparency_group_and_rejects_other_group_modes() {
+        let source = form_pdf(
+            b"1 0 0 rg 0 0 10 10 re f",
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            false,
+        );
+        let baseline = OfdDocument::from_pdf_bytes(&source).unwrap();
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let group = lopdf::dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+        };
+        let group_id = pdf.add_object(group);
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Group", Object::Reference(group_id));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            document.page_paths(0).unwrap(),
+            baseline.page_paths(0).unwrap()
+        );
+        assert_eq!(
+            document.page_png(0, 25.4).unwrap(),
+            baseline.page_png(0, 25.4).unwrap()
+        );
+        assert!(document.validate_references().unwrap().is_empty());
+
+        for (key, value) in [
+            ("CS", Object::Name(b"DeviceCMYK".to_vec())),
+            ("I", Object::Name(b"invalid".to_vec())),
+            ("K", Object::Name(b"invalid".to_vec())),
+        ] {
+            pdf.get_object_mut(group_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(key, value);
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(matches!(
+                OfdDocument::from_pdf_bytes(&bytes),
+                Err(OfdError::Invalid(message)) if message.contains("Form transparency group is unsupported")
+            ));
+            pdf.get_object_mut(group_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .remove(key.as_bytes());
+            if key == "CS" {
+                pdf.get_object_mut(group_id)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("CS", Object::Name(b"DeviceRGB".to_vec()));
+            }
+        }
+        for key in ["I", "K"] {
+            pdf.get_object_mut(group_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(key, Object::Boolean(true));
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let grouped = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(
+                grouped.page_png(0, 25.4).unwrap(),
+                baseline.page_png(0, 25.4).unwrap()
+            );
+        }
+        pdf.get_object_mut(group_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"CS");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let inherited = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            inherited.page_png(0, 25.4).unwrap(),
+            baseline.page_png(0, 25.4).unwrap()
+        );
+        let rgb_id = pdf.add_object(Object::Name(b"DeviceRGB".to_vec()));
+        let true_id = pdf.add_object(Object::Boolean(true));
+        let group = pdf.get_object_mut(group_id).unwrap().as_dict_mut().unwrap();
+        group.set("CS", Object::Reference(rgb_id));
+        group.set("I", Object::Reference(true_id));
+        group.set("K", Object::Reference(true_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let indirect = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            indirect.page_png(0, 25.4).unwrap(),
+            baseline.page_png(0, 25.4).unwrap()
+        );
+        pdf.get_object_mut(group_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("CS", Object::Reference((9999, 0)));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("invalid PDF Form group entry")
+        ));
+        pdf.get_object_mut(group_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("CS", Object::Reference(rgb_id));
+        let form = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        form.content = b"/Translucent gs 1 0 0 rg 0 0 10 10 re f".to_vec();
+        form.dict.set("Length", form.content.len() as i64);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("requires opaque content")
+        ));
+    }
+
+    #[test]
+    fn imports_nested_opaque_forms_inside_rgb_transparency_group() {
+        let source = form_pdf(b"/Fm2 Do", Rect::new(0.0, 0.0, 20.0, 20.0), true);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let third = pdf.get_object((6, 0)).unwrap().as_stream().unwrap().clone();
+        let third_id = pdf.add_object(third);
+        let nested = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        nested.content = b"/Fm3 Do".to_vec();
+        nested.dict.set("Length", nested.content.len() as i64);
+        nested.dict.set(
+            "Resources",
+            lopdf::dictionary! {
+                "XObject" => lopdf::dictionary! {
+                    "Fm3" => Object::Reference(third_id),
+                },
+            },
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let baseline = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let group = lopdf::dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+            "I" => Object::Boolean(true),
+            "K" => Object::Boolean(true),
+        };
+        let group_id = pdf.add_object(group);
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Group", Object::Reference(group_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            imported.page_paths(0).unwrap(),
+            baseline.page_paths(0).unwrap()
+        );
+        let actual = image::load_from_memory(&imported.page_png(0, 25.4).unwrap())
+            .unwrap()
+            .to_rgba8();
+        let expected = image::load_from_memory(&baseline.page_png(0, 25.4).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(actual, expected);
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        let nested = pdf
+            .get_object_mut(third_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        nested.content = b"/Transparent gs 1 0 0 rg 0 0 10 10 re f".to_vec();
+        nested.dict.set("Length", nested.content.len() as i64);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("requires opaque content")
+        ));
+
+        pdf.get_object_mut(third_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Subtype", Object::Name(b"Image".to_vec()));
+        pdf.get_object_mut(third_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("SMask", Object::Name(b"None".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("requires opaque content")
+        ));
+    }
+
+    #[test]
+    fn imports_opaque_image_inside_rgb_form_transparency_group() {
+        let source = form_pdf(b"/Fm2 Do", Rect::new(0.0, 0.0, 20.0, 20.0), true);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let image = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        image.dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        image.dict.set("Width", 2);
+        image.dict.set("Height", 2);
+        image.dict.set("BitsPerComponent", 8);
+        image
+            .dict
+            .set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        image.content = [255_u8, 0, 0].repeat(4);
+        image.dict.set("Length", image.content.len() as i64);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let baseline = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let group_id = pdf.add_object(lopdf::dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Group", Object::Reference(group_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(imported.page_images(0).unwrap().len(), 1);
+        assert_eq!(
+            imported.page_png(0, 25.4).unwrap(),
+            baseline.page_png(0, 25.4).unwrap()
+        );
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        for (key, value) in [
+            ("Mask", Object::Array(vec![0.into(); 6])),
+            ("SMask", Object::Name(b"None".to_vec())),
+            ("ImageMask", Object::Boolean(true)),
+            ("SMaskInData", Object::Integer(1)),
+        ] {
+            pdf.get_object_mut((6, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set(key, value);
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(
+                matches!(
+                    OfdDocument::from_pdf_bytes(&bytes),
+                    Err(OfdError::Invalid(message)) if message.contains("requires opaque content")
+                ),
+                "{key}"
+            );
+            pdf.get_object_mut((6, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .remove(key.as_bytes());
+        }
+    }
+
+    #[test]
+    fn imports_opaque_inline_image_inside_rgb_form_transparency_group() {
+        let mut content = b"BI /W 2 /H 2 /BPC 8 /CS /RGB ID ".to_vec();
+        content.extend([255_u8, 0, 0].repeat(4));
+        content.extend_from_slice(b" EI");
+        let source = form_pdf(&content, Rect::new(0.0, 0.0, 20.0, 20.0), false);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let baseline = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let group_id = pdf.add_object(lopdf::dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Group", Object::Reference(group_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(imported.page_images(0).unwrap().len(), 1);
+        assert_eq!(
+            imported.page_png(0, 25.4).unwrap(),
+            baseline.page_png(0, 25.4).unwrap()
+        );
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        let mut stencil = b"BI /W 2 /H 1 /IM true /BPC 1 /D [0 1] ID ".to_vec();
+        stencil.push(0xff);
+        stencil.extend_from_slice(b" EI");
+        let source = form_pdf(&stencil, Rect::new(0.0, 0.0, 20.0, 20.0), false);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let group_id = pdf.add_object(lopdf::dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Group", Object::Reference(group_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("requires opaque content")
+        ));
+    }
+
+    #[test]
+    fn imports_opaque_shading_inside_rgb_form_transparency_group() {
+        let source = form_pdf(b"/Sh1 sh", Rect::new(0.0, 0.0, 20.0, 20.0), false);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let shading = lopdf::dictionary! {
+            "ShadingType" => 2,
+            "Coords" => Object::Array(vec![0.into(), 0.into(), 20.into(), 0.into()]),
+            "ColorSpace" => Object::Name(b"DeviceRGB".to_vec()),
+            "Extend" => Object::Array(vec![true.into(), true.into()]),
+            "Function" => lopdf::dictionary! {
+                "FunctionType" => 2,
+                "Domain" => Object::Array(vec![0.into(), 1.into()]),
+                "C0" => Object::Array(vec![1.into(), 0.into(), 0.into()]),
+                "C1" => Object::Array(vec![0.into(), 0.into(), 1.into()]),
+                "N" => 1,
+            },
+        };
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "Resources",
+                lopdf::dictionary! {
+                    "Shading" => lopdf::dictionary! {"Sh1" => shading},
+                },
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let baseline = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let group_id = pdf.add_object(lopdf::dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Group", Object::Reference(group_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(imported.page_svg(0).unwrap().contains("<linearGradient"));
+        assert_eq!(
+            imported.page_png(0, 25.4).unwrap(),
+            baseline.page_png(0, 25.4).unwrap()
+        );
+        assert!(imported.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_embedded_pdf_files_from_nested_name_tree() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"attachment payload").unwrap();
+        let stream = lopdf::Stream::new(
+            lopdf::dictionary! {
+                "Type" => Object::Name(b"EmbeddedFile".to_vec()),
+                "Filter" => Object::Name(b"FlateDecode".to_vec()),
+            },
+            encoder.finish().unwrap(),
+        );
+        let file_id = pdf.add_object(stream);
+        let mut unicode_name = vec![0xfe, 0xff];
+        for unit in "报告.txt".encode_utf16() {
+            unicode_name.extend_from_slice(&unit.to_be_bytes());
+        }
+        let file_spec = pdf.add_object(lopdf::dictionary! {
+            "Type" => Object::Name(b"Filespec".to_vec()),
+            "F" => Object::string_literal("report.txt"),
+            "UF" => Object::String(unicode_name, lopdf::StringFormat::Literal),
+            "EF" => lopdf::dictionary! {"F" => Object::Reference(file_id)},
+        });
+        let leaf = pdf.add_object(lopdf::dictionary! {
+            "Names" => Object::Array(vec![
+                Object::string_literal("report"),
+                Object::Reference(file_spec),
+            ]),
+        });
+        pdf.catalog_mut().unwrap().set(
+            "Names",
+            lopdf::dictionary! {
+                "EmbeddedFiles" => lopdf::dictionary! {
+                    "Kids" => Object::Array(vec![Object::Reference(leaf)]),
+                },
+            },
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.attachments().unwrap().len(), 1);
+        assert_eq!(document.attachments().unwrap()[0].name, "报告.txt");
+        assert_eq!(document.attachment_data(0).unwrap(), b"attachment payload");
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.attachments().unwrap()[0].name, "报告.txt");
+        assert_eq!(reopened.attachment_data(0).unwrap(), b"attachment payload");
+
+        pdf.get_object_mut(file_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "Filter",
+                Object::Array(vec![Object::Name(b"FlateDecode".to_vec())]),
+            );
+        pdf.get_object_mut(file_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("DecodeParms", Object::Array(vec![Object::Null]));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .attachment_data(0)
+                .unwrap(),
+            b"attachment payload"
+        );
+
+        pdf.get_object_mut(file_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("DecodeParms", lopdf::dictionary! {"Predictor" => 2});
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("embedded file filter is unsupported")
+        ));
+        pdf.get_object_mut(file_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .remove(b"DecodeParms");
+
+        pdf.get_object_mut(file_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("embedded file filter is unsupported")
+        ));
+
+        let stream = pdf
+            .get_object_mut(file_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.dict.remove(b"Filter");
+        stream.dict.set("Type", Object::Name(b"XObject".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("embedded file has invalid Type")
+        ));
+    }
+
+    #[test]
+    fn imports_associated_files_from_pdf_structure_tree() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let first_stream = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"root data".to_vec(),
+        ));
+        let second_stream = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"nested data".to_vec(),
+        ));
+        let first_spec = pdf.add_object(dictionary! {
+            "Type" => Object::Name(b"Filespec".to_vec()),
+            "F" => Object::string_literal("root.txt"),
+            "EF" => dictionary! {"F" => Object::Reference(first_stream)},
+            "AFRelationship" => Object::Name(b"Data".to_vec()),
+        });
+        let second_spec = pdf.add_object(dictionary! {
+            "Type" => Object::Name(b"Filespec".to_vec()),
+            "F" => Object::string_literal("nested.txt"),
+            "EF" => dictionary! {"F" => Object::Reference(second_stream)},
+            "AFRelationship" => Object::Name(b"Supplement".to_vec()),
+        });
+        let root = pdf.new_object_id();
+        let document = pdf.new_object_id();
+        let section = pdf.new_object_id();
+        pdf.objects.insert(
+            root,
+            dictionary! {
+                "Type" => Object::Name(b"StructTreeRoot".to_vec()),
+                "AF" => Object::Array(vec![Object::Reference(first_spec)]),
+                "K" => Object::Reference(document),
+            }
+            .into(),
+        );
+        pdf.objects.insert(
+            document,
+            dictionary! {
+                "Type" => Object::Name(b"StructElem".to_vec()),
+                "S" => Object::Name(b"Document".to_vec()),
+                "P" => Object::Reference(root),
+                "K" => Object::Array(vec![Object::Integer(0), Object::Reference(section)]),
+            }
+            .into(),
+        );
+        pdf.objects.insert(section, dictionary! {
+            "Type" => Object::Name(b"StructElem".to_vec()),
+            "S" => Object::Name(b"Sect".to_vec()),
+            "P" => Object::Reference(document),
+            "AF" => Object::Array(vec![Object::Reference(first_spec), Object::Reference(second_spec)]),
+        }.into());
+        pdf.catalog_mut()
+            .unwrap()
+            .set("StructTreeRoot", Object::Reference(root));
+
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let attachments = output.attachments().unwrap();
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].name, "root.txt");
+        assert_eq!(attachments[0].usage, "Data");
+        assert_eq!(attachments[1].name, "nested.txt");
+        assert_eq!(attachments[1].usage, "Supplement");
+        assert_eq!(output.attachment_data(0).unwrap(), b"root data");
+        assert_eq!(output.attachment_data(1).unwrap(), b"nested data");
+        assert!(output.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&output.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.attachment_data(1).unwrap(), b"nested data");
+
+        pdf.get_object_mut(section)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("K", Object::Name(b"invalid".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("structure tree K has invalid type")
+        ));
+    }
+
+    #[test]
+    fn imports_associated_files_from_nested_pdf_form_fields() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let first_stream = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"invoice source".to_vec(),
+        ));
+        let second_stream = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"form data".to_vec(),
+        ));
+        let first_spec = pdf.add_object(dictionary! {
+            "F" => Object::string_literal("source.xml"),
+            "EF" => dictionary! {"F" => Object::Reference(first_stream)},
+            "AFRelationship" => Object::Name(b"Source".to_vec()),
+        });
+        let second_spec = pdf.add_object(dictionary! {
+            "F" => Object::string_literal("form.json"),
+            "EF" => dictionary! {"F" => Object::Reference(second_stream)},
+            "AFRelationship" => Object::Name(b"FormData".to_vec()),
+        });
+        let parent = pdf.new_object_id();
+        let child = pdf.new_object_id();
+        pdf.objects.insert(
+            parent,
+            dictionary! {
+                "T" => Object::string_literal("parent"),
+                "Kids" => Object::Array(vec![Object::Reference(child)]),
+                "AF" => Object::Array(vec![Object::Reference(first_spec)]),
+            }
+            .into(),
+        );
+        pdf.objects.insert(
+            child,
+            dictionary! {
+                "FT" => Object::Name(b"Tx".to_vec()),
+                "T" => Object::string_literal("child"),
+                "Parent" => Object::Reference(parent),
+                "AF" => Object::Array(vec![Object::Reference(second_spec)]),
+            }
+            .into(),
+        );
+        let catalog = pdf.catalog_mut().unwrap();
+        catalog.set("AF", Object::Array(vec![Object::Reference(first_spec)]));
+        catalog.set(
+            "AcroForm",
+            dictionary! {
+                "Fields" => Object::Array(vec![Object::Reference(parent)]),
+            },
+        );
+
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let attachments = output.attachments().unwrap();
+        assert_eq!(attachments.len(), 2);
+        let source = attachments
+            .iter()
+            .position(|item| item.name == "source.xml")
+            .unwrap();
+        let form = attachments
+            .iter()
+            .position(|item| item.name == "form.json")
+            .unwrap();
+        assert_eq!(output.attachment_data(source).unwrap(), b"invoice source");
+        assert_eq!(output.attachment_data(form).unwrap(), b"form data");
+        assert_eq!(attachments[source].usage, "Source");
+        assert_eq!(attachments[form].usage, "FormData");
+        assert!(output.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&output.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.attachment_data(form).unwrap(), b"form data");
+
+        pdf.get_object_mut(child)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AF", Object::Name(b"broken".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("PDF AF is not an array")
+        ));
+    }
+
+    #[test]
+    fn parses_pdf_embedded_file_dates_and_rejects_invalid_values() {
+        for (source, expected) in [
+            ("D:2024", "2024-01-01T00:00:00"),
+            ("D:202402", "2024-02-01T00:00:00"),
+            ("D:20240229", "2024-02-29T00:00:00"),
+            ("D:2024022912", "2024-02-29T12:00:00"),
+            ("D:202402291230", "2024-02-29T12:30:00"),
+            ("D:20240229123059Z", "2024-02-29T12:30:59"),
+            ("D:20240229123059+08", "2024-02-29T12:30:59"),
+            ("D:20240229123059-08'", "2024-02-29T12:30:59"),
+            ("D:20240229123059+08'00'", "2024-02-29T12:30:59"),
+            ("D:20240229123059-08'30", "2024-02-29T12:30:59"),
+        ] {
+            assert_eq!(pdf_attachment_datetime(source).unwrap(), expected);
+        }
+        for invalid in [
+            "D:2023A229",
+            "D:20230229",
+            "D:2024022912Z",
+            "D:20240229243059",
+            "D:20240229126059",
+            "D:20240229123060",
+            "D:20240229123059+24'00'",
+            "D:20240229123059-08'60'",
+            "D:20240229123059x",
+            "D:20240229123059+08:00",
+        ] {
+            assert!(pdf_attachment_datetime(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn imports_pdf_associated_files_without_duplicate_name_tree_entries() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let mut specs = Vec::new();
+        for (name, payload) in [
+            ("named.txt", b"named".as_slice()),
+            ("catalog.txt", b"catalog"),
+            ("page.txt", b"page"),
+        ] {
+            let stream = pdf.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+                payload.to_vec(),
+            ));
+            specs.push(pdf.add_object(lopdf::dictionary! {
+                "UF" => Object::string_literal(name),
+                "EF" => lopdf::dictionary! {"UF" => Object::Reference(stream)},
+                "AFRelationship" => Object::Name(b"Data".to_vec()),
+            }));
+        }
+        let named = pdf.add_object(lopdf::dictionary! {
+            "Names" => Object::Array(vec![Object::string_literal("named.txt"), Object::Reference(specs[0])]),
+        });
+        pdf.catalog_mut().unwrap().set(
+            "Names",
+            lopdf::dictionary! {"EmbeddedFiles" => Object::Reference(named)},
+        );
+        pdf.catalog_mut().unwrap().set(
+            "AF",
+            Object::Array(vec![
+                Object::Reference(specs[0]),
+                Object::Reference(specs[1]),
+            ]),
+        );
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "AF",
+                Object::Array(vec![
+                    Object::Reference(specs[1]),
+                    Object::Reference(specs[2]),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let attachments = document.attachments().unwrap();
+        assert_eq!(
+            attachments
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["named.txt", "catalog.txt", "page.txt"]
+        );
+        assert_eq!(document.attachment_data(0).unwrap(), b"named");
+        assert_eq!(document.attachment_data(1).unwrap(), b"catalog");
+        assert_eq!(document.attachment_data(2).unwrap(), b"page");
+        assert!(attachments.iter().all(|item| item.usage == "Data"));
+        assert!(document.validate_references().unwrap().is_empty());
+
+        pdf.catalog_mut().unwrap().remove(b"Names");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let only_af = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(only_af.attachments().unwrap().len(), 3);
+        assert_eq!(only_af.attachment_data(2).unwrap(), b"page");
+
+        pdf.catalog_mut().unwrap().set("AF", Object::Integer(1));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("PDF AF is not an array")
+        ));
+    }
+
+    #[test]
+    fn pdf_associated_file_limit_counts_only_new_specs() {
+        let mut pdf = PdfDocument::new();
+        let spec = pdf.add_object(lopdf::dictionary! {});
+        let owner = lopdf::dictionary! {
+            "AF" => Object::Array(vec![Object::Reference(spec)]),
+        };
+        let mut output = OfdDocument::new();
+        let mut seen = HashMap::from([(spec, 0)]);
+        let mut count = 10_000;
+        import_pdf_associated_files(&mut output, &pdf, &owner, &mut seen, &mut count).unwrap();
+        assert_eq!(count, 10_000);
+        seen.clear();
+        assert!(matches!(
+            import_pdf_associated_files(&mut output, &pdf, &owner, &mut seen, &mut count),
+            Err(OfdError::Limit(message)) if message.contains("list is too large")
+        ));
+    }
+
+    #[test]
+    fn imports_pdf_xobject_associated_files_from_nested_forms() {
+        let mut pdf =
+            PdfDocument::load_mem(&form_pdf(b"/Fm2 Do", Rect::new(0.0, 0.0, 30.0, 30.0), true))
+                .unwrap();
+        let mut specs = Vec::new();
+        for (name, bytes) in [("source.csv", b"a,b".as_slice()), ("schema.xml", b"<x/>")] {
+            let stream = pdf.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+                bytes.to_vec(),
+            ));
+            specs.push(pdf.add_object(lopdf::dictionary! {
+                "F" => Object::string_literal(name),
+                "EF" => lopdf::dictionary! {"F" => Object::Reference(stream)},
+            }));
+        }
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("AF", Object::Array(vec![Object::Reference(specs[0])]));
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "AF",
+                Object::Array(vec![
+                    Object::Reference(specs[0]),
+                    Object::Reference(specs[1]),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            document
+                .attachments()
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["source.csv", "schema.xml"]
+        );
+        assert_eq!(document.attachment_data(0).unwrap(), b"a,b");
+        assert_eq!(document.attachment_data(1).unwrap(), b"<x/>");
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_other_page_resource_associated_files() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let mut owners = Vec::new();
+        for (name, payload) in [
+            ("graphics.txt", b"graphics".as_slice()),
+            ("profile.txt", b"profile"),
+            ("pattern.txt", b"pattern"),
+            ("shading.txt", b"shading"),
+            ("properties.txt", b"properties"),
+        ] {
+            let stream = pdf.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+                payload.to_vec(),
+            ));
+            let spec = pdf.add_object(lopdf::dictionary! {
+                "F" => Object::string_literal(name),
+                "EF" => lopdf::dictionary! {"F" => Object::Reference(stream)},
+            });
+            owners.push(pdf.add_object(lopdf::dictionary! {
+                "AF" => Object::Array(vec![Object::Reference(spec)]),
+            }));
+        }
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                lopdf::dictionary! {
+                    "ExtGState" => lopdf::dictionary! {"GS1" => Object::Reference(owners[0])},
+                    "ColorSpace" => lopdf::dictionary! {
+                        "CS1" => Object::Array(vec![
+                            Object::Name(b"ICCBased".to_vec()),
+                            Object::Reference(owners[1]),
+                        ])
+                    },
+                    "Pattern" => lopdf::dictionary! {"P1" => Object::Reference(owners[2])},
+                    "Shading" => lopdf::dictionary! {"S1" => Object::Reference(owners[3])},
+                    "Properties" => lopdf::dictionary! {
+                        "MC1" => Object::Reference(owners[4]),
+                        "MC2" => Object::Reference(owners[0]),
+                    },
+                },
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let attachments = document.attachments().unwrap();
+        assert_eq!(attachments.len(), 5);
+        for (index, (name, payload)) in [
+            ("graphics.txt", b"graphics".as_slice()),
+            ("profile.txt", b"profile"),
+            ("pattern.txt", b"pattern"),
+            ("shading.txt", b"shading"),
+            ("properties.txt", b"properties"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(attachments[index].name, name);
+            assert_eq!(document.attachment_data(index).unwrap(), payload);
+        }
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_page_tree_and_resource_container_associated_files() {
+        let document = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/page-resource-associated-files.pdf"
+        ))
+        .unwrap();
+        let expected = [
+            ("page-tree.txt", b"page tree".as_slice()),
+            ("resources.txt", b"resources".as_slice()),
+            ("graphics.txt", b"graphics".as_slice()),
+            ("profile.txt", b"profile".as_slice()),
+            ("pattern-list.txt", b"pattern list".as_slice()),
+            ("pattern.txt", b"pattern".as_slice()),
+            ("shading.txt", b"shading".as_slice()),
+            ("properties.txt", b"properties".as_slice()),
+        ];
+        let attachments = document.attachments().unwrap();
+        assert_eq!(attachments.len(), expected.len());
+        for (index, (name, payload)) in expected.into_iter().enumerate() {
+            assert_eq!(attachments[index].name, name);
+            assert_eq!(document.attachment_data(index).unwrap(), payload);
+        }
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_font_associated_file_and_rejects_invalid_array() {
+        let mut pdf =
+            PdfDocument::load_mem(&text_pdf(b"BT /F1 12 Tf 10 20 Td (A) Tj ET", b"Helvetica"))
+                .unwrap();
+        let stream = pdf.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"font license".to_vec(),
+        ));
+        let spec = pdf.add_object(lopdf::dictionary! {
+            "F" => Object::string_literal("LICENSE.txt"),
+            "EF" => lopdf::dictionary! {"F" => Object::Reference(stream)},
+            "AFRelationship" => Object::Name(b"Supplement".to_vec()),
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AF", Object::Array(vec![Object::Reference(spec)]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A"]);
+        let attachments = document.attachments().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].name, "LICENSE.txt");
+        assert_eq!(attachments[0].usage, "Supplement");
+        assert_eq!(document.attachment_data(0).unwrap(), b"font license");
+        assert!(document.validate_references().unwrap().is_empty());
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AF", Object::Integer(1));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("PDF AF is not an array")
+        ));
+    }
+
+    #[test]
+    fn imports_pdf_descendant_font_and_descriptor_associated_files() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../tests/fixtures/type0-identity-tounicode.pdf"
+        ))
+        .unwrap();
+        let mut specs = Vec::new();
+        for (name, content) in [
+            ("mapping.txt", b"cid mapping".as_slice()),
+            ("license.txt", b"font license".as_slice()),
+        ] {
+            let stream = pdf.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+                content.to_vec(),
+            ));
+            specs.push(pdf.add_object(lopdf::dictionary! {
+                "F" => Object::string_literal(name),
+                "EF" => lopdf::dictionary! {"F" => Object::Reference(stream)},
+            }));
+        }
+        let descriptor = pdf.add_object(lopdf::dictionary! {
+            "Type" => Object::Name(b"FontDescriptor".to_vec()),
+            "FontName" => Object::Name(b"TestCID".to_vec()),
+            "Flags" => 4,
+            "FontBBox" => Object::Array(vec![0.into(), 0.into(), 1000.into(), 1000.into()]),
+            "ItalicAngle" => 0,
+            "Ascent" => 800,
+            "Descent" => -200,
+            "CapHeight" => 700,
+            "StemV" => 80,
+            "AF" => Object::Array(vec![Object::Reference(specs[1])]),
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AF", Object::Array(vec![Object::Reference(specs[0])]));
+        let descendant = pdf.get_object_mut((7, 0)).unwrap().as_dict_mut().unwrap();
+        descendant.set("AF", Object::Array(vec![Object::Reference(specs[0])]));
+        descendant.set("FontDescriptor", Object::Reference(descriptor));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let attachments = document.attachments().unwrap();
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].name, "mapping.txt");
+        assert_eq!(attachments[1].name, "license.txt");
+        assert_eq!(document.attachment_data(0).unwrap(), b"cid mapping");
+        assert_eq!(document.attachment_data(1).unwrap(), b"font license");
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_image_xobject_associated_file() {
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(&[255, 0, 0].repeat(4), None, false)).unwrap();
+        let stream = pdf.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"source image".to_vec(),
+        ));
+        let spec = pdf.add_object(lopdf::dictionary! {
+            "F" => Object::string_literal("source.rgb"),
+            "EF" => lopdf::dictionary! {"F" => Object::Reference(stream)},
+        });
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("AF", Object::Array(vec![Object::Reference(spec)]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_images(0).unwrap().len(), 1);
+        assert_eq!(document.attachments().unwrap()[0].name, "source.rgb");
+        assert_eq!(document.attachment_data(0).unwrap(), b"source image");
+    }
+
+    #[test]
+    fn imports_pdf_file_attachment_annotations_and_retains_click_targets() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let stream = pdf.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"annotation payload".to_vec(),
+        ));
+        let mut unicode_name = vec![0xfe, 0xff];
+        for unit in "批注.txt".encode_utf16() {
+            unicode_name.extend_from_slice(&unit.to_be_bytes());
+        }
+        let spec = pdf.add_object(lopdf::dictionary! {
+            "UF" => Object::String(unicode_name, lopdf::StringFormat::Literal),
+            "EF" => lopdf::dictionary! {"UF" => Object::Reference(stream)},
+        });
+        let associated_stream = pdf.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"associated payload".to_vec(),
+        ));
+        let associated_spec = pdf.add_object(lopdf::dictionary! {
+            "F" => Object::string_literal("associated.bin"),
+            "EF" => lopdf::dictionary! {"F" => Object::Reference(associated_stream)},
+        });
+        let annotations = [(10, 10, 20, 20), (30, 30, 40, 40)].map(|(x0, y0, x1, y1)| {
+            pdf.add_object(lopdf::dictionary! {
+                "Subtype" => Object::Name(b"FileAttachment".to_vec()),
+                "FS" => Object::Reference(spec),
+                "AF" => Object::Array(vec![Object::Reference(associated_spec)]),
+                "Rect" => Object::Array(vec![x0.into(), y0.into(), x1.into(), y1.into()]),
+                "F" => 4,
+            })
+        });
+        let subtype = pdf.add_object(Object::Name(b"FileAttachment".to_vec()));
+        let flags = pdf.add_object(Object::Integer(4 | 8 | 16 | 128));
+        let first_annotation = pdf
+            .get_object_mut(annotations[0])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        first_annotation.set("Subtype", Object::Reference(subtype));
+        first_annotation.set("F", Object::Reference(flags));
+        first_annotation.set("Contents", Object::string_literal("Attached evidence"));
+        first_annotation.set("T", Object::string_literal("Archivist"));
+        first_annotation.set("M", Object::string_literal("D:20241025"));
+        first_annotation.set("NM", Object::string_literal("attached-evidence"));
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Annots",
+                Object::Array(annotations.into_iter().map(Object::Reference).collect()),
+            );
+        let named = pdf.add_object(lopdf::dictionary! {
+            "Names" => Object::Array(vec![Object::string_literal("attachment"), Object::Reference(spec)]),
+        });
+        pdf.catalog_mut().unwrap().set(
+            "Names",
+            lopdf::dictionary! {"EmbeddedFiles" => Object::Reference(named)},
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let attachments = document.attachments().unwrap();
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].name, "批注.txt");
+        assert_eq!(document.attachment_data(0).unwrap(), b"annotation payload");
+        assert_eq!(attachments[1].name, "associated.bin");
+        assert_eq!(document.attachment_data(1).unwrap(), b"associated payload");
+        let links = document.annotations().unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].remark.as_deref(), Some("Attached evidence"));
+        assert_eq!(links[0].attributes["Creator"], "Archivist");
+        assert_eq!(links[0].last_mod_date.as_deref(), Some("2024-10-25"));
+        assert_eq!(links[0].parameters["PDFName"], "attached-evidence");
+        assert_eq!(links[0].attributes["NoZoom"], "true");
+        assert_eq!(links[0].attributes["NoRotate"], "true");
+        assert_eq!(links[0].attributes["ReadOnly"], "true");
+        for link in &links {
+            assert_eq!(link.actions[0].kind, "GotoA");
+            assert_eq!(link.actions[0].attributes["AttachID"], attachments[0].id);
+        }
+        assert_ne!(links[0].appearance_box, links[1].appearance_box);
+        assert!(document.validate_references().unwrap().is_empty());
+        let exported = PdfDocument::load_mem(&document.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let first = exported
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            first.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"FileAttachment"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(first.get(b"Contents").unwrap()).unwrap(),
+            "Attached evidence"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(first.get(b"T").unwrap()).unwrap(),
+            "Archivist"
+        );
+        assert!(first
+            .get(b"M")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with(b"D:20241025"));
+        assert_eq!(
+            lopdf::decode_text_string(first.get(b"NM").unwrap()).unwrap(),
+            "attached-evidence"
+        );
+
+        pdf.catalog_mut().unwrap().remove(b"Names");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let annotation_only = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(annotation_only.attachments().unwrap().len(), 2);
+        assert_eq!(annotation_only.annotations().unwrap().len(), 2);
+        assert_eq!(
+            annotation_only.attachment_data(0).unwrap(),
+            b"associated payload"
+        );
+
+        pdf.get_object_mut(annotations[0])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Rect");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("FileAttachment has no Rect")
+        ));
+        pdf.get_object_mut(annotations[0])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Rect",
+                Object::Array(vec![10.into(), 10.into(), 20.into(), 20.into()]),
+            );
+
+        pdf.get_object_mut(annotations[0])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AF", Object::Integer(1));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("PDF AF is not an array")
+        ));
+        pdf.get_object_mut(annotations[0])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "AF",
+                Object::Array(vec![Object::Reference(associated_spec)]),
+            );
+
+        pdf.get_object_mut(annotations[0])
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"FS");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("FileAttachment has no FS")
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_pdf_embedded_file_metadata() {
+        let mut pdf = PdfDocument::new();
+        let stream_id = pdf.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), vec![]));
+        let metadata =
+            |pdf: &PdfDocument| pdf_embedded_file_metadata(pdf, &Object::Reference(stream_id), 0);
+        let set = |pdf: &mut PdfDocument, field: &str, value: Object| {
+            pdf.get_object_mut(stream_id)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set(field, value);
+        };
+        assert_eq!(metadata(&pdf).unwrap(), AttachmentMetadata::default());
+        set(&mut pdf, "Subtype", Object::Integer(1));
+        assert!(metadata(&pdf)
+            .unwrap_err()
+            .to_string()
+            .contains("Subtype is not a name"));
+        set(&mut pdf, "Subtype", Object::Name(vec![0xff]));
+        assert!(metadata(&pdf)
+            .unwrap_err()
+            .to_string()
+            .contains("Subtype is not UTF-8"));
+        set(&mut pdf, "Subtype", Object::Name(b"text/plain".to_vec()));
+        set(&mut pdf, "Params", Object::Integer(1));
+        assert!(metadata(&pdf)
+            .unwrap_err()
+            .to_string()
+            .contains("Params is not a dictionary"));
+        set(
+            &mut pdf,
+            "Params",
+            Object::Dictionary(lopdf::dictionary! {"Size" => Object::Integer(1)}),
+        );
+        assert!(metadata(&pdf)
+            .unwrap_err()
+            .to_string()
+            .contains("Size does not match"));
+        set(
+            &mut pdf,
+            "Params",
+            Object::Dictionary(
+                lopdf::dictionary! {"Size" => Object::Integer(0), "CreationDate" => Object::string_literal("D:20230229")},
+            ),
+        );
+        assert!(metadata(&pdf)
+            .unwrap_err()
+            .to_string()
+            .contains("attachment date is invalid"));
+    }
+
+    #[test]
+    fn rejects_duplicate_or_broken_pdf_embedded_files() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"0 0 10 10 re f")).unwrap();
+        let file_id = pdf.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {"Type" => Object::Name(b"EmbeddedFile".to_vec())},
+            b"data".to_vec(),
+        ));
+        let file_spec = pdf.add_object(lopdf::dictionary! {
+            "F" => Object::string_literal("same.txt"),
+            "EF" => lopdf::dictionary! {"F" => Object::Reference(file_id)},
+        });
+        let leaf = pdf.add_object(lopdf::dictionary! {
+            "Names" => Object::Array(vec![
+                Object::string_literal("first"), Object::Reference(file_spec),
+                Object::string_literal("first"), Object::Reference(file_spec),
+            ]),
+        });
+        pdf.catalog_mut().unwrap().set(
+            "Names",
+            lopdf::dictionary! {"EmbeddedFiles" => Object::Reference(leaf)},
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("key is duplicated")
+        ));
+        pdf.get_object_mut(leaf)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Names",
+                Object::Array(vec![
+                    Object::string_literal("first"),
+                    Object::Reference(file_spec),
+                ]),
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let original = bytes.clone();
+        pdf.get_object_mut(file_spec)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"EF");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("no EF dictionary")
+        ));
+
+        pdf.get_object_mut(file_spec)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("EF", lopdf::dictionary! {"F" => Object::Reference(file_id)});
+        pdf.get_object_mut(leaf)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Names", Object::Array(vec![Object::string_literal("odd")]));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("odd length")
+        ));
+
+        let node = pdf.get_object_mut(leaf).unwrap().as_dict_mut().unwrap();
+        node.remove(b"Names");
+        node.set("Kids", Object::Array(vec![Object::Reference(leaf)]));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("cycle or repeated node")
+        ));
+
+        for (case, expected) in [
+            ("node", "node is not a dictionary"),
+            ("names", "Names is not an array"),
+            ("key", "key is not a string"),
+            ("reference", "invalid PDF file specification"),
+            ("specification", "specification is not a dictionary"),
+            ("ef", "PDF EF is not a dictionary"),
+            ("stream", "embedded file is not a stream"),
+            ("missing_name", "embedded file has no name"),
+            ("empty_name", "embedded file name is empty"),
+            ("kids", "Kids is not an array"),
+        ] {
+            let mut altered = PdfDocument::load_mem(&original).unwrap();
+            match case {
+                "node" => *altered.get_object_mut(leaf).unwrap() = Object::Integer(7),
+                "names" => altered
+                    .get_object_mut(leaf)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("Names", Object::Integer(7)),
+                "key" | "reference" => {
+                    let key = if case == "key" {
+                        Object::Integer(7)
+                    } else {
+                        Object::string_literal("first")
+                    };
+                    let value = if case == "reference" {
+                        Object::Reference((999, 0))
+                    } else {
+                        Object::Reference(file_spec)
+                    };
+                    altered
+                        .get_object_mut(leaf)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set("Names", Object::Array(vec![key, value]));
+                }
+                "specification" => *altered.get_object_mut(file_spec).unwrap() = Object::Integer(7),
+                "ef" => altered
+                    .get_object_mut(file_spec)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("EF", Object::Integer(7)),
+                "stream" => *altered.get_object_mut(file_id).unwrap() = Object::Integer(7),
+                "missing_name" => {
+                    altered
+                        .get_object_mut(file_spec)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .remove(b"F");
+                }
+                "empty_name" => altered
+                    .get_object_mut(file_spec)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("F", Object::string_literal("")),
+                "kids" => {
+                    let node = altered.get_object_mut(leaf).unwrap().as_dict_mut().unwrap();
+                    node.remove(b"Names");
+                    node.set("Kids", Object::Integer(7));
+                }
+                _ => unreachable!(),
+            }
+            bytes.clear();
+            altered.save_to(&mut bytes).unwrap();
+            assert!(
+                matches!(
+                    OfdDocument::from_pdf_bytes(&bytes),
+                    Err(OfdError::Invalid(message)) if message.contains(expected)
+                ),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_pdf_forms_and_cycles() {
+        let invalid = form_pdf(
+            b"0 0 1 rg 0 0 10 10 re f",
+            Rect::new(0.0, 0.0, 0.0, 10.0),
+            false,
+        );
+        assert!(OfdDocument::from_pdf_bytes(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("BBox is invalid"));
+        let cyclic = form_pdf(b"/Fm2 Do", Rect::new(0.0, 0.0, 20.0, 20.0), true);
+        let mut parsed = PdfDocument::load_mem(&cyclic).unwrap();
+        let form = parsed
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        form.dict.set(
+            "Resources",
+            lopdf::dictionary! {"XObject" => lopdf::dictionary! {"Fm1" => (5, 0)}},
+        );
+        form.content = b"/Fm1 Do".to_vec();
+        form.dict.set("Length", form.content.len() as i64);
+        let mut bytes = Vec::new();
+        parsed.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("cyclic PDF Form"));
+    }
+
+    #[test]
+    fn imports_compressed_pdf_form_content() {
+        let source = form_pdf(
+            b"1 0 0 rg 0 0 10 10 re f",
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            false,
+        );
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .compress()
+            .unwrap();
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn imports_pdf_rectangles_with_page_origin_and_color() {
+        let mut content = Content::new();
+        content.set_fill_rgb(1.0, 0.0, 0.0);
+        content.rect(10.0, 20.0, 36.0, 36.0).fill_nonzero();
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(&content.finish())).unwrap();
+        assert_eq!(
+            document.pages().unwrap()[0].physical_box,
+            Some([0.0, 0.0, 25.4, 25.4])
+        );
+        assert_eq!(document.page_paths(0).unwrap().len(), 1);
+        assert!(document.page_svg(0).unwrap().contains("#ff0000"));
+        let png =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        assert!(png.pixel(5, 20).unwrap().red() > 240);
+        assert!(png.pixel(5, 20).unwrap().green() < 10);
+        assert!(png.pixel(5, 5).unwrap().green() > 240);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_paths(0).unwrap(),
+            document.page_paths(0).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_device_cmyk_paint_and_rejects_invalid_channels() {
+        let pdf = vector_pdf(b"0 1 1 0 k 10 20 18 18 re f 1 0 0 0 K 2 w 30 20 18 18 re S");
+        let document = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("#ff0000"));
+        assert!(svg.contains("#00ffff"));
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+        assert!(OfdDocument::from_pdf_bytes(&vector_pdf(b"0 0 0 1.1 k 10 20 18 18 re f")).is_err());
+        assert!(OfdDocument::from_pdf_bytes(&vector_pdf(b"0 0 0 K 10 20 18 18 re S")).is_err());
+    }
+
+    #[test]
+    fn imports_selected_pdf_device_colors_and_restores_color_space() {
+        let content = b"/DeviceCMYK cs 0 1 1 0 sc 10 20 18 18 re f q /DeviceRGB cs 0 0 1 scn 30 20 18 18 re f Q 0 1 0 0 sc 50 20 18 18 re f /DeviceCMYK CS 1 0 0 0 SC 10 42 18 18 re S";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(content)).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("#ff0000"));
+        assert!(svg.contains("#0000ff"));
+        assert!(svg.contains("#ff00ff"));
+        assert_eq!(document.page_paths(0).unwrap().len(), 4);
+        let reset = b"/DeviceRGB cs 1 0 0 sc /DeviceCMYK cs 10 20 18 18 re f";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(reset)).unwrap();
+        assert!(document.page_svg(0).unwrap().contains("#000000"));
+        for invalid in [
+            b"/DeviceRGB cs 1 0 sc 10 20 18 18 re f".as_slice(),
+            b"/DeviceCMYK cs 0 0 0 1.1 sc 10 20 18 18 re f",
+            b"/Pattern cs 1 sc 10 20 18 18 re f",
+            b"/DeviceRGB cs /P1 scn 10 20 18 18 re f",
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&vector_pdf(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn resolves_named_pdf_device_color_spaces_from_current_resources() {
+        let source = vector_pdf(b"/CS1 cs 0 1 1 0 sc 10 20 18 18 re f");
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let page = pdf.get_object_mut((3, 0)).unwrap().as_dict_mut().unwrap();
+        page.set(
+            "Resources",
+            lopdf::dictionary! {
+                "ColorSpace" => lopdf::dictionary! {
+                    "CS1" => Object::Name(b"DeviceCMYK".to_vec())
+                }
+            },
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains("#ff0000"));
+    }
+
+    #[test]
+    fn imports_calgray_vector_and_image_colors() {
+        let calgray = Object::Array(vec![
+            Object::Name(b"CalGray".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![
+                    Object::Real(0.9505), Object::Integer(1), Object::Real(1.089),
+                ]),
+                "Gamma" => Object::Real(2.2),
+            }),
+        ]);
+        let expected = PdfColorSpace::CalGray { gamma: 2.2 }.color(&[0.5]).unwrap();
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"/CS1 cs 0.5 sc 10 20 18 18 re f")).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                Object::Dictionary(dictionary! {
+                    "ColorSpace" => Object::Dictionary(dictionary! {"CS1" => calgray.clone()})
+                }),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected[0], expected[1], expected[2]
+        )));
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut raw_pdf = PdfDocument::load_mem(&image_pdf(&[128; 4], None, true)).unwrap();
+        let image = raw_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        image.dict.set("ColorSpace", calgray.clone());
+        let mut bytes = Vec::new();
+        raw_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(
+            rgb.get_pixel(0, 0).0,
+            PdfColorSpace::CalGray { gamma: 2.2 }
+                .color(&[128.0 / 255.0])
+                .unwrap()
+        );
+
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[128; 4], 2, 2, image::ExtendedColorType::L8)
+            .unwrap();
+        let mut jpeg_pdf =
+            PdfDocument::load_mem(&image_pdf(&jpeg, Some(Filter::DctDecode), true)).unwrap();
+        let image = jpeg_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        image.dict.set("ColorSpace", calgray);
+        image.dict.set("Width", 2);
+        image.dict.set("Height", 2);
+        let mut bytes = Vec::new();
+        jpeg_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!((i16::from(rgb.get_pixel(0, 0)[0]) - i16::from(expected[0])).abs() <= 3);
+    }
+
+    #[test]
+    fn remaps_pdf_device_colors_with_default_color_space_resources() {
+        let calgray = Object::Array(vec![
+            Object::Name(b"CalGray".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![
+                    Object::Real(0.9505), Object::Integer(1), Object::Real(1.089),
+                ]),
+                "Gamma" => Object::Real(2.2),
+            }),
+        ]);
+        let expected_gray = PdfColorSpace::CalGray { gamma: 2.2 }.color(&[0.5]).unwrap();
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(
+            b"0.5 g 10 20 18 18 re f /DeviceGray cs 0.5 sc 30 20 18 18 re f /CS1 cs 0.5 sc 50 20 18 18 re f",
+        ))
+        .unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                dictionary! {
+                    "ColorSpace" => dictionary! {
+                        "DefaultGray" => calgray.clone(),
+                        "CS1" => Object::Name(b"DeviceGray".to_vec()),
+                    }
+                },
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            expected_gray[0], expected_gray[1], expected_gray[2]
+        );
+        assert_eq!(document.page_svg(0).unwrap().matches(&hex).count(), 3);
+
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&[128; 4], None, true)).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ColorSpace", dictionary! {"DefaultGray" => calgray});
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(
+            rgb.get_pixel(0, 0).0,
+            PdfColorSpace::CalGray { gamma: 2.2 }
+                .color(&[128.0 / 255.0])
+                .unwrap()
+        );
+
+        let calrgb = calrgb_space();
+        let expected_rgb = parse_color_space(None, None, &calrgb, 0)
+            .unwrap()
+            .color(&[0.5; 3])
+            .unwrap();
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"0.5 0.5 0.5 rg 10 20 18 18 re f")).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                dictionary! {"ColorSpace" => dictionary! {"DefaultRGB" => calrgb}},
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected_rgb[0], expected_rgb[1], expected_rgb[2]
+        )));
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&[128; 12], None, false)).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ColorSpace", dictionary! {"DefaultRGB" => calrgb_space()});
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(
+            rgb.get_pixel(0, 0).0,
+            parse_color_space(None, None, &calrgb_space(), 0)
+                .unwrap()
+                .color(&[128.0 / 255.0; 3])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_incompatible_pdf_default_color_space() {
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"0.5 0.5 0.5 rg 10 20 18 18 re f")).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                dictionary! {
+                    "ColorSpace" => dictionary! {
+                        "DefaultRGB" => Object::Name(b"DeviceGray".to_vec())
+                    }
+                },
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("incompatible components")
+        ));
+    }
+
+    #[test]
+    fn remaps_pdf_device_cmyk_through_default_icc_profile() {
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"0.3 0.2 0.1 0.2 k 10 20 18 18 re f")).unwrap();
+        let profile = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc").to_vec(),
+        ));
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                dictionary! {
+                    "ColorSpace" => dictionary! {
+                        "DefaultCMYK" => Object::Array(vec![
+                            Object::Name(b"ICCBased".to_vec()),
+                            Object::Reference(profile),
+                        ])
+                    }
+                },
+            );
+        let page = pdf.get_object((3, 0)).unwrap().as_dict().unwrap();
+        let resources = page.get(b"Resources").unwrap();
+        let expected = selected_color_space(&pdf, resources, b"DeviceCMYK")
+            .unwrap()
+            .color(&[0.3, 0.2, 0.1, 0.2])
+            .unwrap();
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected[0], expected[1], expected[2]
+        )));
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn form_inherits_selected_color_then_uses_its_own_default_gray() {
+        let mut pdf = PdfDocument::load_mem(&form_pdf(
+            b"0 0 20 20 re f 0.5 g 20 0 20 20 re f",
+            Rect::new(0.0, 0.0, 40.0, 20.0),
+            false,
+        ))
+        .unwrap();
+        pdf.get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"0.5 g /Fm1 Do".to_vec());
+        let gray = |gamma: i64| {
+            Object::Array(vec![
+                Object::Name(b"CalGray".to_vec()),
+                Object::Dictionary(dictionary! {
+                    "WhitePoint" => Object::Array(vec![
+                        Object::Real(0.9505), Object::Integer(1), Object::Real(1.089),
+                    ]),
+                    "Gamma" => gamma,
+                }),
+            ])
+        };
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ColorSpace", dictionary! {"DefaultGray" => gray(2)});
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "Resources",
+                dictionary! {"ColorSpace" => dictionary! {"DefaultGray" => gray(1)}},
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        for gamma in [2.0, 1.0] {
+            let expected = PdfColorSpace::CalGray { gamma }.color(&[0.5]).unwrap();
+            assert!(svg.contains(&format!(
+                "#{:02x}{:02x}{:02x}",
+                expected[0], expected[1], expected[2]
+            )));
+        }
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_calgray_parameters() {
+        for parameters in [
+            dictionary! { "Gamma" => Object::Real(2.2) },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1), Object::Integer(0), Object::Integer(1)]),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1), Object::Integer(1), Object::Integer(1)]),
+                "Gamma" => Object::Integer(0),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1), Object::Integer(1), Object::Integer(1)]),
+                "BlackPoint" => Object::Array(vec![Object::Real(0.1), Object::Integer(0), Object::Integer(0)]),
+            },
+        ] {
+            let color_space = Object::Array(vec![
+                Object::Name(b"CalGray".to_vec()),
+                Object::Dictionary(parameters),
+            ]);
+            assert!(parse_color_space(None, None, &color_space, 0).is_err());
+        }
+    }
+
+    fn calrgb_space() -> Object {
+        Object::Array(vec![
+            Object::Name(b"CalRGB".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![
+                    Object::Real(0.95047), Object::Integer(1), Object::Real(1.08883),
+                ]),
+                "Gamma" => Object::Array(vec![Object::Real(2.2); 3]),
+                "Matrix" => Object::Array(vec![
+                    Object::Real(0.4124564), Object::Real(0.2126729), Object::Real(0.0193339),
+                    Object::Real(0.3575761), Object::Real(0.7151522), Object::Real(0.119192),
+                    Object::Real(0.1804375), Object::Real(0.0721750), Object::Real(0.9503041),
+                ]),
+            }),
+        ])
+    }
+
+    #[test]
+    fn imports_calrgb_vector_and_image_colors() {
+        let space = calrgb_space();
+        let parsed = parse_color_space(None, None, &space, 0).unwrap();
+        let midtone = parsed.color(&[0.5; 3]).unwrap();
+        assert!(midtone
+            .iter()
+            .all(|value| (i16::from(*value) - 128).abs() <= 3));
+        let red = parsed.color(&[1.0, 0.0, 0.0]).unwrap();
+        assert!(red[0] >= 250 && red[1] <= 5 && red[2] <= 5);
+
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"/CS1 cs 0.5 0.5 0.5 sc 10 20 18 18 re f")).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                Object::Dictionary(dictionary! {
+                    "ColorSpace" => Object::Dictionary(dictionary! {"CS1" => space.clone()})
+                }),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            midtone[0], midtone[1], midtone[2]
+        )));
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut raw_pdf = PdfDocument::load_mem(&image_pdf(&[128; 12], None, false)).unwrap();
+        raw_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("ColorSpace", space.clone());
+        let mut bytes = Vec::new();
+        raw_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(
+            rgb.get_pixel(0, 0).0,
+            parsed.color(&[128.0 / 255.0; 3]).unwrap()
+        );
+
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[128; 12], 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut jpeg_pdf =
+            PdfDocument::load_mem(&image_pdf(&jpeg, Some(Filter::DctDecode), false)).unwrap();
+        let image = jpeg_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        image.dict.set("ColorSpace", space);
+        image.dict.set("Width", 2);
+        image.dict.set("Height", 2);
+        let mut bytes = Vec::new();
+        jpeg_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(rgb
+            .get_pixel(0, 0)
+            .0
+            .iter()
+            .all(|value| (i16::from(*value) - 128).abs() <= 5));
+    }
+
+    #[test]
+    fn rejects_invalid_calrgb_parameters() {
+        for parameters in [
+            dictionary! {"Gamma" => Object::Array(vec![Object::Integer(1); 3])},
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1), Object::Integer(0), Object::Integer(1)]),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1); 3]),
+                "Gamma" => Object::Array(vec![Object::Integer(1), Object::Integer(0), Object::Integer(1)]),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1); 3]),
+                "Matrix" => Object::Array(vec![Object::Integer(1); 8]),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1); 3]),
+                "BlackPoint" => Object::Array(vec![Object::Real(0.1), Object::Integer(0), Object::Integer(0)]),
+            },
+        ] {
+            let space = Object::Array(vec![
+                Object::Name(b"CalRGB".to_vec()),
+                Object::Dictionary(parameters),
+            ]);
+            assert!(parse_color_space(None, None, &space, 0).is_err());
+        }
+    }
+
+    fn lab_space() -> Object {
+        Object::Array(vec![
+            Object::Name(b"Lab".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![
+                    Object::Real(0.95047), Object::Integer(1), Object::Real(1.08883),
+                ]),
+                "Range" => Object::Array(vec![
+                    Object::Integer(-100), Object::Integer(100),
+                    Object::Integer(-100), Object::Integer(100),
+                ]),
+            }),
+        ])
+    }
+
+    #[test]
+    fn imports_lab_vector_and_raw_image_colors() {
+        let space = lab_space();
+        let parsed = parse_color_space(None, None, &space, 0).unwrap();
+        let gray = parsed.color(&[50.0, 0.0, 0.0]).unwrap();
+        assert!(gray
+            .iter()
+            .all(|value| (i16::from(*value) - 119).abs() <= 3));
+        assert_eq!(parsed.color(&[100.0, 0.0, 0.0]).unwrap(), [255; 3]);
+        assert_eq!(parsed.color(&[0.0, 0.0, 0.0]).unwrap(), [0; 3]);
+        assert_eq!(
+            parsed.color(&[50.0, 500.0, 0.0]).unwrap(),
+            parsed.color(&[50.0, 100.0, 0.0]).unwrap()
+        );
+
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"/CS1 cs 50 0 0 sc 10 20 18 18 re f")).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                Object::Dictionary(dictionary! {
+                    "ColorSpace" => Object::Dictionary(dictionary! {"CS1" => space.clone()})
+                }),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document
+            .page_svg(0)
+            .unwrap()
+            .contains(&format!("#{:02x}{:02x}{:02x}", gray[0], gray[1], gray[2])));
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut raw_pdf = PdfDocument::load_mem(&image_pdf(&[128; 12], None, false)).unwrap();
+        raw_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("ColorSpace", space.clone());
+        let mut bytes = Vec::new();
+        raw_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let sample = 128.0 / 255.0;
+        let expected = parsed
+            .color(&[
+                sample * 100.0,
+                sample * 200.0 - 100.0,
+                sample * 200.0 - 100.0,
+            ])
+            .unwrap();
+        assert_eq!(rgb.get_pixel(0, 0).0, expected);
+
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[128; 12], 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut jpeg_pdf =
+            PdfDocument::load_mem(&image_pdf(&jpeg, Some(Filter::DctDecode), false)).unwrap();
+        let jpeg_image = jpeg_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        jpeg_image.dict.set("ColorSpace", space);
+        jpeg_image.dict.set("Width", 2);
+        jpeg_image.dict.set("Height", 2);
+        let mut bytes = Vec::new();
+        jpeg_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgb = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(rgb
+            .get_pixel(0, 0)
+            .0
+            .iter()
+            .all(|value| (i16::from(*value) - 119).abs() <= 5));
+    }
+
+    #[test]
+    fn indexed_lab_palette_uses_lab_component_ranges() {
+        let space = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            lab_space(),
+            Object::Integer(1),
+            Object::String(
+                vec![128, 128, 128, 255, 128, 128],
+                lopdf::StringFormat::Literal,
+            ),
+        ]);
+        let parsed = parse_color_space(None, None, &space, 0).unwrap();
+        let midtone = parsed.color(&[0.0]).unwrap();
+        assert!(midtone
+            .iter()
+            .all(|value| (i16::from(*value) - 119).abs() <= 5));
+        let white = parsed.color(&[1.0]).unwrap();
+        assert!(white.iter().all(|value| *value >= 250));
+    }
+
+    #[test]
+    fn indexed_icc_palette_uses_pdf_rendering_intent_for_vectors_and_images() {
+        let profile_bytes = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let lookup = vec![0, 0, 0, 0, 77, 51, 26, 51];
+        let mut vector = PdfDocument::load_mem(&vector_pdf(
+            b"/CS1 cs /Saturation ri 1 scn 10 20 18 18 re f",
+        ))
+        .unwrap();
+        let profile_id = vector.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile_bytes.to_vec(),
+        )));
+        let indexed = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(profile_id),
+            ]),
+            Object::Integer(1),
+            Object::String(lookup, lopdf::StringFormat::Literal),
+        ]);
+        vector
+            .get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                dictionary! {
+                    "ColorSpace" => dictionary! {"CS1" => indexed.clone()}
+                },
+            );
+        let profile = ColorProfile::new_from_slice(profile_bytes).unwrap();
+        let converter = profile
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions {
+                    rendering_intent: RenderingIntent::Saturation,
+                    ..TransformOptions::default()
+                },
+            )
+            .unwrap();
+        let mut expected = [0_u8; 3];
+        converter
+            .transform(&[77, 51, 26, 51], &mut expected)
+            .unwrap();
+        let mut bytes = Vec::new();
+        vector.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected[0], expected[1], expected[2]
+        )));
+        vector
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/CS1 cs 1 scn /Saturation ri 10 20 18 18 re f".to_vec());
+        let mut bytes = Vec::new();
+        vector.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected[0], expected[1], expected[2]
+        )));
+
+        let mut image = PdfDocument::load_mem(&image_pdf(&[1, 0, 1, 0], None, false)).unwrap();
+        let image_profile_id = image.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile_bytes.to_vec(),
+        )));
+        let image_indexed = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(image_profile_id),
+            ]),
+            Object::Integer(1),
+            Object::String(
+                vec![0, 0, 0, 0, 77, 51, 26, 51],
+                lopdf::StringFormat::Literal,
+            ),
+        ]);
+        let stream = image
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.dict.set("ColorSpace", image_indexed);
+        stream
+            .dict
+            .set("Intent", Object::Name(b"Saturation".to_vec()));
+        let mut bytes = Vec::new();
+        image.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(pixels.get_pixel(0, 0).0, expected);
+    }
+
+    #[test]
+    fn rejects_invalid_lab_parameters() {
+        for parameters in [
+            dictionary! {"Range" => Object::Array(vec![Object::Integer(-100); 4])},
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1), Object::Integer(0), Object::Integer(1)]),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1); 3]),
+                "Range" => Object::Array(vec![Object::Integer(100), Object::Integer(-100), Object::Integer(-100), Object::Integer(100)]),
+            },
+            dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1); 3]),
+                "BlackPoint" => Object::Array(vec![Object::Real(0.1), Object::Integer(0), Object::Integer(0)]),
+            },
+        ] {
+            let space = Object::Array(vec![
+                Object::Name(b"Lab".to_vec()),
+                Object::Dictionary(parameters),
+            ]);
+            assert!(parse_color_space(None, None, &space, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_indexed_vector_colors_and_restores_graphics_state() {
+        let source = vector_pdf(b"/Pal cs 10 20 18 18 re f 0.6 sc 30 20 18 18 re f q 2 scn 50 20 18 18 re f Q 30 42 18 18 re f /Pal CS 2 SC 10 42 18 18 re S");
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let page = pdf.get_object_mut((3, 0)).unwrap().as_dict_mut().unwrap();
+        page.set(
+            "Resources",
+            lopdf::dictionary! {
+                "ColorSpace" => lopdf::dictionary! {
+                    "Pal" => Object::Array(vec![
+                        Object::Name(b"Indexed".to_vec()),
+                        Object::Name(b"DeviceRGB".to_vec()),
+                        Object::Integer(2),
+                        Object::String(
+                            vec![255, 0, 0, 0, 255, 0, 0, 0, 255],
+                            lopdf::StringFormat::Literal,
+                        ),
+                    ])
+                }
+            },
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert_eq!(svg.matches("#ff0000").count(), 1);
+        assert_eq!(svg.matches("#00ff00").count(), 2);
+        assert_eq!(svg.matches("#0000ff").count(), 2);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_paths(0).unwrap(),
+            document.page_paths(0).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_indexed_lookup_stream_and_rejects_invalid_palette() {
+        let source = vector_pdf(b"/Pal cs 1.5 sc 10 20 18 18 re f");
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let lookup = pdf.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            vec![0, 255, 255, 255, 0, 255, 255, 255, 0],
+        ));
+        let palette = Object::Array(vec![
+            Object::Name(b"I".to_vec()),
+            Object::Name(b"DeviceRGB".to_vec()),
+            Object::Integer(2),
+            Object::Reference(lookup),
+        ]);
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                lopdf::dictionary! {
+                    "ColorSpace" => lopdf::dictionary! { "Pal" => palette.clone() }
+                },
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_svg(0)
+            .unwrap()
+            .contains("#ffff00"));
+
+        for invalid in [
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Integer(256),
+                Object::Reference(lookup),
+            ]),
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Integer(3),
+                Object::Reference(lookup),
+            ]),
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Integer(2),
+                Object::Integer(7),
+            ]),
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"Pal".to_vec()),
+                Object::Integer(2),
+                Object::Reference(lookup),
+            ]),
+        ] {
+            pdf.get_object_mut((3, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Resources",
+                    lopdf::dictionary! {
+                        "ColorSpace" => lopdf::dictionary! { "Pal" => invalid }
+                    },
+                );
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_indexed_gray_and_cmyk_palettes_with_clamped_indices() {
+        for (base, lookup, colors) in [
+            (
+                b"DeviceGray".as_slice(),
+                vec![0, 255],
+                ["#000000", "#ffffff"],
+            ),
+            (
+                b"DeviceCMYK".as_slice(),
+                vec![255, 0, 0, 0, 0, 255, 0, 0],
+                ["#00ffff", "#ff00ff"],
+            ),
+        ] {
+            let source = vector_pdf(b"/Pal cs -5 sc 10 20 18 18 re f 9 scn 30 20 18 18 re f");
+            let mut pdf = PdfDocument::load_mem(&source).unwrap();
+            pdf.get_object_mut((3, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Resources",
+                    lopdf::dictionary! {
+                        "ColorSpace" => lopdf::dictionary! {
+                            "Pal" => Object::Array(vec![
+                                Object::Name(b"Indexed".to_vec()),
+                                Object::Name(base.to_vec()),
+                                Object::Integer(1),
+                                Object::String(lookup, lopdf::StringFormat::Hexadecimal),
+                            ])
+                        }
+                    },
+                );
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let svg = OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_svg(0)
+                .unwrap();
+            for expected in colors {
+                assert!(svg.contains(expected), "missing {expected} for {base:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_pdf_content_that_would_be_lost() {
+        for content in [
+            b"q 0 0 10 10 re f".as_slice(),
+            b"0 0 10 10 re W".as_slice(),
+            b"W n".as_slice(),
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&vector_pdf(content)).is_err());
+        }
+        assert!(OfdDocument::from_pdf_bytes(&vector_pdf(b"BT ET")).is_ok());
+        assert!(OfdDocument::from_pdf_bytes(b"not a PDF").is_err());
+    }
+
+    #[test]
+    fn imports_pdf_clipping_paths_and_restores_them_with_graphics_state() {
+        let stream = b"q 10 20 36 72 re W n 1 0 0 rg 10 20 72 72 re f Q 0 0 1 rg 46 20 36 72 re f";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream)).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("<clipPath "));
+        assert_eq!(svg.matches("<clipPath id=\"ofd-clip-").count(), 1);
+        let png = document.page_png(0, 25.4).unwrap();
+        let image = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let left = image.pixel(5, 12).unwrap();
+        let right = image.pixel(19, 12).unwrap();
+        assert!(left.red() > 230 && left.blue() < 30);
+        assert!(right.blue() > 230 && right.red() < 30);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_png(0, 25.4).unwrap(), png);
+    }
+
+    #[test]
+    fn imports_even_odd_pdf_clip_without_clipping_the_current_paint() {
+        let stream = b"10 20 72 72 re 28 38 36 36 re W* f 1 0 0 rg 10 20 72 72 re f";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream)).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("clip-rule=\"evenodd\""));
+        let png = document.page_png(0, 25.4).unwrap();
+        let image = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let corner = image.pixel(3, 3).unwrap();
+        let center = image.pixel(12, 12).unwrap();
+        assert!(corner.red() > 230 && corner.green() < 30);
+        assert!(center.red() < 30 && center.green() < 30 && center.blue() < 30);
+    }
+
+    #[test]
+    fn imports_even_odd_pdf_paint_operators() {
+        for operator in ["f*", "B*", "b*"] {
+            let stream = format!("1 0 0 rg 0 0 0 RG 10 20 72 72 re 28 38 36 36 re {operator}");
+            let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream.as_bytes())).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains("fill-rule=\"evenodd\""), "{operator}");
+            assert_eq!(document.page_paths(0).unwrap().len(), 1);
+            let image =
+                resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+            assert!(image.pixel(3, 3).unwrap().red() > 230, "{operator}");
+            assert!(image.pixel(12, 12).unwrap().green() > 230, "{operator}");
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert!(reopened
+                .page_svg(0)
+                .unwrap()
+                .contains("fill-rule=\"evenodd\""));
+            assert!(lopdf::Document::load_mem(&document.to_pdf().unwrap()).is_ok());
+        }
+        let fixture = include_bytes!("../tests/fixtures/evenodd.pdf");
+        let document = OfdDocument::from_pdf_bytes(fixture).unwrap();
+        assert!(document
+            .page_svg(0)
+            .unwrap()
+            .contains("fill-rule=\"evenodd\""));
+    }
+
+    #[test]
+    fn imports_clipped_pdf_fixture_across_save_and_reopen() {
+        let pdf = include_bytes!("../tests/fixtures/clip.pdf");
+        let document = OfdDocument::from_pdf_bytes(pdf).unwrap();
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+        assert!(document.page_svg(0).unwrap().contains("<clipPath "));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(&reopened.page_png(0, 25.4).unwrap()).unwrap();
+        let left = image.pixel(5, 12).unwrap();
+        let right = image.pixel(19, 12).unwrap();
+        assert!(left.red() > 230 && left.blue() < 30);
+        assert!(right.blue() > 230 && right.red() < 30);
+    }
+
+    #[test]
+    fn intersects_successive_pdf_clipping_paths() {
+        let stream = b"10 20 36 72 re W n 10 20 72 36 re W n 1 0 0 rg 10 20 72 72 re f";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream)).unwrap();
+        let svg = document.page_svg(0).unwrap();
+        assert_eq!(svg.matches("<clipPath id=\"ofd-clip-").count(), 2);
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let inside = image.pixel(5, 18).unwrap();
+        let outside_x = image.pixel(19, 18).unwrap();
+        let outside_y = image.pixel(5, 5).unwrap();
+        assert!(inside.red() > 230 && inside.green() < 30);
+        assert!(outside_x.green() > 230 && outside_y.green() > 230);
+    }
+
+    #[test]
+    fn clips_imported_text_with_page_coordinate_path() {
+        let pdf = text_pdf(
+            b"0 0 36 72 re W n BT /F1 36 Tf 10 20 Td (Hello) Tj ET",
+            b"Helvetica",
+        );
+        let document = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["Hello"]);
+        assert_eq!(
+            document
+                .page_svg(0)
+                .unwrap()
+                .matches("<clipPath id=\"ofd-clip-")
+                .count(),
+            1
+        );
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["Hello"]);
+        assert_eq!(
+            reopened
+                .page_svg(0)
+                .unwrap()
+                .matches("<clipPath id=\"ofd-clip-")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn clips_imported_image_with_page_coordinate_path() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        page.resources().x_objects().pair(Name(b"Im1"), Ref::new(5));
+        page.finish();
+        pdf.stream(
+            Ref::new(4),
+            b"0 0 18 72 re W n q 36 0 0 72 0 0 cm /Im1 Do Q",
+        );
+        let mut image =
+            pdf.image_xobject(Ref::new(5), &[255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0]);
+        image.width(2).height(2).bits_per_component(8);
+        image.color_space_name(Name(b"DeviceRGB"));
+        image.finish();
+        let document = OfdDocument::from_pdf_bytes(&pdf.finish()).unwrap();
+        assert_eq!(document.page_images(0).unwrap().len(), 1);
+        let svg = document.page_svg(0).unwrap();
+        assert_eq!(svg.matches("<clipPath id=\"ofd-clip-").count(), 1);
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let inside = image.pixel(3, 12).unwrap();
+        let outside = image.pixel(9, 12).unwrap();
+        assert!(inside.red() > 230 && inside.green() < 30);
+        assert!(outside.green() > 230 && outside.blue() > 230);
+    }
+
+    #[test]
+    fn imports_pdf_strokes_and_transforms() {
+        let mut content = Content::new();
+        content
+            .save_state()
+            .set_stroke_rgb(0.0, 0.0, 1.0)
+            .set_line_width(2.0);
+        content.transform([1.0, 0.0, 0.0, 1.0, 10.0, 20.0]);
+        content
+            .move_to(0.0, 0.0)
+            .line_to(36.0, 36.0)
+            .stroke()
+            .restore_state();
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(&content.finish())).unwrap();
+        let path = &document.page_paths(0).unwrap()[0];
+        assert!(path.stroke);
+        assert!(document.page_svg(0).unwrap().contains("#0000ff"));
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_stroke_cap_join_miter_and_dash_state() {
+        let stream = b"q 2 w 1 J 2 j 7 M [6 3] 2 d 10 20 m 82 20 l S Q 10 40 m 82 40 l S";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream)).unwrap();
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let paths: Vec<_> = parsed
+            .descendants()
+            .filter(|node| is_element(*node, "PathObject"))
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].attribute("Cap"), Some("Round"));
+        assert_eq!(paths[0].attribute("Join"), Some("Bevel"));
+        assert_eq!(paths[0].attribute("MiterLimit"), Some("7"));
+        let dash = paths[0]
+            .attribute("DashPattern")
+            .and_then(crate::parse_numbers::<2>)
+            .unwrap();
+        assert!((dash[0] - 6.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((dash[1] - 3.0 * MM_PER_PT).abs() < 1e-6);
+        let phase = paths[0]
+            .attribute("DashOffset")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!((phase - 2.0 * MM_PER_PT).abs() < 1e-6);
+        assert_eq!(paths[1].attribute("Cap"), Some("Butt"));
+        assert_eq!(paths[1].attribute("Join"), Some("Miter"));
+        assert_eq!(paths[1].attribute("MiterLimit"), Some("10"));
+        assert!(paths[1].attribute("DashPattern").is_none());
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("stroke-linecap=\"round\""));
+        assert!(svg.contains("stroke-dasharray="));
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+        let fixture = include_bytes!("../tests/fixtures/stroke.pdf");
+        let imported = OfdDocument::from_pdf_bytes(fixture).unwrap();
+        assert!(imported.page_svg(0).unwrap().contains("stroke-dasharray="));
+    }
+
+    #[test]
+    fn imports_long_pdf_dash_sequence_and_restores_graphics_state() {
+        let stream = b"q [6 3 1 3] 2 d 10 20 m 82 20 l S Q 10 40 m 82 40 l S";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream)).unwrap();
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let paths: Vec<_> = parsed
+            .descendants()
+            .filter(|node| is_element(*node, "PathObject"))
+            .collect();
+        let pattern = paths[0]
+            .attribute("DashPattern")
+            .unwrap()
+            .split_whitespace()
+            .map(str::parse::<f64>)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(pattern.len(), 4);
+        for (actual, expected) in pattern.iter().zip([6.0, 3.0, 1.0, 3.0]) {
+            assert!((actual - expected * MM_PER_PT).abs() < 1e-6);
+        }
+        assert!(paths[1].attribute("DashPattern").is_none());
+        let styles = document.page_object_stroke_styles(0).unwrap();
+        assert_eq!(styles[0].style.dash_sequence.as_ref().unwrap().len(), 4);
+        assert_eq!(styles[0].style.dash_pattern, None);
+        let svg = document.page_svg(0).unwrap();
+        let dash = svg
+            .split_once("stroke-dasharray=\"")
+            .unwrap()
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        assert_eq!(dash.split_whitespace().count(), 4);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+    }
+
+    #[test]
+    fn imports_pdf_ext_gstate_stroke_style_and_restores_it() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(10.0, 20.0, 82.0, 92.0));
+        page.contents(Ref::new(4));
+        page.resources()
+            .ext_g_states()
+            .pair(Name(b"GS1"), Ref::new(5));
+        page.finish();
+        pdf.stream(
+            Ref::new(4),
+            b"q /GS1 gs 10 20 m 82 20 l S Q 10 40 m 82 40 l S",
+        );
+        pdf.ext_graphics(Ref::new(5));
+        let source = pdf.finish();
+        let mut styled = PdfDocument::load_mem(&source).unwrap();
+        let state = styled
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        state.set("LW", 2);
+        state.set("LC", 1);
+        state.set("LJ", 2);
+        state.set("ML", 7);
+        state.set(
+            "D",
+            Object::Array(vec![Object::Array(vec![6.into(), 3.into()]), 2.into()]),
+        );
+        state.set("FL", 2);
+        let mut bytes = Vec::new();
+        styled.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let page = imported.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, imported.entry(&page.path).unwrap().unwrap()).unwrap();
+        let paths: Vec<_> = parsed
+            .descendants()
+            .filter(|node| is_element(*node, "PathObject"))
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].attribute("Cap"), Some("Round"));
+        assert_eq!(paths[0].attribute("Join"), Some("Bevel"));
+        assert_eq!(paths[0].attribute("MiterLimit"), Some("7"));
+        assert!(paths[0].attribute("DashPattern").is_some());
+        assert_eq!(paths[1].attribute("Cap"), Some("Butt"));
+        assert_eq!(paths[1].attribute("Join"), Some("Miter"));
+        assert!(paths[1].attribute("DashPattern").is_none());
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        for (key, value) in [
+            ("LW", Object::Integer(-1)),
+            ("LC", Object::Integer(3)),
+            ("LJ", Object::Integer(3)),
+            ("ML", Object::Integer(0)),
+            (
+                "D",
+                Object::Array(vec![Object::Array(vec![0.into()]), 0.into()]),
+            ),
+            ("FL", Object::Integer(101)),
+        ] {
+            let mut malformed = PdfDocument::load_mem(&source).unwrap();
+            malformed
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(key, value);
+            let mut bytes = Vec::new();
+            malformed.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn accepts_standard_pdf_blend_modes_and_array_fallback() {
+        for name in [
+            "Normal",
+            "Compatible",
+            "Multiply",
+            "Screen",
+            "Overlay",
+            "Darken",
+            "Lighten",
+            "ColorDodge",
+            "ColorBurn",
+            "HardLight",
+            "SoftLight",
+            "Difference",
+            "Exclusion",
+            "Hue",
+            "Saturation",
+            "Color",
+            "Luminosity",
+        ] {
+            assert!(pdf_blend_mode_name(name.as_bytes()).is_some(), "{name}");
+        }
+        let pdf = PdfDocument::new();
+        assert_eq!(
+            pdf_blend_mode(
+                &pdf,
+                &Object::Array(vec![Object::Name(b"FutureMode".to_vec())])
+            )
+            .unwrap(),
+            "Normal"
+        );
+        assert!(pdf_blend_mode(
+            &pdf,
+            &Object::Array(vec![Object::Integer(3), Object::Name(b"Darken".to_vec())])
+        )
+        .is_err());
+        assert!(pdf_blend_mode(&pdf, &Object::Name(b"FutureMode".to_vec())).is_err());
+    }
+
+    #[test]
+    fn imports_pdf_blend_mode_for_paths_text_images_and_restores_graphics_state() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        let mut resources = page.resources();
+        resources.ext_g_states().pair(Name(b"GS1"), Ref::new(5));
+        resources.fonts().pair(Name(b"F1"), Ref::new(6));
+        resources.x_objects().pair(Name(b"Im1"), Ref::new(7));
+        drop(resources);
+        page.finish();
+        pdf.stream(Ref::new(4), b"0 0 0 rg 0 0 72 72 re f q /GS1 gs 0 1 0 rg 0 0 72 72 re f BT /F1 10 Tf 10 20 Td 3 Tr (A) Tj ET 10 0 0 10 40 40 cm /Im1 Do Q 0 1 0 rg 0 0 10 10 re f");
+        pdf.ext_graphics(Ref::new(5));
+        let mut font = pdf.type1_font(Ref::new(6));
+        font.base_font(Name(b"Helvetica"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+        drop(font);
+        let mut image = pdf.image_xobject(Ref::new(7), &[255, 0, 0]);
+        image.width(1).height(1).bits_per_component(8);
+        image.color_space_name(Name(b"DeviceRGB"));
+        image.finish();
+        let mut source = PdfDocument::load_mem(&pdf.finish()).unwrap();
+        source
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                b"BM",
+                Object::Array(vec![
+                    Object::Name(b"FutureMode".to_vec()),
+                    Object::Name(b"Darken".to_vec()),
+                    Object::Name(b"Multiply".to_vec()),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        source.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let objects: Vec<_> = parsed
+            .descendants()
+            .filter(|node| {
+                is_element(*node, "PathObject")
+                    || is_element(*node, "TextObject")
+                    || is_element(*node, "ImageObject")
+            })
+            .collect();
+        assert_eq!(objects.len(), 5);
+        assert_eq!(objects[0].attribute("BlendMode"), None);
+        assert!(objects[1..4]
+            .iter()
+            .all(|object| object.attribute("BlendMode") == Some("Darken")));
+        assert_eq!(objects[4].attribute("BlendMode"), None);
+        let svg = document.page_svg(0).unwrap();
+        assert_eq!(svg.matches("mix-blend-mode:darken").count(), 3);
+        let png =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let center = png.pixel(12, 12).unwrap();
+        assert!(center.red() < 16 && center.green() < 16 && center.blue() < 16);
+        let restored = png.pixel(1, 23).unwrap();
+        assert!(restored.green() > 240 && restored.red() < 16);
+        assert!(String::from_utf8_lossy(&document.to_pdf().unwrap()).contains("/Darken"));
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_explicit_default_ext_gstate_values() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        page.resources()
+            .ext_g_states()
+            .pair(Name(b"GS1"), Ref::new(5));
+        page.finish();
+        pdf.stream(Ref::new(4), b"q /GS1 gs 1 0 0 rg 0 0 72 72 re f Q");
+        pdf.ext_graphics(Ref::new(5));
+        let source = pdf.finish();
+        let baseline = OfdDocument::from_pdf_bytes(&source).unwrap();
+        let baseline_svg = baseline.page_svg(0).unwrap();
+
+        let mut defaults = PdfDocument::load_mem(&source).unwrap();
+        let state = defaults
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        for key in [b"OP".as_slice(), b"op", b"SA"] {
+            state.set(key, false);
+        }
+        state.set("OPM", 0);
+        state.set("TK", true);
+        state.set("RI", Object::Name(b"Perceptual".to_vec()));
+        state.set("TR", Object::Name(b"Identity".to_vec()));
+        state.set("TR2", Object::Name(b"Default".to_vec()));
+        let mut bytes = Vec::new();
+        defaults.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(imported.page_svg(0).unwrap(), baseline_svg);
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        let mut identity_tr2 = PdfDocument::load_mem(&source).unwrap();
+        identity_tr2
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("TR2", Object::Name(b"Identity".to_vec()));
+        let mut identity_bytes = Vec::new();
+        identity_tr2.save_to(&mut identity_bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&identity_bytes)
+                .unwrap()
+                .page_svg(0)
+                .unwrap(),
+            baseline_svg
+        );
+
+        let mut invalid_intent = PdfDocument::load_mem(&source).unwrap();
+        invalid_intent
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("RI", Object::Integer(1));
+        let mut invalid_bytes = Vec::new();
+        invalid_intent.save_to(&mut invalid_bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&invalid_bytes),
+            Err(OfdError::Invalid(message)) if message.contains("unsupported PDF ExtGState RI")
+        ));
+
+        for (key, value) in [
+            ("OP", Object::Boolean(true)),
+            ("op", Object::Boolean(true)),
+            ("SA", Object::Boolean(true)),
+            ("OPM", Object::Integer(1)),
+            ("TK", Object::Boolean(false)),
+            ("TR", Object::Name(b"Unknown".to_vec())),
+            ("TR2", Object::Name(b"Unknown".to_vec())),
+        ] {
+            let mut changed = PdfDocument::load_mem(&source).unwrap();
+            changed
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(key, value);
+            let mut bytes = Vec::new();
+            changed.save_to(&mut bytes).unwrap();
+            assert!(
+                matches!(
+                    OfdDocument::from_pdf_bytes(&bytes),
+                    Err(OfdError::Invalid(message)) if message.contains("unsupported PDF ExtGState")
+                ),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn imports_pdf_ext_gstate_alpha_for_paths_text_and_images() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        let mut resources = page.resources();
+        resources.ext_g_states().pair(Name(b"GS1"), Ref::new(5));
+        resources.fonts().pair(Name(b"F1"), Ref::new(6));
+        resources.x_objects().pair(Name(b"Im1"), Ref::new(7));
+        drop(resources);
+        page.finish();
+        pdf.stream(Ref::new(4), b"q /GS1 gs 1 0 0 rg 0 0 1 RG 0 0 72 24 re B Q q /GS1 gs BT /F1 12 Tf 5 45 Td 2 Tr (Alpha) Tj ET Q q /GS1 gs 18 0 0 18 5 25 cm /Im1 Do Q 0 24 72 6 re f");
+        pdf.ext_graphics(Ref::new(5))
+            .stroking_alpha(0.25)
+            .non_stroking_alpha(0.5);
+        let mut font = pdf.type1_font(Ref::new(6));
+        font.base_font(Name(b"Helvetica"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+        drop(font);
+        let mut image =
+            pdf.image_xobject(Ref::new(7), &[255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0]);
+        image.width(2).height(2).bits_per_component(8);
+        image.color_space_name(Name(b"DeviceRGB"));
+        image.finish();
+        let pdf_bytes = pdf.finish();
+        let document = OfdDocument::from_pdf_bytes(&pdf_bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["Alpha"]);
+        assert_eq!(document.page_images(0).unwrap().len(), 1);
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let paths: Vec<_> = parsed
+            .descendants()
+            .filter(|node| is_element(*node, "PathObject"))
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            paths[0]
+                .children()
+                .find(|node| is_element(*node, "FillColor"))
+                .unwrap()
+                .attribute("Alpha"),
+            Some("128")
+        );
+        assert_eq!(
+            paths[0]
+                .children()
+                .find(|node| is_element(*node, "StrokeColor"))
+                .unwrap()
+                .attribute("Alpha"),
+            Some("64")
+        );
+        assert!(paths[1]
+            .children()
+            .find(|node| is_element(*node, "FillColor"))
+            .unwrap()
+            .attribute("Alpha")
+            .is_none());
+        let text = parsed
+            .descendants()
+            .find(|node| is_element(*node, "TextObject"))
+            .unwrap();
+        let image = parsed
+            .descendants()
+            .find(|node| is_element(*node, "ImageObject"))
+            .unwrap();
+        assert_eq!(
+            text.children()
+                .find(|node| is_element(*node, "FillColor"))
+                .unwrap()
+                .attribute("Alpha"),
+            Some("128")
+        );
+        assert_eq!(
+            text.children()
+                .find(|node| is_element(*node, "StrokeColor"))
+                .unwrap()
+                .attribute("Alpha"),
+            Some("64")
+        );
+        assert_eq!(image.attribute("Alpha"), Some("128"));
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("fill-opacity=\"0.5019607843137255\""));
+        assert!(svg.contains("stroke-opacity=\"0.25098039215686274\""));
+        assert_eq!(svg.matches(" opacity=\"0.5019607843137255\"").count(), 1);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+        for (key, value) in [
+            (b"ca".as_slice(), Object::Real(1.5)),
+            (b"BM".as_slice(), Object::Name(b"UnknownMode".to_vec())),
+        ] {
+            let mut invalid = PdfDocument::load_mem(&pdf_bytes).unwrap();
+            invalid
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(key, value);
+            let mut bytes = Vec::new();
+            invalid.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+        let fixture = include_bytes!("../tests/fixtures/alpha.pdf");
+        let imported = OfdDocument::from_pdf_bytes(fixture).unwrap();
+        let svg = imported.page_svg(0).unwrap();
+        assert!(svg.contains("fill-opacity=\"0.5019607843137255\""));
+        assert!(svg.contains("stroke-opacity=\"0.25098039215686274\""));
+    }
+
+    #[test]
+    fn preserves_pdf_single_dash_length_and_rejects_invalid_strokes() {
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(
+            b"[4] 1 d 10 20 m 82 20 l S [] 0 d 10 40 m 82 40 l S",
+        ))
+        .unwrap();
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let paths: Vec<_> = parsed
+            .descendants()
+            .filter(|node| is_element(*node, "PathObject"))
+            .collect();
+        let dash = paths[0].attribute("DashPattern").unwrap();
+        assert_eq!(dash.split_whitespace().count(), 1);
+        assert!((dash.parse::<f64>().unwrap() - 4.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(paths[1].attribute("DashPattern").is_none());
+        let scaled = OfdDocument::from_pdf_bytes(&vector_pdf(
+            b"q 2 0 0 2 0 0 cm [2 1] 1 d 5 10 m 20 10 l S Q",
+        ))
+        .unwrap();
+        let page = scaled.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, scaled.entry(&page.path).unwrap().unwrap()).unwrap();
+        let path = parsed
+            .descendants()
+            .find(|node| is_element(*node, "PathObject"))
+            .unwrap();
+        let dash = path
+            .attribute("DashPattern")
+            .and_then(crate::parse_numbers::<2>)
+            .unwrap();
+        assert!((dash[0] - 4.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((dash[1] - 2.0 * MM_PER_PT).abs() < 1e-6);
+        for stream in [
+            b"3 J".as_slice(),
+            b"3 j".as_slice(),
+            b"0 M".as_slice(),
+            b"[0 3] 0 d".as_slice(),
+            b"2 0 d".as_slice(),
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&vector_pdf(stream)).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_pdf_curves_and_grayscale_painting() {
+        for stream in [
+            b"0.5 g 10 20 m 20 30 30 40 40 50 c 50 60 l h f".as_slice(),
+            b"0.2 G 2 w 10 20 m 20 30 30 40 v s".as_slice(),
+            b"0 0 1 rg 10 20 m 20 30 30 40 y b".as_slice(),
+            b"q 0.5 0.5 0.5 rg 10 20 20 20 re B Q".as_slice(),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream)).unwrap();
+            assert_eq!(document.page_paths(0).unwrap().len(), 1);
+            assert!(document.page_svg(0).is_ok());
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn imports_unfiltered_pdf_inline_image_with_geometry_and_pixels() {
+        let mut stream = b"q 40 0 0 20 10 20 cm BI /W 2 /H 1 /BPC 8 /CS /RGB ID ".to_vec();
+        stream.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
+        stream.extend_from_slice(b" EI Q\n");
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(&stream)).unwrap();
+        let images = document.page_images(0).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].format.as_deref(), Some("PNG"));
+        let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0, 0, 255]);
+        assert!(document.page_svg(0).unwrap().contains("<image"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_filtered_pdf_inline_images_and_keeps_following_content() {
+        use std::io::Write;
+
+        let samples = [255, 0, 0, 0, 0, 255];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&samples).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let hex_compressed = compressed
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            .into_bytes();
+        for (filter, data) in [
+            ("/Fl", compressed),
+            ("/AHx", b"ff00000000ff>".to_vec()),
+            ("[/AHx /Fl]", [hex_compressed, b">".to_vec()].concat()),
+        ] {
+            let mut stream = format!("% BI inside a comment must be ignored\nq 40 0 0 20 10 20 cm BI /W 2 /H 1 /BPC 8 /CS /RGB /F {filter} ID ").into_bytes();
+            stream.extend_from_slice(&data);
+            stream.extend_from_slice(b" EI Q 0 0 m 1 1 l S\n");
+            let document = OfdDocument::from_pdf_bytes(&vector_pdf(&stream)).unwrap();
+            assert_eq!(document.page_paths(0).unwrap().len(), 1);
+            let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            assert_eq!(decoded.dimensions(), (2, 1));
+            assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0]);
+            assert_eq!(decoded.get_pixel(1, 0).0, [0, 0, 255]);
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn imports_filtered_inline_image_in_form_xobject() {
+        let mut content = b"q 20 0 0 10 0 0 cm BI /W 2 /H 1 /BPC 8 /CS /RGB /F /AHx ID ".to_vec();
+        content.extend_from_slice(b"ff00000000ff> EI Q");
+        let document = OfdDocument::from_pdf_bytes(&form_pdf(
+            &content,
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            false,
+        ))
+        .unwrap();
+        let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0, 0, 255]);
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn filtered_inline_scanner_skips_comments_strings_and_hex_strings() {
+        let content =
+            b"% BI is a comment\n(BI) <4249> BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 00> EI";
+        let expected = content
+            .windows(5)
+            .position(|part| part == b" BI /")
+            .unwrap()
+            + 1;
+        assert_eq!(find_pdf_inline_start(content, 0), Some(expected));
+        assert_eq!(find_pdf_inline_start(content, expected + 2), None);
+    }
+
+    #[test]
+    fn imports_two_filtered_inline_images_in_one_content_stream() {
+        let content = b"q 10 0 0 10 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /RGB /F /AHx ID ff0000> EI Q q 10 0 0 10 20 0 cm BI /W 1 /H 1 /BPC 8 /CS /RGB /F /AHx ID 0000ff> EI Q";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(content)).unwrap();
+        let images = document.page_images(0).unwrap();
+        assert_eq!(images.len(), 2);
+        let first = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let second = image::load_from_memory(document.page_image_data(0, 1).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(first.get_pixel(0, 0).0, [255, 0, 0]);
+        assert_eq!(second.get_pixel(0, 0).0, [0, 0, 255]);
+    }
+
+    #[test]
+    fn rejects_filtered_inline_images_without_valid_delimiters() {
+        for content in [
+            b"BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx".as_slice(),
+            b"BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID 00>".as_slice(),
+            b"BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID zz> EI".as_slice(),
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&vector_pdf(content)).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_inline_grayscale_and_stencil_images() {
+        for (declaration, samples, expected) in [
+            (
+                b"/W 2 /H 1 /BPC 8 /CS /Gray".as_slice(),
+                vec![0, 255],
+                vec![[0, 0, 0, 255], [255, 255, 255, 255]],
+            ),
+            (
+                b"/W 2 /H 1 /BPC 1 /IM true".as_slice(),
+                vec![0b1000_0000],
+                vec![[255, 0, 0, 0], [255, 0, 0, 255]],
+            ),
+        ] {
+            let mut stream = b"q 1 0 0 rg 20 0 0 10 10 20 cm BI ".to_vec();
+            stream.extend_from_slice(declaration);
+            stream.extend_from_slice(b" ID ");
+            stream.extend_from_slice(&samples);
+            stream.extend_from_slice(b" EI Q\n");
+            let document = OfdDocument::from_pdf_bytes(&vector_pdf(&stream)).unwrap();
+            let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(image.dimensions(), (2, 1));
+            assert_eq!(image.get_pixel(0, 0).0, expected[0]);
+            assert_eq!(image.get_pixel(1, 0).0, expected[1]);
+        }
+    }
+
+    #[test]
+    fn imports_filtered_inline_stencil_image() {
+        let content =
+            b"q 1 0 0 rg 20 0 0 10 10 20 cm BI /W 2 /H 1 /BPC 1 /IM true /F /AHx ID 80> EI Q";
+        let document = OfdDocument::from_pdf_bytes(&vector_pdf(content)).unwrap();
+        let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 0]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rejects_unsupported_inline_image_fields() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("W", 1);
+        dict.set("Width", 1);
+        let image = lopdf::Stream::new(dict, vec![0]);
+        assert!(inline_image_stream(&image).is_err());
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Foo", 1);
+        let image = lopdf::Stream::new(dict, vec![0]);
+        assert!(inline_image_stream(&image).is_err());
+    }
+
+    #[test]
+    fn imports_pdf_flatness_without_changing_bezier_geometry() {
+        let curve = b"10 20 m 20 30 30 40 40 50 c S";
+        let baseline = OfdDocument::from_pdf_bytes(&vector_pdf(curve)).unwrap();
+        let expected = baseline.page_paths(0).unwrap()[0].abbreviated_data.clone();
+        for value in ["0", "15", "100"] {
+            let stream = format!("{value} i 10 20 m 20 30 30 40 40 50 c S");
+            let document = OfdDocument::from_pdf_bytes(&vector_pdf(stream.as_bytes())).unwrap();
+            assert_eq!(
+                document.page_paths(0).unwrap()[0].abbreviated_data,
+                expected
+            );
+            assert!(document.page_svg(0).unwrap().contains("<path"));
+        }
+        for stream in ["-1 i", "101 i", "i", "1 2 i", "/Bad i"] {
+            assert!(OfdDocument::from_pdf_bytes(&vector_pdf(stream.as_bytes())).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_pdf_graphics_state_and_operands() {
+        for stream in [
+            b"Q".as_slice(),
+            b"q".as_slice(),
+            b"1 0 0 cm".as_slice(),
+            b"10 20 l S".as_slice(),
+            b"0 0 10 10 v S".as_slice(),
+            b"2 0 0 rg 10 20 5 5 re f".as_slice(),
+            b"-1 w 10 20 m 30 40 l S".as_slice(),
+            b"2 0 0 1 0 0 cm 10 20 m 30 40 l S".as_slice(),
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&vector_pdf(stream)).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_basic_pdf_square_and_rejects_invalid_user_units() {
+        let square =
+            OfdDocument::from_pdf_bytes(&vector_pdf_with_options(b"", true, None)).unwrap();
+        assert_eq!(square.annotations().unwrap()[0].annotation_type, "Path");
+        assert_eq!(
+            square.annotations().unwrap()[0].subtype.as_deref(),
+            Some("Square")
+        );
+        assert!(square.page_svg(0).unwrap().contains("<path"));
+        for unit in [0.0, -1.0, 75_001.0] {
+            assert!(
+                OfdDocument::from_pdf_bytes(&vector_pdf_with_options(b"", false, Some(unit)))
+                    .is_err()
+            );
+        }
+        let scaled =
+            OfdDocument::from_pdf_bytes(&vector_pdf_with_options(b"", false, Some(2.0))).unwrap();
+        assert_eq!(
+            scaled.pages().unwrap()[0].physical_box,
+            Some([0.0, 0.0, 50.8, 50.8])
+        );
+    }
+
+    #[test]
+    fn imports_and_exports_editable_pdf_square_and_circle_annotations() {
+        for subtype in [b"Square".as_slice(), b"Circle".as_slice()] {
+            let mut pdf = PdfDocument::load_mem(&vector_pdf_with_options(b"", true, None)).unwrap();
+            let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+            annotation.set("Subtype", Object::Name(subtype.to_vec()));
+            annotation.set("C", Object::Array(vec![0.0.into(), 0.0.into(), 1.0.into()]));
+            annotation.set(
+                "IC",
+                Object::Array(vec![1.0.into(), 0.0.into(), 0.0.into()]),
+            );
+            annotation.set(
+                "BS",
+                dictionary! {
+                    "W" => 2.0,
+                    "S" => Object::Name(b"D".to_vec()),
+                    "D" => Object::Array(vec![3.0.into(), 1.0.into()]),
+                },
+            );
+            annotation.set(
+                "RD",
+                Object::Array(vec![1.0.into(), 2.0.into(), 1.0.into(), 2.0.into()]),
+            );
+            annotation.set("CA", 0.5);
+            annotation.set("F", 4);
+            annotation.set("Contents", Object::string_literal("review"));
+            annotation.set("T", Object::string_literal("Alice"));
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let annotations = output.annotations().unwrap();
+            assert_eq!(annotations.len(), 1);
+            let shape = &annotations[0];
+            assert_eq!(shape.annotation_type, "Path");
+            assert_eq!(shape.subtype.as_deref().unwrap().as_bytes(), subtype);
+            assert_eq!(shape.remark.as_deref(), Some("review"));
+            assert_eq!(shape.attributes["Creator"], "Alice");
+            assert_eq!(shape.parameters["PDFShapeStroke"], "0 0 255");
+            assert_eq!(shape.parameters["PDFShapeFill"], "255 0 0");
+            let svg = output.page_svg(0).unwrap();
+            assert!(svg.contains("#0000ff"), "{svg}");
+            assert!(svg.contains("#ff0000"), "{svg}");
+            assert!(output.validate_references().unwrap().is_empty());
+            let reopened = OfdDocument::from_bytes(&output.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened.annotations().unwrap()[0].parameters,
+                shape.parameters
+            );
+            let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+            let page = exported
+                .get_dictionary(*exported.get_pages().values().next().unwrap())
+                .unwrap();
+            let annotation_ref = page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap();
+            let exported_shape = exported.get_dictionary(annotation_ref).unwrap();
+            assert_eq!(
+                exported_shape.get(b"Subtype").unwrap().as_name().unwrap(),
+                subtype
+            );
+            assert_eq!(
+                exported_shape.get(b"Contents").unwrap().as_str().unwrap(),
+                b"review"
+            );
+            assert_eq!(
+                exported_shape
+                    .get(b"BS")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"S")
+                    .unwrap()
+                    .as_name()
+                    .unwrap(),
+                b"D"
+            );
+            let border = exported_shape.get(b"BS").unwrap().as_dict().unwrap();
+            assert!((border.get(b"W").unwrap().as_float().unwrap() - 2.0).abs() < 1e-4);
+            let dash = border.get(b"D").unwrap().as_array().unwrap();
+            assert!((dash[0].as_float().unwrap() - 3.0).abs() < 1e-4);
+            assert!((dash[1].as_float().unwrap() - 1.0).abs() < 1e-4);
+            assert!(exported_shape.get(b"IC").is_ok());
+            let difference = exported_shape.get(b"RD").unwrap().as_array().unwrap();
+            for (actual, expected) in difference.iter().zip([1.0, 2.0, 1.0, 2.0]) {
+                assert!((actual.as_float().unwrap() - expected).abs() < 1e-4);
+            }
+            let roundtrip = OfdDocument::from_pdf_bytes(&reopened.to_pdf().unwrap()).unwrap();
+            assert_eq!(roundtrip.annotations().unwrap()[0].annotation_type, "Path");
+            assert_eq!(
+                roundtrip.annotations().unwrap()[0]
+                    .subtype
+                    .as_deref()
+                    .unwrap()
+                    .as_bytes(),
+                subtype
+            );
+
+            let mut resized = reopened.clone();
+            let original_box = shape.appearance_box.unwrap();
+            let resized_box = [
+                original_box[0] + 2.0,
+                original_box[1] + 1.0,
+                original_box[2] * 2.0,
+                original_box[3] * 2.0,
+            ];
+            let before_resize = resized.to_bytes().unwrap();
+            assert!(resized
+                .set_annotation_appearance_boundary(0, &shape.id, [0.0, 0.0, 0.0, 1.0])
+                .is_err());
+            assert_eq!(resized.to_bytes().unwrap(), before_resize);
+            resized
+                .set_annotation_appearance_boundary(0, &shape.id, resized_box)
+                .unwrap();
+            assert_ne!(resized.page_svg(0).unwrap(), output.page_svg(0).unwrap());
+            let source = &resized.annotations().unwrap()[0].source_path;
+            let annotation_xml =
+                parse_xml(source, resized.entry(source).unwrap().unwrap()).unwrap();
+            let path = annotation_xml
+                .descendants()
+                .find(|node| is_element(*node, "PathObject"))
+                .unwrap();
+            let expected_boundary = format!("0 0 {} {}", resized_box[2], resized_box[3]);
+            assert_eq!(path.attribute("Boundary"), Some(expected_boundary.as_str()));
+            let original_xml = parse_xml(source, output.entry(source).unwrap().unwrap()).unwrap();
+            let original_path_data =
+                crate::descendant(original_xml.root_element(), "AbbreviatedData")
+                    .unwrap()
+                    .text()
+                    .unwrap();
+            let resized_path_data = crate::descendant(path, "AbbreviatedData")
+                .unwrap()
+                .text()
+                .unwrap();
+            assert_ne!(resized_path_data, original_path_data);
+            let resized_pdf = PdfDocument::load_mem(&resized.to_pdf().unwrap()).unwrap();
+            let resized_page = resized_pdf
+                .get_dictionary(*resized_pdf.get_pages().values().next().unwrap())
+                .unwrap();
+            let reference = resized_page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap();
+            let difference = resized_pdf
+                .get_dictionary(reference)
+                .unwrap()
+                .get(b"RD")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            for (actual, expected) in difference.iter().zip([2.0, 4.0, 2.0, 4.0]) {
+                assert!((actual.as_float().unwrap() - expected).abs() < 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn imports_and_exports_editable_pdf_line_annotation() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf_with_options(b"", true, None)).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Line".to_vec()));
+        annotation.set(
+            "L",
+            Object::Array(vec![20.into(), 30.into(), 30.into(), 40.into()]),
+        );
+        annotation.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        annotation.set("BS", dictionary! {"W" => 2.0, "S" => Object::Name(b"D".to_vec()), "D" => Object::Array(vec![3.into(), 1.into()])});
+        annotation.set("CA", 0.5);
+        annotation.set("Contents", Object::string_literal("line review"));
+        annotation.set(
+            "LE",
+            Object::Array(vec![
+                Object::Name(b"Square".to_vec()),
+                Object::Name(b"Circle".to_vec()),
+            ]),
+        );
+        annotation.set("IC", Object::Array(vec![0.into(), 1.into(), 0.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let line = &output.annotations().unwrap()[0];
+        assert_eq!(line.subtype.as_deref(), Some("Line"));
+        assert_eq!(line.parameters["PDFLine"], "0 1 1 0");
+        assert_eq!(line.parameters["PDFLineEndings"], "Square Circle");
+        assert_eq!(line.parameters["PDFShapeFill"], "0 255 0");
+        assert_eq!(line.remark.as_deref(), Some("line review"));
+        assert!(output.page_svg(0).unwrap().contains("#ff0000"));
+        assert!(output.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&output.to_bytes().unwrap()).unwrap();
+        let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().values().next().unwrap())
+            .unwrap();
+        let exported_line = exported
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            exported_line.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"Line"
+        );
+        let endpoints = exported_line.get(b"L").unwrap().as_array().unwrap();
+        for (actual, expected) in endpoints.iter().zip([10.0, 10.0, 20.0, 20.0]) {
+            assert!((actual.as_float().unwrap() - expected).abs() < 0.01);
+        }
+        assert_eq!(
+            lopdf::decode_text_string(exported_line.get(b"Contents").unwrap()).unwrap(),
+            "line review"
+        );
+        let endings = exported_line.get(b"LE").unwrap().as_array().unwrap();
+        assert_eq!(endings[0].as_name().unwrap(), b"Square");
+        assert_eq!(endings[1].as_name().unwrap(), b"Circle");
+        assert_eq!(
+            exported_line.get(b"IC").unwrap().as_array().unwrap().len(),
+            3
+        );
+        let mut resized = reopened.clone();
+        resized
+            .set_annotation_appearance_boundary(0, &line.id, [2.0, 3.0, 20.0, 10.0])
+            .unwrap();
+        let source = &resized.annotations().unwrap()[0].source_path;
+        let xml = parse_xml(source, resized.entry(source).unwrap().unwrap()).unwrap();
+        let path = xml
+            .descendants()
+            .find(|node| is_element(*node, "PathObject"))
+            .unwrap();
+        let paths = xml
+            .descendants()
+            .filter(|node| is_element(*node, "PathObject"))
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 3);
+        assert!(paths
+            .iter()
+            .all(|path| path.attribute("Boundary") == Some("0 0 20 10")));
+        assert_eq!(path.attribute("Boundary"), Some("0 0 20 10"));
+        assert_eq!(
+            crate::descendant(path, "AbbreviatedData").unwrap().text(),
+            Some("M 0 10 L 20 0")
+        );
+        let resized_pdf = PdfDocument::load_mem(&resized.to_pdf().unwrap()).unwrap();
+        let page = resized_pdf
+            .get_dictionary(*resized_pdf.get_pages().values().next().unwrap())
+            .unwrap();
+        let pdf_line = resized_pdf
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        let rect = pdf_line.get(b"Rect").unwrap().as_array().unwrap();
+        let endpoints = pdf_line.get(b"L").unwrap().as_array().unwrap();
+        assert!((endpoints[0].as_float().unwrap() - rect[0].as_float().unwrap()).abs() < 0.01);
+        assert!((endpoints[1].as_float().unwrap() - rect[1].as_float().unwrap()).abs() < 0.01);
+        assert!((endpoints[2].as_float().unwrap() - rect[2].as_float().unwrap()).abs() < 0.01);
+        assert!((endpoints[3].as_float().unwrap() - rect[3].as_float().unwrap()).abs() < 0.01);
+        let mut invalid = output.clone();
+        invalid
+            .set_annotation_parameter(0, &line.id, "PDFLine", "0 0 2 1")
+            .unwrap();
+        assert!(invalid
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDFLine"));
+        assert!(resized.page_svg(0).unwrap().contains("#00ff00"));
+        assert_eq!(pdf_line.get(b"LE").unwrap().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pdf_line_endings_roundtrip_and_reject_invalid_names() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf_with_options(b"", true, None)).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Line".to_vec()));
+        annotation.set(
+            "L",
+            Object::Array(vec![20.into(), 30.into(), 30.into(), 40.into()]),
+        );
+        for ending in [
+            "None",
+            "Square",
+            "Circle",
+            "Diamond",
+            "OpenArrow",
+            "ClosedArrow",
+            "Butt",
+            "ROpenArrow",
+            "RClosedArrow",
+            "Slash",
+        ] {
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "LE",
+                    Object::Array(vec![
+                        Object::Name(ending.as_bytes().to_vec()),
+                        Object::Name(b"None".to_vec()),
+                    ]),
+                );
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let annotation = &output.annotations().unwrap()[0];
+            assert_eq!(
+                annotation.parameters["PDFLineEndings"],
+                format!("{ending} None")
+            );
+            let xml = parse_xml(
+                &annotation.source_path,
+                output.entry(&annotation.source_path).unwrap().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                xml.descendants()
+                    .filter(|node| is_element(*node, "PathObject"))
+                    .count(),
+                if ending == "None" { 1 } else { 2 }
+            );
+            output.page_svg(0).unwrap();
+            let exported = PdfDocument::load_mem(&output.to_pdf().unwrap()).unwrap();
+            let page = exported
+                .get_dictionary(*exported.get_pages().values().next().unwrap())
+                .unwrap();
+            let reference = page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap();
+            let endings = exported
+                .get_dictionary(reference)
+                .unwrap()
+                .get(b"LE")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(endings[0].as_name().unwrap(), ending.as_bytes());
+        }
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "LE",
+                Object::Array(vec![
+                    Object::Name(b"Unknown".to_vec()),
+                    Object::Name(b"None".to_vec()),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("LE style is invalid"));
+    }
+
+    #[test]
+    fn pdf_line_leaders_render_resize_and_roundtrip() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf_with_options(b"", true, None)).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Line".to_vec()));
+        annotation.set(
+            "Rect",
+            Object::Array(vec![10.into(), 10.into(), 30.into(), 30.into()]),
+        );
+        annotation.set(
+            "L",
+            Object::Array(vec![17.into(), 17.into(), 23.into(), 23.into()]),
+        );
+        annotation.set("LL", 4);
+        annotation.set("LLE", 2);
+        annotation.set("LLO", 1);
+        annotation.set(
+            "LE",
+            Object::Array(vec![
+                Object::Name(b"ClosedArrow".to_vec()),
+                Object::Name(b"OpenArrow".to_vec()),
+            ]),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let info = &output.annotations().unwrap()[0];
+        let leader = crate::parse_numbers::<3>(&info.parameters["PDFLineLeader"]).unwrap();
+        for (actual, expected) in leader.into_iter().zip([4.0, 2.0, 1.0]) {
+            assert!((actual - expected * MM_PER_PT).abs() < 1e-7);
+        }
+        let paths = output.annotation_objects(0, &info.id).unwrap();
+        assert_eq!(paths.len(), 5);
+        let original_main = paths[0].commands.as_deref().unwrap().to_string();
+        let exported = PdfDocument::load_mem(&output.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().values().next().unwrap())
+            .unwrap();
+        let reference = page.get(b"Annots").unwrap().as_array().unwrap()[0]
+            .as_reference()
+            .unwrap();
+        let annotation = exported.get_dictionary(reference).unwrap();
+        for (key, expected) in [(b"LL".as_slice(), 4.0), (b"LLE", 2.0), (b"LLO", 1.0)] {
+            assert!(
+                (annotation.get(key).unwrap().as_float().unwrap() as f64 - expected).abs() < 1e-4
+            );
+        }
+        let mut resized = output.clone();
+        resized
+            .set_annotation_appearance_boundary(0, &info.id, [1.0, 2.0, 20.0, 20.0])
+            .unwrap();
+        let resized_paths = resized.annotation_objects(0, &info.id).unwrap();
+        assert_eq!(resized_paths.len(), 5);
+        assert_ne!(resized_paths[0].commands.as_deref().unwrap(), original_main);
+        assert!(resized_paths
+            .iter()
+            .all(|path| path.boundary == Some([0.0, 0.0, 20.0, 20.0])));
+        resized.page_svg(0).unwrap();
+        let reopened = OfdDocument::from_bytes(&resized.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.annotations().unwrap()[0].parameters["PDFLineLeader"],
+            info.parameters["PDFLineLeader"]
+        );
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"LL");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("LLE requires LL"));
+    }
+
+    #[test]
+    fn pdf_line_leader_direction_and_invalid_lengths() {
+        let endpoints = [2.0, 3.0, 12.0, 3.0];
+        let (main, leaders) = pdf_line_leader_paths(endpoints, Some([-4.0, 2.0, 1.0]));
+        assert_eq!(main, [2.0, -2.0, 12.0, -2.0]);
+        assert_eq!(leaders, ["M 2 2 L 2 -4", "M 12 2 L 12 -4"]);
+        let (main, leaders) = pdf_line_leader_paths(endpoints, Some([4.0, 2.0, 1.0]));
+        assert_eq!(main, [2.0, 8.0, 12.0, 8.0]);
+        assert_eq!(leaders, ["M 2 4 L 2 10", "M 12 4 L 12 10"]);
+
+        let mut pdf = PdfDocument::load_mem(&vector_pdf_with_options(b"", true, None)).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Line".to_vec()));
+        annotation.set(
+            "L",
+            Object::Array(vec![20.into(), 30.into(), 30.into(), 40.into()]),
+        );
+        annotation.set("LL", -4);
+        annotation.set("LLO", -1);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("LLO is invalid"));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("LLO", 1);
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("LLE", -2);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("LLE is invalid"));
+    }
+
+    #[test]
+    fn pdf_ink_round_trips_multiple_strokes_and_rejects_bad_points() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Ink".to_vec()));
+        annotation.remove(b"A");
+        annotation.set(
+            "Rect",
+            Object::Array(vec![10.into(), 10.into(), 60.into(), 60.into()]),
+        );
+        annotation.set(
+            "InkList",
+            Object::Array(vec![
+                Object::Array(vec![
+                    20.into(),
+                    20.into(),
+                    30.into(),
+                    40.into(),
+                    45.into(),
+                    30.into(),
+                ]),
+                Object::Array(vec![25.into(), 50.into(), 40.into(), 50.into()]),
+            ]),
+        );
+        annotation.set("C", Object::Array(vec![1.into(), 0.into(), 0.into()]));
+        annotation.set("CA", Object::Real(0.5));
+        annotation.set(
+            "BS",
+            lopdf::dictionary! {
+                "W" => Object::Integer(2),
+                "S" => Object::Name(b"D".to_vec()),
+                "D" => Object::Array(vec![3.into(), 1.into()]),
+            },
+        );
+        annotation.set("Contents", Object::string_literal("two pen strokes"));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let mut document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let info = document.annotations().unwrap().remove(0);
+        assert_eq!(info.subtype.as_deref(), Some("Ink"));
+        assert_eq!(info.remark.as_deref(), Some("two pen strokes"));
+        assert_eq!(document.annotation_objects(0, &info.id).unwrap().len(), 2);
+        assert!(document.page_svg(0).unwrap().contains("#ff0000"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.annotations().unwrap()[0].parameters,
+            info.parameters
+        );
+        let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().values().next().unwrap())
+            .unwrap();
+        let ink = page
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                exported
+                    .get_dictionary(item.as_reference().unwrap())
+                    .unwrap()
+            })
+            .find(|item| item.get(b"Subtype").unwrap().as_name().unwrap() == b"Ink")
+            .unwrap();
+        assert_eq!(ink.get(b"Subtype").unwrap().as_name().unwrap(), b"Ink");
+        assert_eq!(ink.get(b"InkList").unwrap().as_array().unwrap().len(), 2);
+        assert_eq!(
+            ink.get(b"BS")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"S")
+                .unwrap()
+                .as_name()
+                .unwrap(),
+            b"D"
+        );
+        let imported_again = OfdDocument::from_pdf_bytes(&reopened.to_pdf().unwrap()).unwrap();
+        let ink_again = imported_again
+            .annotations()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.subtype.as_deref() == Some("Ink"))
+            .unwrap();
+        assert_eq!(
+            imported_again
+                .annotation_objects(0, &ink_again.id)
+                .unwrap()
+                .len(),
+            2
+        );
+        let original_paths = document.annotation_objects(0, &info.id).unwrap();
+        let old_pdf_list = info.parameters["PDFInkList"].clone();
+        let boundary = info.appearance_box.unwrap();
+        document
+            .set_annotation_appearance_boundary(
+                0,
+                &info.id,
+                [
+                    boundary[0] + 1.0,
+                    boundary[1],
+                    boundary[2] * 2.0,
+                    boundary[3],
+                ],
+            )
+            .unwrap();
+        let changed_paths = document.annotation_objects(0, &info.id).unwrap();
+        assert_ne!(original_paths[0].commands, changed_paths[0].commands);
+        assert_eq!(
+            document.annotations().unwrap()[0].parameters["PDFInkList"],
+            old_pdf_list
+        );
+        document
+            .set_annotation_parameter(0, &info.id, "PDFInkList", "nan")
+            .unwrap();
+        assert!(document
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDFInkList"));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set(
+            "InkList",
+            Object::Array(vec![Object::Array(vec![100.into(), 20.into()])]),
+        );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("outside Rect"));
+    }
+
+    #[test]
+    fn pdf_polygon_and_polyline_round_trip_vertices_and_line_endings() {
+        for (bytes, subtype, expected_paths, expected_intent) in [
+            (
+                include_bytes!("../tests/fixtures/polygon.pdf").as_slice(),
+                "Polygon",
+                1,
+                "PolygonDimension",
+            ),
+            (
+                include_bytes!("../tests/fixtures/polyline.pdf").as_slice(),
+                "PolyLine",
+                3,
+                "PolyLineDimension",
+            ),
+        ] {
+            let mut document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+            let info = document.annotations().unwrap().remove(0);
+            assert_eq!(info.subtype.as_deref(), Some(subtype));
+            assert_eq!(info.attributes["Creator"], "Reviewer");
+            assert_eq!(info.parameters["PDFShapeIntent"], expected_intent);
+            assert_eq!(
+                document.annotation_objects(0, &info.id).unwrap().len(),
+                expected_paths
+            );
+            assert!(document.page_svg(0).unwrap().contains("#0000ff"));
+            assert!(document.validate_references().unwrap().is_empty());
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened.annotations().unwrap()[0].parameters,
+                info.parameters
+            );
+            let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+            let page = exported
+                .get_dictionary(*exported.get_pages().values().next().unwrap())
+                .unwrap();
+            let shape = page
+                .get(b"Annots")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    exported
+                        .get_dictionary(item.as_reference().unwrap())
+                        .unwrap()
+                })
+                .find(|item| item.get(b"Subtype").unwrap().as_name().unwrap() == subtype.as_bytes())
+                .unwrap();
+            assert_eq!(
+                shape.get(b"IT").unwrap().as_name().unwrap(),
+                expected_intent.as_bytes()
+            );
+            assert_eq!(
+                shape.get(b"Vertices").unwrap().as_array().unwrap().len(),
+                if subtype == "Polygon" { 8 } else { 6 }
+            );
+            if subtype == "PolyLine" {
+                assert_eq!(shape.get(b"LE").unwrap().as_array().unwrap().len(), 2);
+            }
+            let imported_again = OfdDocument::from_pdf_bytes(&reopened.to_pdf().unwrap()).unwrap();
+            let again = imported_again
+                .annotations()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.subtype.as_deref() == Some(subtype))
+                .unwrap();
+            assert_eq!(
+                imported_again
+                    .annotation_objects(0, &again.id)
+                    .unwrap()
+                    .len(),
+                expected_paths
+            );
+            let original = document.annotation_objects(0, &info.id).unwrap()[0]
+                .commands
+                .clone();
+            let old_vertices = info.parameters["PDFShapeVertices"].clone();
+            let boundary = info.appearance_box.unwrap();
+            document
+                .set_annotation_appearance_boundary(
+                    0,
+                    &info.id,
+                    [
+                        boundary[0] + 1.0,
+                        boundary[1],
+                        boundary[2] * 2.0,
+                        boundary[3] * 2.0,
+                    ],
+                )
+                .unwrap();
+            assert_ne!(
+                document.annotation_objects(0, &info.id).unwrap()[0].commands,
+                original
+            );
+            assert_eq!(
+                document.annotations().unwrap()[0].parameters["PDFShapeVertices"],
+                old_vertices
+            );
+            document
+                .set_annotation_parameter(0, &info.id, "PDFShapeVertices", "0 0 2 0")
+                .unwrap();
+            assert!(document
+                .to_pdf()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid PDFShapeVertices"));
+        }
+        let mut malformed =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/polygon.pdf")).unwrap();
+        malformed
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Vertices",
+                Object::Array(vec![
+                    100.into(),
+                    20.into(),
+                    30.into(),
+                    40.into(),
+                    45.into(),
+                    30.into(),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        malformed.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("outside Rect"));
+    }
+
+    #[test]
+    fn pdf_shape_colors_and_invalid_styles_do_not_silently_change_appearance() {
+        let source = vector_pdf_with_options(b"", true, None);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("C", Object::Array(vec![]));
+        annotation.set("IC", Object::Array(vec![0.5.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let output = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let shape = &output.annotations().unwrap()[0];
+        assert!(!shape.parameters.contains_key("PDFShapeStroke"));
+        assert_eq!(shape.parameters["PDFShapeFill"], "128 128 128");
+        let exported = PdfDocument::load_mem(&output.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().values().next().unwrap())
+            .unwrap();
+        let reference = page.get(b"Annots").unwrap().as_array().unwrap()[0]
+            .as_reference()
+            .unwrap();
+        assert!(exported
+            .get_dictionary(reference)
+            .unwrap()
+            .get(b"C")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let variants = [
+            (
+                b"BS".as_slice(),
+                Object::Dictionary(dictionary! {"S" => Object::Name(b"B".to_vec())}),
+                "border style is unsupported",
+            ),
+            (
+                b"RD".as_slice(),
+                Object::Array(vec![6.0.into(), 0.0.into(), 6.0.into(), 0.0.into()]),
+                "Rect has invalid dimensions",
+            ),
+            (
+                b"BE".as_slice(),
+                Object::Dictionary(dictionary! {"S" => Object::Name(b"C".to_vec())}),
+                "border effect is unsupported",
+            ),
+            (
+                b"IC".as_slice(),
+                Object::Array(vec![1.5.into()]),
+                "color channel is out of range",
+            ),
+        ];
+        for (field, value, expected) in variants {
+            let mut invalid = PdfDocument::load_mem(&source).unwrap();
+            invalid
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(field, value);
+            let mut bytes = Vec::new();
+            invalid.save_to(&mut bytes).unwrap();
+            assert!(
+                matches!(
+                    OfdDocument::from_pdf_bytes(&bytes),
+                    Err(OfdError::Invalid(message)) if message.contains(expected)
+                ),
+                "field: {:?}",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn imports_pdf_uri_and_goto_links_with_page_geometry() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2))
+            .kids([Ref::new(3), Ref::new(4)])
+            .count(2);
+        let mut source = pdf.page(Ref::new(3));
+        source.parent(Ref::new(2));
+        source.media_box(Rect::new(10.0, 20.0, 82.0, 92.0));
+        source.contents(Ref::new(7));
+        source.annotations([Ref::new(5), Ref::new(6)]);
+        source.finish();
+        let mut target = pdf.page(Ref::new(4));
+        target.parent(Ref::new(2));
+        target.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        target.contents(Ref::new(8));
+        target.finish();
+        pdf.stream(Ref::new(7), b"");
+        pdf.stream(Ref::new(8), b"");
+        let mut uri = pdf.annotation(Ref::new(5));
+        uri.subtype(AnnotationType::Link)
+            .rect(Rect::new(20.0, 30.0, 40.0, 50.0))
+            .flags(AnnotationFlags::PRINT)
+            .border(0.0, 0.0, 0.0, None);
+        uri.action()
+            .action_type(ActionType::Uri)
+            .uri(Str(b"https://example.com/a?x=1&y=2"));
+        uri.finish();
+        let mut goto = pdf.annotation(Ref::new(6));
+        goto.subtype(AnnotationType::Link)
+            .rect(Rect::new(45.0, 30.0, 65.0, 50.0))
+            .flags(AnnotationFlags::PRINT)
+            .border(0.0, 0.0, 0.0, None);
+        goto.action()
+            .action_type(ActionType::GoTo)
+            .destination()
+            .page(Ref::new(4))
+            .xyz(10.0, 50.0, Some(1.25));
+        goto.finish();
+        let document = OfdDocument::from_pdf_bytes(&pdf.finish()).unwrap();
+        let pages = document.pages().unwrap();
+        let annotations = document.annotations().unwrap();
+        assert_eq!(annotations.len(), 2);
+        assert_eq!(
+            annotations[0].actions[0].attributes["URI"],
+            "https://example.com/a?x=1&y=2"
+        );
+        assert_eq!(
+            annotations[1].actions[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .page_id,
+            pages[1].id
+        );
+        let boundary = annotations[0].appearance_box.unwrap();
+        for (actual, expected) in boundary.into_iter().zip([10.0, 42.0, 20.0, 20.0]) {
+            assert!((actual - expected * MM_PER_PT).abs() < 0.0001);
+        }
+        let destination = annotations[1].actions[0].destination.as_ref().unwrap();
+        assert!((destination.left.unwrap() - 10.0 * MM_PER_PT).abs() < 0.0001);
+        assert!((destination.top.unwrap() - 22.0 * MM_PER_PT).abs() < 0.0001);
+        assert_eq!(destination.zoom, Some(1.25));
+        assert_eq!(
+            document
+                .to_pdf()
+                .unwrap()
+                .windows(b"/Subtype /Link".len())
+                .filter(|slice| *slice == b"/Subtype /Link")
+                .count(),
+            2
+        );
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_link_user_unit_rotation_and_visibility_flags() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(10.0, 20.0, 82.0, 92.0));
+        page.user_unit(2.0).rotate(90);
+        page.contents(Ref::new(4));
+        page.annotations([Ref::new(5)]);
+        page.finish();
+        pdf.stream(Ref::new(4), b"");
+        let mut link = pdf.annotation(Ref::new(5));
+        link.subtype(AnnotationType::Link)
+            .rect(Rect::new(20.0, 30.0, 40.0, 50.0))
+            .border(0.0, 0.0, 0.0, None);
+        link.action()
+            .action_type(ActionType::Uri)
+            .uri(Str(b"https://example.org/"));
+        link.finish();
+        let mut document = OfdDocument::from_pdf_bytes(&pdf.finish()).unwrap();
+        let annotation = &document.annotations().unwrap()[0];
+        let actual = annotation.appearance_box.unwrap();
+        for (actual, expected) in actual.into_iter().zip([20.0, 20.0, 40.0, 40.0]) {
+            assert!((actual - expected * MM_PER_PT).abs() < 0.0001);
+        }
+        assert_eq!(
+            annotation.attributes.get("Print").map(String::as_str),
+            Some("false")
+        );
+        let printed = document.to_pdf().unwrap();
+        let printed = PdfDocument::load_mem(&printed).unwrap();
+        let page = printed
+            .get_dictionary(*printed.get_pages().get(&1).unwrap())
+            .unwrap();
+        let link = printed
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(link.get(b"F").unwrap().as_i64().unwrap(), 0);
+        let id = annotation.id.clone();
+        document.set_annotation_print(0, &id, true).unwrap();
+        let printed = PdfDocument::load_mem(&document.to_pdf().unwrap()).unwrap();
+        let page = printed
+            .get_dictionary(*printed.get_pages().get(&1).unwrap())
+            .unwrap();
+        let link = printed
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(link.get(b"F").unwrap().as_i64().unwrap(), 4);
+    }
+
+    #[test]
+    fn imports_pdf_annotation_geometry_and_lock_flags_without_conflating_readonly() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("F", Object::Integer(4 | 8 | 16 | 64 | 128));
+        let markup = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        markup.set("Subtype", Object::Name(b"Highlight".to_vec()));
+        markup.remove(b"A");
+        markup.set("F", Object::Integer(4 | 8 | 16 | 128));
+        markup.set(
+            "QuadPoints",
+            Object::Array(
+                [45, 30, 65, 30, 65, 50, 45, 50]
+                    .into_iter()
+                    .map(Object::Integer)
+                    .collect(),
+            ),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotations = document.annotations().unwrap();
+        for annotation in &annotations {
+            assert_eq!(annotation.attributes["NoZoom"], "true");
+            assert_eq!(annotation.attributes["NoRotate"], "true");
+            assert_eq!(annotation.attributes["ReadOnly"], "true");
+        }
+        assert_eq!(annotations[0].parameters["PDFFlags"], "220");
+        assert!(!annotations[1].parameters.contains_key("PDFFlags"));
+        let exported = PdfDocument::load_mem(&document.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let link = exported
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(link.get(b"F").unwrap().as_i64().unwrap(), 220);
+        assert_eq!(
+            OfdDocument::from_bytes(&document.to_bytes().unwrap())
+                .unwrap()
+                .annotations()
+                .unwrap(),
+            annotations
+        );
+        assert!(document.validate_references().unwrap().is_empty());
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("F", Object::Integer(-1));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDF Link flags"));
+    }
+
+    #[test]
+    fn imports_pdf_link_fit_destinations_on_rotated_target() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2))
+            .kids([Ref::new(3), Ref::new(4)])
+            .count(2);
+        let mut source = pdf.page(Ref::new(3));
+        source
+            .parent(Ref::new(2))
+            .media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        source.contents(Ref::new(7));
+        source.annotations([Ref::new(5), Ref::new(6), Ref::new(9), Ref::new(10)]);
+        source.finish();
+        let mut target = pdf.page(Ref::new(4));
+        target
+            .parent(Ref::new(2))
+            .media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        target.user_unit(2.0).rotate(90).contents(Ref::new(8));
+        target.finish();
+        pdf.stream(Ref::new(7), b"");
+        pdf.stream(Ref::new(8), b"");
+        for (reference, x) in [(5, 2.0), (6, 17.0), (9, 32.0), (10, 47.0)] {
+            let mut link = pdf.annotation(Ref::new(reference));
+            link.subtype(AnnotationType::Link)
+                .rect(Rect::new(x, 2.0, x + 10.0, 12.0))
+                .flags(AnnotationFlags::PRINT)
+                .border(0.0, 0.0, 0.0, None);
+            let mut action = link.action();
+            action.action_type(ActionType::GoTo);
+            let destination = action.destination().page(Ref::new(4));
+            match reference {
+                5 => destination.fit_horizontal(50.0),
+                6 => destination.fit_vertical(10.0),
+                9 => destination.fit_rect(Rect::new(10.0, 20.0, 40.0, 60.0)),
+                _ => destination.fit(),
+            }
+            action.finish();
+            link.finish();
+        }
+        let document = OfdDocument::from_pdf_bytes(&pdf.finish()).unwrap();
+        let annotations = document.annotations().unwrap();
+        assert_eq!(annotations.len(), 4);
+        let destinations: Vec<_> = annotations
+            .iter()
+            .map(|annotation| annotation.actions[0].destination.as_ref().unwrap())
+            .collect();
+        assert_eq!(
+            destinations
+                .iter()
+                .map(|destination| destination.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["FitV", "FitH", "FitR", "Fit"]
+        );
+        assert!((destinations[0].left.unwrap() - 100.0 * MM_PER_PT).abs() < 0.0001);
+        assert!((destinations[1].top.unwrap() - 20.0 * MM_PER_PT).abs() < 0.0001);
+        assert!((destinations[2].left.unwrap() - 40.0 * MM_PER_PT).abs() < 0.0001);
+        assert!((destinations[2].right.unwrap() - 120.0 * MM_PER_PT).abs() < 0.0001);
+        assert!(document.validate_references().unwrap().is_empty());
+        assert_eq!(
+            document
+                .to_pdf()
+                .unwrap()
+                .windows(b"/Subtype /Link".len())
+                .filter(|slice| *slice == b"/Subtype /Link")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn imports_pdf_link_direct_dest_and_rejects_missing_target_page() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.remove(b"A");
+        annotation.set(
+            "Dest",
+            Object::Array(vec![
+                Object::Reference((4, 0)),
+                Object::Name(b"Fit".to_vec()),
+            ]),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let actions = &document.annotations().unwrap()[0].actions;
+        assert_eq!(actions[0].kind, "Goto");
+        assert_eq!(actions[0].destination.as_ref().unwrap().kind, "Fit");
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Dest",
+                Object::Array(vec![
+                    Object::Reference((99, 0)),
+                    Object::Name(b"Fit".to_vec()),
+                ]),
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn imports_legacy_and_name_tree_pdf_link_destinations() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let target = Object::Array(vec![
+            Object::Reference((4, 0)),
+            Object::Name(b"Fit".to_vec()),
+        ]);
+        let mut legacy = lopdf::Dictionary::new();
+        legacy.set("chapter", target.clone());
+        pdf.catalog_mut()
+            .unwrap()
+            .set("Dests", Object::Dictionary(legacy));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.remove(b"A");
+        annotation.set("Dest", Object::Name(b"chapter".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            document.annotations().unwrap()[0].actions[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .kind,
+            "Fit"
+        );
+        assert_eq!(
+            document.annotations().unwrap()[0].actions[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .page_id,
+            document.pages().unwrap()[1].id
+        );
+
+        let mut destination = lopdf::Dictionary::new();
+        destination.set("D", target);
+        let destination_id = pdf.add_object(Object::Dictionary(destination));
+        let mut first_leaf = lopdf::Dictionary::new();
+        first_leaf.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"other".to_vec(), lopdf::StringFormat::Literal),
+                Object::Reference(destination_id),
+            ]),
+        );
+        let first_id = pdf.add_object(Object::Dictionary(first_leaf));
+        let mut second_leaf = lopdf::Dictionary::new();
+        second_leaf.set(
+            "Names",
+            Object::Array(vec![
+                Object::String(b"section".to_vec(), lopdf::StringFormat::Literal),
+                Object::Reference(destination_id),
+            ]),
+        );
+        let second_id = pdf.add_object(Object::Dictionary(second_leaf));
+        let mut root = lopdf::Dictionary::new();
+        root.set(
+            "Kids",
+            Object::Array(vec![
+                Object::Reference(first_id),
+                Object::Reference(second_id),
+            ]),
+        );
+        let root_id = pdf.add_object(Object::Dictionary(root));
+        let mut names = lopdf::Dictionary::new();
+        names.set("Dests", Object::Reference(root_id));
+        pdf.catalog_mut()
+            .unwrap()
+            .set("Names", Object::Dictionary(names));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.remove(b"Dest");
+        let mut action = lopdf::Dictionary::new();
+        action.set("S", Object::Name(b"GoTo".to_vec()));
+        action.set(
+            "D",
+            Object::String(b"section".to_vec(), lopdf::StringFormat::Literal),
+        );
+        annotation.set("A", Object::Dictionary(action));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            document.annotations().unwrap()[0].actions[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .kind,
+            "Fit"
+        );
+        assert!(document
+            .to_pdf()
+            .unwrap()
+            .windows(b"/Subtype /Link".len())
+            .any(|part| part == b"/Subtype /Link"));
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"A")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "D",
+                Object::String(b"missing".to_vec(), lopdf::StringFormat::Literal),
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("named destination is missing"));
+    }
+
+    #[test]
+    fn rejects_malformed_pdf_destination_name_trees() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.remove(b"A");
+        annotation.set(
+            "Dest",
+            Object::String(b"section".to_vec(), lopdf::StringFormat::Literal),
+        );
+        let mut root = lopdf::Dictionary::new();
+        root.set(
+            "Names",
+            Object::Array(vec![Object::String(
+                b"section".to_vec(),
+                lopdf::StringFormat::Literal,
+            )]),
+        );
+        let root_id = pdf.add_object(Object::Dictionary(root));
+        let mut names = lopdf::Dictionary::new();
+        names.set("Dests", Object::Reference(root_id));
+        pdf.catalog_mut()
+            .unwrap()
+            .set("Names", Object::Dictionary(names));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("odd length"));
+        pdf.get_object_mut(root_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Names");
+        pdf.get_object_mut(root_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Kids", Object::Array(vec![Object::Reference(root_id)]));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("cycle"));
+    }
+
+    #[test]
+    fn imports_pdf_link_quad_points_and_exports_precise_shapes() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set(
+            "QuadPoints",
+            Object::Array(
+                [
+                    22, 32, 32, 32, 30, 40, 20, 40, 33, 42, 38, 42, 38, 48, 33, 48,
+                ]
+                .into_iter()
+                .map(Object::Integer)
+                .collect(),
+            ),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotation = &document.annotations().unwrap()[0];
+        let areas = &annotation.actions[0].region.as_ref().unwrap().areas;
+        assert_eq!(areas.len(), 2);
+        assert!((areas[0].start[0] - 12.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((areas[0].start[1] - 60.0 * MM_PER_PT).abs() < 1e-6);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.annotations().unwrap()[0].actions[0].region,
+            annotation.actions[0].region
+        );
+        let output = lopdf::Document::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = output
+            .get_dictionary(*output.get_pages().get(&1).unwrap())
+            .unwrap();
+        let links = page.get(b"Annots").unwrap().as_array().unwrap();
+        assert_eq!(links.len(), 2);
+        let names = links
+            .iter()
+            .map(|reference| {
+                let item = output
+                    .get_dictionary(reference.as_reference().unwrap())
+                    .unwrap();
+                lopdf::decode_text_string(item.get(b"NM").unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names[0], annotation.id);
+        assert_ne!(names[1], names[0]);
+        assert_eq!(
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            names.len()
+        );
+        let first = output
+            .get_dictionary(links[0].as_reference().unwrap())
+            .unwrap();
+        let points = first.get(b"QuadPoints").unwrap().as_array().unwrap();
+        assert_eq!(points.len(), 16);
+        for (actual, expected) in points
+            .iter()
+            .zip([12.0, 12.0, 22.0, 12.0, 20.0, 20.0, 10.0, 20.0])
+        {
+            assert!((actual.as_float().unwrap() - expected).abs() < 0.01);
+        }
+        assert!(output
+            .get_dictionary(links[1].as_reference().unwrap())
+            .unwrap()
+            .get(b"QuadPoints")
+            .is_err());
+        let round_trip = OfdDocument::from_pdf_bytes(&reopened.to_pdf().unwrap()).unwrap();
+        assert_eq!(
+            round_trip.annotations().unwrap()[0].actions[0]
+                .region
+                .as_ref()
+                .unwrap()
+                .areas
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn imports_pdf_highlight_quads_color_opacity_and_flags() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let color_half = pdf.add_object(Object::Real(0.5));
+        let opacity = pdf.add_object(Object::Real(0.5));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Highlight".to_vec()));
+        annotation.remove(b"A");
+        annotation.set("F", Object::Integer(0));
+        annotation.set(
+            "C",
+            Object::Array(vec![
+                Object::Integer(1),
+                Object::Reference(color_half),
+                Object::Integer(0),
+            ]),
+        );
+        annotation.set("CA", Object::Reference(opacity));
+        annotation.set(
+            "QuadPoints",
+            Object::Array(
+                [
+                    20, 50, 30, 50, 30, 40, 20, 40, 30, 40, 40, 40, 40, 30, 30, 30,
+                ]
+                .into_iter()
+                .map(Object::Integer)
+                .collect(),
+            ),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let highlight = &document.annotations().unwrap()[0];
+        assert_eq!(highlight.annotation_type, "Highlight");
+        assert_eq!(
+            highlight.attributes.get("Print").map(String::as_str),
+            Some("false")
+        );
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("#ff8000"));
+        assert!(svg.contains("fill-opacity=\"0.5019607843137255\""));
+        let appearance_xml =
+            std::str::from_utf8(document.entry(&highlight.source_path).unwrap().unwrap()).unwrap();
+        assert!(appearance_xml.contains(" C M "));
+        assert!(document.validate_references().unwrap().is_empty());
+        let mut reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.annotations().unwrap()[0], *highlight);
+        let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let references = page.get(b"Annots").unwrap().as_array().unwrap();
+        assert_eq!(references.len(), 2);
+        let markup = exported
+            .get_dictionary(references[1].as_reference().unwrap())
+            .unwrap();
+        assert_eq!(
+            markup.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"Highlight"
+        );
+        let quads = markup.get(b"QuadPoints").unwrap().as_array().unwrap();
+        assert_eq!(quads.len(), 16);
+        for (value, expected) in quads.iter().zip([
+            10.0, 30.0, 20.0, 30.0, 20.0, 20.0, 10.0, 20.0, 20.0, 20.0, 30.0, 20.0, 30.0, 10.0,
+            20.0, 10.0,
+        ]) {
+            assert!(
+                (value.as_float().unwrap() - expected).abs() < 0.01,
+                "expected {expected}, got {value:?}"
+            );
+        }
+        assert_eq!(markup.get(b"F").unwrap().as_i64().unwrap() & 4, 0);
+        assert_eq!(markup.get(b"C").unwrap().as_array().unwrap().len(), 3);
+        assert!((markup.get(b"CA").unwrap().as_float().unwrap() - 128.0 / 255.0).abs() < 1e-6);
+        reopened
+            .set_annotation_parameter(0, &highlight.id, "PDFMarkupQuads", "bad")
+            .unwrap();
+        assert!(reopened
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDFMarkupQuads"));
+
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("QuadPoints", Object::Array(vec![]));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("requires valid QuadPoints"));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set(
+            "QuadPoints",
+            Object::Array(
+                [20, 50, 30, 50, 30, 40, 20, 40]
+                    .into_iter()
+                    .map(Object::Integer)
+                    .collect(),
+            ),
+        );
+        annotation.set("CA", Object::Real(1.5));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("opacity is outside"));
+    }
+
+    #[test]
+    fn imports_and_exports_pdf_text_notes_with_icon_open_state_and_metadata() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Text".to_vec()));
+        annotation.remove(b"A");
+        annotation.set("Name", Object::Name(b"Help".to_vec()));
+        annotation.set("Open", Object::Boolean(true));
+        annotation.set("C", Object::Array(vec![0.into(), 1.into(), 0.into()]));
+        annotation.set("CA", Object::Real(0.5));
+        annotation.set("Contents", Object::string_literal("Review this text"));
+        annotation.set("T", Object::string_literal("Reviewer"));
+        annotation.set("NM", Object::string_literal("sticky-5"));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let mut document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let note = &document.annotations().unwrap()[0];
+        assert_eq!(note.annotation_type, "Path");
+        assert_eq!(note.subtype.as_deref(), Some("Text"));
+        assert_eq!(note.remark.as_deref(), Some("Review this text"));
+        assert_eq!(note.attributes["Creator"], "Reviewer");
+        assert_eq!(note.parameters["PDFName"], "sticky-5");
+        assert_eq!(note.parameters["PDFTextIcon"], "Help");
+        assert_eq!(note.parameters["PDFTextOpen"], "true");
+        assert!(document.page_svg(0).unwrap().contains("#00ff00"));
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.annotations().unwrap(),
+            document.annotations().unwrap()
+        );
+        let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let notes = page
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                exported
+                    .get_dictionary(value.as_reference().unwrap())
+                    .unwrap()
+            })
+            .filter(|item| item.get(b"Subtype").unwrap().as_name().unwrap() == b"Text")
+            .collect::<Vec<_>>();
+        assert_eq!(notes.len(), 1);
+        let note = notes[0];
+        assert_eq!(note.get(b"Name").unwrap().as_name().unwrap(), b"Help");
+        assert!(note.get(b"Open").unwrap().as_bool().unwrap());
+        assert_eq!(
+            lopdf::decode_text_string(note.get(b"NM").unwrap()).unwrap(),
+            "sticky-5"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(note.get(b"Contents").unwrap()).unwrap(),
+            "Review this text"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(note.get(b"T").unwrap()).unwrap(),
+            "Reviewer"
+        );
+        assert!((note.get(b"CA").unwrap().as_float().unwrap() - 128.0 / 255.0).abs() < 1e-6);
+        let id = document.annotations().unwrap()[0].id.clone();
+        document
+            .set_annotation_parameter(0, &id, "PDFTextOpen", "maybe")
+            .unwrap();
+        assert!(document
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDFTextOpen"));
+
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Open", Object::Integer(1));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("Open is not boolean"));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Open", Object::Boolean(false));
+        annotation.set("Name", Object::Name(b"UnknownIcon".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("icon name is not supported"));
+    }
+
+    #[test]
+    fn imports_and_exports_linked_pdf_popup_annotations() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let popup_id = pdf.new_object_id();
+        let mut popup = lopdf::Dictionary::new();
+        popup.set("Type", Object::Name(b"Annot".to_vec()));
+        popup.set("Subtype", Object::Name(b"Popup".to_vec()));
+        popup.set("Parent", Object::Reference((5, 0)));
+        popup.set(
+            "Rect",
+            Object::Array(vec![10.into(), 10.into(), 40.into(), 30.into()]),
+        );
+        popup.set("Open", Object::Boolean(true));
+        pdf.objects.insert(popup_id, Object::Dictionary(popup));
+        let parent = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        parent.set("Subtype", Object::Name(b"Text".to_vec()));
+        parent.remove(b"A");
+        parent.set("Popup", Object::Reference(popup_id));
+        let page_id = *pdf.get_pages().get(&1).unwrap();
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Annots")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(Object::Reference(popup_id));
+
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let notes = document
+            .annotations()
+            .unwrap()
+            .into_iter()
+            .filter(|annotation| annotation.subtype.as_deref() == Some("Text"))
+            .collect::<Vec<_>>();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].parameters["PDFPopupOpen"], "true");
+        assert!(notes[0].parameters.contains_key("PDFPopupBoundary"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let exported_bytes = reopened.to_pdf().unwrap();
+        let exported = PdfDocument::load_mem(&exported_bytes).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let annotations = page.get(b"Annots").unwrap().as_array().unwrap();
+        let popup_ref = annotations
+            .iter()
+            .map(|value| value.as_reference().unwrap())
+            .find(|id| {
+                exported
+                    .get_dictionary(*id)
+                    .unwrap()
+                    .get(b"Subtype")
+                    .unwrap()
+                    .as_name()
+                    .unwrap()
+                    == b"Popup"
+            })
+            .unwrap();
+        let popup = exported.get_dictionary(popup_ref).unwrap();
+        let parent_ref = popup.get(b"Parent").unwrap().as_reference().unwrap();
+        let parent = exported.get_dictionary(parent_ref).unwrap();
+        assert_eq!(parent.get(b"Subtype").unwrap().as_name().unwrap(), b"Text");
+        assert_eq!(
+            parent.get(b"Popup").unwrap().as_reference().unwrap(),
+            popup_ref
+        );
+        assert!(popup.get(b"Open").unwrap().as_bool().unwrap());
+        let rect = popup.get(b"Rect").unwrap().as_array().unwrap();
+        assert_eq!(rect.len(), 4);
+        let imported_again = OfdDocument::from_pdf_bytes(&exported_bytes).unwrap();
+        let again = imported_again
+            .annotations()
+            .unwrap()
+            .into_iter()
+            .find(|annotation| annotation.subtype.as_deref() == Some("Text"))
+            .unwrap();
+        let before = notes[0].parameters["PDFPopupBoundary"]
+            .split_whitespace()
+            .map(|value| value.parse::<f64>().unwrap())
+            .collect::<Vec<_>>();
+        let after = again.parameters["PDFPopupBoundary"]
+            .split_whitespace()
+            .map(|value| value.parse::<f64>().unwrap())
+            .collect::<Vec<_>>();
+        for (before, after) in before.iter().zip(after) {
+            assert!((before - after).abs() < 0.01);
+        }
+
+        let mut invalid_metadata = document.clone();
+        invalid_metadata
+            .set_annotation_parameter(0, &notes[0].id, "PDFPopupOpen", "maybe")
+            .unwrap();
+        assert!(invalid_metadata
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDFPopupOpen"));
+        let mut incomplete_metadata = document.clone();
+        incomplete_metadata
+            .remove_annotation_parameter(0, &notes[0].id, "PDFPopupBoundary")
+            .unwrap();
+        assert!(incomplete_metadata
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete PDF Popup metadata"));
+
+        let mut markup_pdf = pdf.clone();
+        let parent = markup_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        parent.set("Subtype", Object::Name(b"Highlight".to_vec()));
+        parent.set(
+            "QuadPoints",
+            Object::Array(
+                [20, 50, 30, 50, 30, 40, 20, 40]
+                    .into_iter()
+                    .map(Object::Integer)
+                    .collect(),
+            ),
+        );
+        bytes.clear();
+        markup_pdf.save_to(&mut bytes).unwrap();
+        let markup_document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let markup = markup_document
+            .annotations()
+            .unwrap()
+            .into_iter()
+            .find(|annotation| annotation.annotation_type == "Highlight")
+            .unwrap();
+        assert_eq!(markup.parameters["PDFPopupOpen"], "true");
+        let markup_export = PdfDocument::load_mem(&markup_document.to_pdf().unwrap()).unwrap();
+        let page = markup_export
+            .get_dictionary(*markup_export.get_pages().get(&1).unwrap())
+            .unwrap();
+        let popup = page
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| markup_export.get_dictionary(item.as_reference().ok()?).ok())
+            .find(|item| {
+                item.get(b"Subtype")
+                    .and_then(Object::as_name)
+                    .is_ok_and(|name| name == b"Popup")
+            })
+            .unwrap();
+        let parent = markup_export
+            .get_dictionary(popup.get(b"Parent").unwrap().as_reference().unwrap())
+            .unwrap();
+        assert_eq!(
+            parent.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"Highlight"
+        );
+
+        let mut broken = pdf.clone();
+        broken
+            .objects
+            .get_mut(&popup_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Parent");
+        bytes.clear();
+        broken.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("Popup has no Parent"));
+        let mut broken = pdf.clone();
+        broken
+            .objects
+            .get_mut(&popup_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Parent", Object::Reference((9999, 0)));
+        bytes.clear();
+        broken.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("Parent is not on the same page"));
+        let mut broken = pdf.clone();
+        broken
+            .objects
+            .get_mut(&popup_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Open", Object::Integer(1));
+        bytes.clear();
+        broken.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("Open is not boolean"));
+    }
+
+    #[test]
+    fn validates_pdf_popup_associations_and_defaults() {
+        let original =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/popup.pdf")).unwrap();
+        let import = |mut pdf: PdfDocument| {
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            OfdDocument::from_pdf_bytes(&bytes)
+        };
+
+        let mut without_reciprocal = original.clone();
+        without_reciprocal
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Popup");
+        without_reciprocal
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Open");
+        let imported = import(without_reciprocal).unwrap();
+        assert_eq!(
+            imported.annotations().unwrap()[0].parameters["PDFPopupOpen"],
+            "false"
+        );
+
+        let mut inconsistent = original.clone();
+        inconsistent
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Popup", Object::Reference((5, 0)));
+        assert!(import(inconsistent)
+            .unwrap_err()
+            .to_string()
+            .contains("different Popup reference"));
+
+        let mut unsupported = original.clone();
+        unsupported
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Subtype", Object::Name(b"Link".to_vec()));
+        assert!(import(unsupported)
+            .unwrap_err()
+            .to_string()
+            .contains("Parent subtype is not supported"));
+
+        let mut duplicate = original.clone();
+        duplicate
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Popup");
+        let extra_id = duplicate.new_object_id();
+        let popup = duplicate.get_dictionary((6, 0)).unwrap().clone();
+        duplicate
+            .objects
+            .insert(extra_id, Object::Dictionary(popup));
+        let page_id = *duplicate.get_pages().get(&1).unwrap();
+        duplicate
+            .get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Annots")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(Object::Reference(extra_id));
+        assert!(import(duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple popups"));
+    }
+
+    #[test]
+    fn standalone_pdf_popup_preserves_its_content_and_subtype() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/popup.pdf")).unwrap();
+        let popup = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        popup.remove(b"Parent");
+        popup.set("Contents", Object::string_literal("Standalone review"));
+        popup.set("T", Object::string_literal("Reviewer"));
+        popup.set("NM", Object::string_literal("standalone-popup"));
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Annots")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .retain(|item| item.as_reference().ok() != Some((5, 0)));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let mut document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotations = document.annotations().unwrap();
+        assert_eq!(annotations.len(), 1);
+        let popup = &annotations[0];
+        assert_eq!(popup.remark.as_deref(), Some("Standalone review"));
+        assert_eq!(popup.attributes["Creator"], "Reviewer");
+        assert_eq!(popup.parameters["PDFName"], "standalone-popup");
+        assert_eq!(popup.parameters["PDFPopupStandalone"], "true");
+        assert_eq!(popup.parameters["PDFTextOpen"], "true");
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let exported_bytes = document.to_pdf().unwrap();
+        let exported = PdfDocument::load_mem(&exported_bytes).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let annots = page.get(b"Annots").unwrap().as_array().unwrap();
+        assert_eq!(annots.len(), 1);
+        let popup = exported
+            .get_dictionary(annots[0].as_reference().unwrap())
+            .unwrap();
+        assert_eq!(popup.get(b"Subtype").unwrap().as_name().unwrap(), b"Popup");
+        assert!(popup.get(b"Parent").is_err());
+        assert!(popup.get(b"Open").unwrap().as_bool().unwrap());
+        assert_eq!(
+            lopdf::decode_text_string(popup.get(b"Contents").unwrap()).unwrap(),
+            "Standalone review"
+        );
+        let reimported = OfdDocument::from_pdf_bytes(&exported_bytes).unwrap();
+        assert_eq!(
+            reimported.annotations().unwrap()[0].parameters["PDFPopupStandalone"],
+            "true"
+        );
+
+        document
+            .set_annotation_parameter(0, &annotations[0].id, "PDFPopupStandalone", "maybe")
+            .unwrap();
+        assert!(document
+            .to_pdf()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDFPopupStandalone"));
+    }
+
+    #[test]
+    fn imports_pdf_underline_and_strikeout_at_distinct_text_positions() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        for (id, kind, left, right) in [
+            ((5, 0), b"Underline".as_slice(), 20, 40),
+            ((6, 0), b"StrikeOut".as_slice(), 45, 65),
+        ] {
+            let annotation = pdf.get_object_mut(id).unwrap().as_dict_mut().unwrap();
+            annotation.set("Subtype", Object::Name(kind.to_vec()));
+            annotation.remove(b"A");
+            annotation.set("F", Object::Integer(4));
+            annotation.set(
+                "QuadPoints",
+                Object::Array(
+                    [left, 30, right, 30, right, 50, left, 50]
+                        .into_iter()
+                        .map(Object::Integer)
+                        .collect(),
+                ),
+            );
+        }
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "C",
+                Object::Array(vec![
+                    Object::Integer(1),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotations = document.annotations().unwrap();
+        assert_eq!(
+            annotations
+                .iter()
+                .map(|item| item.annotation_type.as_str())
+                .collect::<Vec<_>>(),
+            ["Path", "Path"]
+        );
+        assert_eq!(
+            annotations
+                .iter()
+                .map(|item| item.subtype.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Underline"), Some("StrikeOut")]
+        );
+        let mut legacy = document.clone();
+        let path = &annotations[0].source_path;
+        let xml = String::from_utf8(legacy.entry(path).unwrap().unwrap().to_vec()).unwrap();
+        let old_xml = xml
+            .replacen("Type=\"Path\"", "Type=\"Underline\"", 1)
+            .replacen(" Subtype=\"Underline\"", "", 1);
+        assert!(!old_xml.contains("Subtype=\"Underline\""));
+        legacy.set_entry(path, old_xml.into_bytes()).unwrap();
+        assert!(legacy.to_pdf().unwrap().starts_with(b"%PDF"));
+        let first_y = |annotation: &crate::AnnotationInfo| {
+            let xml =
+                std::str::from_utf8(document.entry(&annotation.source_path).unwrap().unwrap())
+                    .unwrap();
+            let tree = roxmltree::Document::parse(xml).unwrap();
+            let commands = tree
+                .descendants()
+                .find(|node| {
+                    node.tag_name().name() == "Annot"
+                        && node.attribute("ID") == Some(annotation.id.as_str())
+                })
+                .unwrap()
+                .descendants()
+                .find(|node| node.tag_name().name() == "AbbreviatedData")
+                .unwrap()
+                .text()
+                .unwrap();
+            commands
+                .split_whitespace()
+                .nth(2)
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        };
+        let underline_y = first_y(&annotations[0]);
+        let strikeout_y = first_y(&annotations[1]);
+        assert!(underline_y > strikeout_y);
+        assert!((underline_y - 19.4 * MM_PER_PT).abs() < 1e-6);
+        assert!((strikeout_y - 11.0 * MM_PER_PT).abs() < 1e-6);
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("#000000"));
+        assert!(svg.contains("#ff0000"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.annotations().unwrap(), annotations);
+        let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let references = page.get(b"Annots").unwrap().as_array().unwrap();
+        assert_eq!(references.len(), 2);
+        for (reference, kind) in references
+            .iter()
+            .zip([b"Underline".as_slice(), b"StrikeOut".as_slice()])
+        {
+            let markup = exported
+                .get_dictionary(reference.as_reference().unwrap())
+                .unwrap();
+            assert_eq!(markup.get(b"Subtype").unwrap().as_name().unwrap(), kind);
+            assert_eq!(
+                markup.get(b"QuadPoints").unwrap().as_array().unwrap().len(),
+                8
+            );
+        }
+    }
+
+    #[test]
+    fn imports_pdf_squiggly_as_bounded_zigzag_paths() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Squiggly".to_vec()));
+        annotation.remove(b"A");
+        annotation.set(
+            "C",
+            Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(1),
+            ]),
+        );
+        annotation.set("CA", Object::Real(0.5));
+        annotation.set(
+            "QuadPoints",
+            Object::Array(
+                [
+                    20, 30, 30, 30, 30, 50, 20, 50, 30, 30, 40, 30, 40, 50, 30, 50,
+                ]
+                .into_iter()
+                .map(Object::Integer)
+                .collect(),
+            ),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let squiggly = &document.annotations().unwrap()[0];
+        assert_eq!(squiggly.annotation_type, "Path");
+        assert_eq!(squiggly.subtype.as_deref(), Some("Squiggly"));
+        let xml =
+            std::str::from_utf8(document.entry(&squiggly.source_path).unwrap().unwrap()).unwrap();
+        let tree = roxmltree::Document::parse(xml).unwrap();
+        let commands = tree
+            .descendants()
+            .find(|node| node.tag_name().name() == "AbbreviatedData")
+            .unwrap()
+            .text()
+            .unwrap();
+        assert_eq!(
+            commands
+                .split_whitespace()
+                .filter(|token| *token == "M")
+                .count(),
+            8
+        );
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("#0000ff"));
+        assert!(svg.contains("fill-opacity=\"0.5019607843137255\""));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.annotations().unwrap(),
+            document.annotations().unwrap()
+        );
+        let exported = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let reference = page.get(b"Annots").unwrap().as_array().unwrap()[1]
+            .as_reference()
+            .unwrap();
+        let markup = exported.get_dictionary(reference).unwrap();
+        assert_eq!(
+            markup.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"Squiggly"
+        );
+        assert_eq!(
+            markup.get(b"QuadPoints").unwrap().as_array().unwrap().len(),
+            16
+        );
+    }
+
+    #[test]
+    fn imports_pdf_annotation_contents_author_and_modification_day() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let mut contents = vec![0xfe, 0xff];
+        for unit in "批注 & <确认>".encode_utf16() {
+            contents.extend_from_slice(&unit.to_be_bytes());
+        }
+        let contents = pdf.add_object(Object::String(contents, lopdf::StringFormat::Literal));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Contents", Object::Reference(contents));
+        annotation.set("T", Object::string_literal("Reviewer"));
+        annotation.set("M", Object::string_literal("D:20240229123000+08'00'"));
+        annotation.set("NM", Object::string_literal("source-link-5"));
+        let annotation = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("Subtype", Object::Name(b"Highlight".to_vec()));
+        annotation.remove(b"A");
+        annotation.set(
+            "QuadPoints",
+            Object::Array(
+                [45, 30, 65, 30, 65, 50, 45, 50]
+                    .into_iter()
+                    .map(Object::Integer)
+                    .collect(),
+            ),
+        );
+        annotation.set("Contents", Object::string_literal("Highlighted"));
+        annotation.set("T", Object::string_literal("Markup author"));
+        annotation.set("M", Object::string_literal("D:20240228120000Z"));
+        let mut markup_name = vec![0xfe, 0xff];
+        for unit in "原批注-6".encode_utf16() {
+            markup_name.extend_from_slice(&unit.to_be_bytes());
+        }
+        annotation.set(
+            "NM",
+            Object::String(markup_name, lopdf::StringFormat::Literal),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotations = document.annotations().unwrap();
+        assert_eq!(annotations[0].remark.as_deref(), Some("批注 & <确认>"));
+        assert_eq!(annotations[0].attributes["Creator"], "Reviewer");
+        assert_eq!(annotations[0].last_mod_date.as_deref(), Some("2024-02-29"));
+        assert_eq!(annotations[0].parameters["PDFName"], "source-link-5");
+        assert_eq!(annotations[1].remark.as_deref(), Some("Highlighted"));
+        assert_eq!(annotations[1].attributes["Creator"], "Markup author");
+        assert_eq!(annotations[1].last_mod_date.as_deref(), Some("2024-02-28"));
+        assert_eq!(annotations[1].parameters["PDFName"], "原批注-6");
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.annotations().unwrap(), annotations);
+        assert!(document.validate_references().unwrap().is_empty());
+        let exported = PdfDocument::load_mem(&document.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let link = exported
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[0]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            lopdf::decode_text_string(link.get(b"Contents").unwrap()).unwrap(),
+            "批注 & <确认>"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(link.get(b"T").unwrap()).unwrap(),
+            "Reviewer"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(link.get(b"NM").unwrap()).unwrap(),
+            "source-link-5"
+        );
+        assert!(link
+            .get(b"M")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with(b"D:20240229"));
+        let markup = exported
+            .get_dictionary(
+                page.get(b"Annots").unwrap().as_array().unwrap()[1]
+                    .as_reference()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            markup.get(b"Subtype").unwrap().as_name().unwrap(),
+            b"Highlight"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(markup.get(b"Contents").unwrap()).unwrap(),
+            "Highlighted"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(markup.get(b"T").unwrap()).unwrap(),
+            "Markup author"
+        );
+        assert_eq!(
+            lopdf::decode_text_string(markup.get(b"NM").unwrap()).unwrap(),
+            "原批注-6"
+        );
+        assert!(markup
+            .get(b"M")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with(b"D:20240228"));
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("M", Object::string_literal("D:20230229"));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("annotation M date is invalid"));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("M", Object::string_literal("D:20240229123000+24'00'"));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("annotation M date is invalid"));
+    }
+
+    #[test]
+    fn imports_indirect_pdf_link_geometry_and_destination_numbers() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let rect_x = pdf.add_object(Object::Integer(20));
+        let quad_x = pdf.add_object(Object::Integer(22));
+        let link_subtype = pdf.add_object(Object::Name(b"Link".to_vec()));
+        let link_flags = pdf.add_object(Object::Integer(4));
+        let uri_action_type = pdf.add_object(Object::Name(b"URI".to_vec()));
+        let mut uri_bytes = vec![0xfe, 0xff];
+        for unit in "https://example.org/路径".encode_utf16() {
+            uri_bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        let uri_value = pdf.add_object(Object::String(
+            uri_bytes.clone(),
+            lopdf::StringFormat::Literal,
+        ));
+        let dest_kind = pdf.add_object(Object::Name(b"XYZ".to_vec()));
+        let dest_x = pdf.add_object(Object::Integer(10));
+        let dest_y = pdf.add_object(Object::Integer(50));
+        let dest_zoom = pdf.add_object(Object::Real(1.25));
+        let link = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        link.set("Subtype", Object::Reference(link_subtype));
+        link.set("F", Object::Reference(link_flags));
+        link.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Reference(rect_x),
+                Object::Integer(30),
+                Object::Integer(40),
+                Object::Integer(50),
+            ]),
+        );
+        link.set(
+            "QuadPoints",
+            Object::Array(vec![
+                Object::Reference(quad_x),
+                Object::Integer(32),
+                Object::Integer(32),
+                Object::Integer(32),
+                Object::Integer(30),
+                Object::Integer(40),
+                Object::Integer(20),
+                Object::Integer(40),
+            ]),
+        );
+        let mut uri_action = lopdf::Dictionary::new();
+        uri_action.set("S", Object::Reference(uri_action_type));
+        uri_action.set("URI", Object::Reference(uri_value));
+        link.set("A", Object::Dictionary(uri_action));
+        let mut action = lopdf::Dictionary::new();
+        action.set("S", Object::Name(b"GoTo".to_vec()));
+        action.set(
+            "D",
+            Object::Array(vec![
+                Object::Reference((4, 0)),
+                Object::Reference(dest_kind),
+                Object::Reference(dest_x),
+                Object::Reference(dest_y),
+                Object::Reference(dest_zoom),
+            ]),
+        );
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("A", Object::Dictionary(action));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotations = document.annotations().unwrap();
+        assert_eq!(annotations.len(), 2);
+        assert_eq!(
+            annotations[0].actions[0].attributes["URI"],
+            "https://example.org/路径"
+        );
+        assert_eq!(
+            annotations[0].attributes.get("Print").map(String::as_str),
+            None
+        );
+        assert_eq!(
+            annotations[0].actions[0]
+                .region
+                .as_ref()
+                .unwrap()
+                .areas
+                .len(),
+            1
+        );
+        assert_eq!(
+            annotations[1].actions[0].destination.as_ref().unwrap().zoom,
+            Some(1.25)
+        );
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.annotations().unwrap()[0].actions[0].attributes["URI"],
+            "https://example.org/路径"
+        );
+
+        let mut little_endian_uri = vec![0xff, 0xfe];
+        for unit in "https://example.org/路径".encode_utf16() {
+            little_endian_uri.extend_from_slice(&unit.to_le_bytes());
+        }
+        for candidate in [
+            little_endian_uri,
+            b"\xef\xbb\xbfhttps://example.org/\xe8\xb7\xaf\xe5\xbe\x84".to_vec(),
+        ] {
+            *pdf.get_object_mut(uri_value).unwrap() =
+                Object::String(candidate, lopdf::StringFormat::Literal);
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(
+                imported.annotations().unwrap()[0].actions[0].attributes["URI"],
+                "https://example.org/路径"
+            );
+        }
+
+        *pdf.get_object_mut(uri_value).unwrap() =
+            Object::String(vec![0xfe, 0xff, 0x00], lopdf::StringFormat::Literal);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("truncated UTF-16"));
+        for (candidate, message) in [
+            (vec![0xff, 0xfe, 0x00], "truncated UTF-16"),
+            (vec![0xfe, 0xff, 0xd8, 0x00], "invalid UTF-16"),
+            (vec![0xef, 0xbb, 0xbf, 0xff], "not UTF-8"),
+            (b"https://example.org/\x00".to_vec(), "invalid XML"),
+        ] {
+            *pdf.get_object_mut(uri_value).unwrap() =
+                Object::String(candidate, lopdf::StringFormat::Literal);
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains(message));
+        }
+        *pdf.get_object_mut(uri_value).unwrap() =
+            Object::String(uri_bytes, lopdf::StringFormat::Literal);
+
+        let link = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        link.set(
+            "Rect",
+            Object::Array(vec![
+                Object::Reference((99_999, 0)),
+                Object::Integer(30),
+                Object::Integer(40),
+                Object::Integer(50),
+            ]),
+        );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid PDF link coordinate"));
+    }
+
+    #[test]
+    fn rejects_bad_pdf_link_quad_points_and_ignores_points_outside_rect() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/links.pdf")).unwrap();
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set("QuadPoints", Object::Array(vec![Object::Integer(22)]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("divisible by eight"));
+        let annotation = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        annotation.set(
+            "QuadPoints",
+            Object::Array(
+                [22, 32, 32, 32, 30, 40, 41, 40]
+                    .into_iter()
+                    .map(Object::Integer)
+                    .collect(),
+            ),
+        );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .annotations()
+            .unwrap()[0]
+            .actions[0]
+            .region
+            .is_none());
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "QuadPoints",
+                Object::Array(
+                    [22, 32, 32, 32, 30, 32, 20, 32]
+                        .into_iter()
+                        .map(Object::Integer)
+                        .collect(),
+                ),
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("degenerate quadrilateral"));
+    }
+
+    #[test]
+    fn rotates_pdf_link_quad_points_with_the_page() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/quad-links.pdf")).unwrap();
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 90);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let annotations = document.annotations().unwrap();
+        let start = annotations[0].actions[0].region.as_ref().unwrap().areas[0].start;
+        assert!((start[0] - 12.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((start[1] - 12.0 * MM_PER_PT).abs() < 1e-6);
+        let exported = lopdf::Document::load_mem(&document.to_pdf().unwrap()).unwrap();
+        let page = exported
+            .get_dictionary(*exported.get_pages().get(&1).unwrap())
+            .unwrap();
+        let links = page.get(b"Annots").unwrap().as_array().unwrap();
+        let quad = exported
+            .get_dictionary(links[0].as_reference().unwrap())
+            .unwrap()
+            .get(b"QuadPoints")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!((quad[0].as_float().unwrap() - 12.0).abs() < 0.01);
+        assert!((quad[1].as_float().unwrap() - 60.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn normalizes_pdf_page_rotation_and_rejects_invalid_angles() {
+        let bytes = include_bytes!("../tests/fixtures/rotate-90.pdf");
+        let mut pdf = PdfDocument::load_mem(bytes).unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        assert_eq!(page_rotation(&pdf, page_id).unwrap(), 90);
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", -90);
+        assert_eq!(page_rotation(&pdf, page_id).unwrap(), 270);
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 450);
+        assert_eq!(page_rotation(&pdf, page_id).unwrap(), 90);
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 45);
+        assert!(page_rotation(&pdf, page_id).is_err());
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", Object::Real(90.0));
+        assert!(page_rotation(&pdf, page_id).is_err());
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Rotate");
+        let parent = pdf.get_object_mut((2, 0)).unwrap().as_dict_mut().unwrap();
+        parent.set("Rotate", 180);
+        assert_eq!(page_rotation(&pdf, page_id).unwrap(), 180);
+    }
+
+    #[test]
+    fn imports_user_unit_for_path_text_image_and_stroke() {
+        let bytes = include_bytes!("../tests/fixtures/user-unit.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let page = &document.pages().unwrap()[0];
+        assert_eq!(page.physical_box, Some([0.0, 0.0, 50.8, 50.8]));
+        assert_eq!(document.page_paths(0).unwrap().len(), 2);
+        assert_eq!(document.page_text(0).unwrap(), ["Hi"]);
+        assert!(
+            (document.page_text_objects(0).unwrap()[0].size.unwrap() - 24.0 * MM_PER_PT).abs()
+                < 1e-6
+        );
+        let image = &document.page_images(0).unwrap()[0];
+        let boundary = image.boundary.unwrap();
+        for (actual, expected) in boundary.into_iter().zip([52.0, 40.0, 72.0, 72.0]) {
+            assert!((actual - expected * MM_PER_PT).abs() < 1e-6);
+        }
+        let page_xml = std::str::from_utf8(document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let parsed = roxmltree::Document::parse(page_xml).unwrap();
+        let stroke = parsed
+            .descendants()
+            .find(|node| {
+                node.tag_name().name() == "PathObject" && node.attribute("Stroke") == Some("true")
+            })
+            .unwrap();
+        let width: f64 = stroke.attribute("LineWidth").unwrap().parse().unwrap();
+        assert!((width - 4.0 * MM_PER_PT).abs() < 1e-6);
+        let raster =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let red = raster.pixel(5, 35).unwrap();
+        assert!(red.red() > 230 && red.green() < 30);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert!(reopened.validate_references().unwrap().is_empty());
+        assert_eq!(reopened.page_text(0).unwrap(), ["Hi"]);
+    }
+
+    #[test]
+    fn imports_user_unit_for_clipping_paths() {
+        let stream = b"10 20 36 72 re W n 1 0 0 rg 10 20 72 72 re f";
+        let pdf = vector_pdf_with_options(stream, false, Some(2.0));
+        let document = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+        assert!(document.page_svg(0).unwrap().contains("<clipPath "));
+        let raster =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let inside = raster.pixel(5, 30).unwrap();
+        let outside = raster.pixel(40, 30).unwrap();
+        assert!(inside.red() > 230 && inside.green() < 30);
+        assert!(outside.green() > 230);
+    }
+
+    #[test]
+    fn imports_pdf_raw_flate_and_jpeg_images() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &rgb).unwrap();
+        let compressed = compressor.finish().unwrap();
+        let jpeg = include_bytes!("../../../../ofdrw-layout/src/test/resources/lamp.jpg");
+        for (samples, filter, gray) in [
+            (rgb.as_slice(), None, false),
+            (compressed.as_slice(), Some(Filter::FlateDecode), false),
+            (jpeg.as_slice(), Some(Filter::DctDecode), false),
+            ([0u8, 85, 170, 255].as_slice(), None, true),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(&image_pdf(samples, filter, gray)).unwrap();
+            assert_eq!(document.page_images(0).unwrap().len(), 1);
+            let image =
+                resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+            if filter != Some(Filter::DctDecode) {
+                let pixel = image.pixel(2, 15).unwrap();
+                if gray {
+                    assert_eq!(pixel.red(), pixel.green());
+                } else {
+                    assert!(pixel.red() > 240 && pixel.green() < 10);
+                }
+            }
+            assert!(document.validate_references().unwrap().is_empty());
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_images(0).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn imports_sixteen_bit_pdf_rgb_and_gray_images_with_decode_and_mask() {
+        let rgb = [
+            255, 255, 0, 0, 0, 0, // red
+            0, 0, 255, 255, 0, 0, // green
+            0, 0, 0, 0, 255, 255, // blue
+            255, 255, 255, 255, 255, 255, // white
+        ];
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&rgb, None, false)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.dict.set("BitsPerComponent", 16);
+        image.dict.set(
+            "Mask",
+            Object::Array(vec![
+                0.into(),
+                0.into(),
+                65535.into(),
+                65535.into(),
+                0.into(),
+                0.into(),
+            ]),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0, 255, 0, 0]);
+        assert_eq!(decoded.get_pixel(0, 1).0, [0, 0, 255, 255]);
+        assert_eq!(decoded.get_pixel(1, 1).0, [255, 255, 255, 255]);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let gray = [0, 0, 128, 0, 255, 255, 64, 0];
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&gray, None, true)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.dict.set("BitsPerComponent", 16);
+        image
+            .dict
+            .set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_luma8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [255]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [127]);
+        assert_eq!(decoded.get_pixel(0, 1).0, [0]);
+        assert_eq!(decoded.get_pixel(1, 1).0, [191]);
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_sixteen_bit_pdf_flate_image_with_tiff_predictor() {
+        let predicted = [0, 0, 255, 255, 128, 0, 192, 0];
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &predicted).unwrap();
+        let compressed = compressor.finish().unwrap();
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(&compressed, Some(Filter::FlateDecode), true))
+                .unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.dict.set("BitsPerComponent", 16);
+        image.dict.set(
+            "DecodeParms",
+            dictionary! {"Predictor" => 2, "Colors" => 1, "BitsPerComponent" => 16, "Columns" => 2},
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let decoded = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_luma8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [0]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [255]);
+        assert_eq!(decoded.get_pixel(0, 1).0, [128]);
+        assert_eq!(decoded.get_pixel(1, 1).0, [64]);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_pdf_jpeg2000_with_optional_image_fields() {
+        let jp2 = include_bytes!("../tests/fixtures/red-32x32.jp2");
+        let codestream = include_bytes!("../tests/fixtures/blue-32x32.j2k");
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 32);
+        dict.set("Height", 32);
+        dict.set("Filter", Object::Name(b"JPXDecode".to_vec()));
+        let (bytes, format) = image_bytes(&lopdf::Stream::new(dict.clone(), jp2.to_vec())).unwrap();
+        assert_eq!(bytes, jp2);
+        assert_eq!(format, "jp2");
+        let mut pdf =
+            lopdf::Document::load_mem(&image_pdf(jp2, Some(Filter::JpxDecode), false)).unwrap();
+        let stream = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stream.dict.remove(b"ColorSpace");
+        stream.dict.remove(b"BitsPerComponent");
+        let mut source = Vec::new();
+        pdf.save_to(&mut source).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+        assert_eq!(
+            document.page_images(0).unwrap()[0].format.as_deref(),
+            Some("JPEG2000")
+        );
+        assert_eq!(document.page_image_data(0, 0).unwrap(), jp2);
+        let preview =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let red = preview.pixel(2, 15).unwrap();
+        assert!(red.red() > 240 && red.green() < 10 && red.blue() < 10);
+        assert!(document.validate_references().unwrap().is_empty());
+        let mut raw_pdf =
+            lopdf::Document::load_mem(&image_pdf(codestream, Some(Filter::JpxDecode), false))
+                .unwrap();
+        let raw_stream = raw_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        raw_stream.dict.remove(b"ColorSpace");
+        raw_stream.dict.remove(b"BitsPerComponent");
+        let mut raw_source = Vec::new();
+        raw_pdf.save_to(&mut raw_source).unwrap();
+        let raw_document = OfdDocument::from_pdf_bytes(&raw_source).unwrap();
+        assert_eq!(raw_document.page_image_data(0, 0).unwrap(), codestream);
+        assert_eq!(
+            raw_document.page_images(0).unwrap()[0].format.as_deref(),
+            Some("JPEG2000")
+        );
+        let mut masked_pdf =
+            lopdf::Document::load_mem(&image_pdf(jp2, Some(Filter::JpxDecode), false)).unwrap();
+        let mut mask_dict = lopdf::Dictionary::new();
+        mask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        mask_dict.set("Width", 32);
+        mask_dict.set("Height", 32);
+        mask_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        mask_dict.set("BitsPerComponent", 8);
+        let mask_id = masked_pdf.add_object(lopdf::Stream::new(mask_dict, vec![128; 32 * 32]));
+        masked_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("SMask", Object::Reference(mask_id));
+        let mut masked_source = Vec::new();
+        masked_pdf.save_to(&mut masked_source).unwrap();
+        let masked_document = OfdDocument::from_pdf_bytes(&masked_source).unwrap();
+        assert_eq!(
+            masked_document.page_images(0).unwrap()[0].format.as_deref(),
+            Some("PNG")
+        );
+        let masked =
+            resvg::tiny_skia::Pixmap::decode_png(masked_document.page_image_data(0, 0).unwrap())
+                .unwrap();
+        assert_eq!(masked.pixel(16, 16).unwrap().alpha(), 128);
+
+        dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        dict.set("BitsPerComponent", 1);
+        dict.set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), jp2.to_vec())).is_ok());
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), jp2.to_vec())).is_err());
+        dict.remove(b"ColorSpace");
+        dict.set("Width", 31);
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), jp2.to_vec())).is_err());
+        dict.set("Width", 32);
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), jp2[..20].to_vec())).is_err());
+        dict.set("Mask", Object::Array(vec![0.into(), 1.into()]));
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), jp2.to_vec())).is_err());
+        dict.remove(b"Mask");
+        dict.set("SMaskInData", 2);
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), jp2.to_vec())).is_err());
+        dict.set("SMaskInData", 1);
+        assert!(image_bytes(&lopdf::Stream::new(dict, jp2.to_vec())).is_err());
+        assert!(decode_mask_image(jp2, "jp2", 32, 32).is_ok());
+    }
+
+    #[test]
+    fn imports_pdf_jpeg2000_embedded_opacity_and_unblends_preblended_color() {
+        let straight = include_bytes!("../tests/fixtures/red-half-32x32.jp2");
+        let preblended = include_bytes!("../tests/fixtures/red-premultiplied-32x32.jp2");
+        let white_matte = include_bytes!("../tests/fixtures/red-white-matte-32x32.jp2");
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 32);
+        dict.set("Height", 32);
+        dict.set("Filter", Object::Name(b"JPXDecode".to_vec()));
+        let (opaque, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), straight.to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let opaque = resvg::tiny_skia::Pixmap::decode_png(&opaque).unwrap();
+        let pixel = opaque.pixel(16, 16).unwrap();
+        assert!(pixel.red() > 240);
+        assert_eq!(pixel.alpha(), 255);
+
+        dict.set("SMaskInData", 1);
+        let (retained, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), straight.to_vec())).unwrap();
+        assert_eq!(format, "jp2");
+        assert_eq!(retained, straight);
+        let mut pdf =
+            lopdf::Document::load_mem(&image_pdf(straight, Some(Filter::JpxDecode), false))
+                .unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("SMaskInData", 1);
+        let mut source = Vec::new();
+        pdf.save_to(&mut source).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+        assert_eq!(document.page_image_data(0, 0).unwrap(), straight);
+        assert!(document
+            .page_svg(0)
+            .unwrap()
+            .contains("data:image/png;base64,"));
+
+        dict.set(
+            "Mask",
+            Object::Array(vec![
+                255.into(),
+                255.into(),
+                0.into(),
+                0.into(),
+                0.into(),
+                0.into(),
+            ]),
+        );
+        let (masked, _) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), straight.to_vec())).unwrap();
+        let masked = image::load_from_memory(&masked).unwrap().to_rgba8();
+        assert_eq!(masked.get_pixel(16, 16)[3], 0);
+        dict.set(
+            "Mask",
+            Object::Array(vec![
+                0.into(),
+                0.into(),
+                0.into(),
+                0.into(),
+                255.into(),
+                255.into(),
+            ]),
+        );
+        let (unmasked, _) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), straight.to_vec())).unwrap();
+        let unmasked = image::load_from_memory(&unmasked).unwrap().to_rgba8();
+        assert!((i32::from(unmasked.get_pixel(16, 16)[3]) - 127).abs() <= 1);
+        dict.remove(b"Mask");
+
+        dict.set("SMaskInData", 2);
+        dict.set("Matte", Object::Array(vec![0.into(), 0.into(), 0.into()]));
+        let (unblended, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), preblended.to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let unblended = image::load_from_memory(&unblended).unwrap().to_rgba8();
+        let pixel = unblended.get_pixel(16, 16);
+        assert!(pixel[0] > 240, "{pixel:?}");
+        assert!(pixel[1] < 10 && pixel[2] < 10, "{pixel:?}");
+        assert!((i32::from(pixel[3]) - 127).abs() <= 1, "{pixel:?}");
+
+        let source = image_pdf(preblended, Some(Filter::JpxDecode), false);
+        let mut variants = Vec::new();
+        for indirect in [false, true] {
+            let mut pdf = PdfDocument::load_mem(&source).unwrap();
+            let (opacity, matte) = if indirect {
+                let zero = Object::Reference(pdf.add_object(Object::Integer(0)));
+                let matte = pdf.add_object(Object::Array(vec![zero.clone(), zero.clone(), zero]));
+                (
+                    Object::Reference(pdf.add_object(Object::Integer(2))),
+                    Object::Reference(matte),
+                )
+            } else {
+                (2.into(), Object::Array(vec![0.into(), 0.into(), 0.into()]))
+            };
+            let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+            image.dict.set("SMaskInData", opacity);
+            image.dict.set("Matte", matte);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            variants.push(document.page_image_data(0, 0).unwrap().to_vec());
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+        assert_eq!(variants[0], variants[1]);
+
+        dict.set(
+            "Mask",
+            Object::Array(vec![
+                120.into(),
+                135.into(),
+                0.into(),
+                5.into(),
+                0.into(),
+                5.into(),
+            ]),
+        );
+        let (masked, _) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), preblended.to_vec())).unwrap();
+        let masked = image::load_from_memory(&masked).unwrap().to_rgba8();
+        let pixel = masked.get_pixel(16, 16);
+        assert!(pixel[0] > 240, "{pixel:?}");
+        assert_eq!(pixel[3], 0);
+        dict.remove(b"Mask");
+
+        dict.set("Matte", Object::Array(vec![1.into(), 1.into(), 1.into()]));
+        let (unblended, _) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), white_matte.to_vec())).unwrap();
+        let unblended = image::load_from_memory(&unblended).unwrap().to_rgba8();
+        let pixel = unblended.get_pixel(16, 16);
+        assert!(
+            pixel[0] > 240 && pixel[1] < 10 && pixel[2] < 10,
+            "{pixel:?}"
+        );
+        assert!((i32::from(pixel[3]) - 127).abs() <= 1, "{pixel:?}");
+
+        dict.set("Matte", Object::Array(vec![0.into()]));
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), preblended.to_vec())).is_err());
+        dict.remove(b"Matte");
+        dict.set("SMask", Object::Reference((6, 0)));
+        assert!(image_bytes_inner(&lopdf::Stream::new(dict, preblended.to_vec()), true).is_err());
+    }
+
+    #[test]
+    fn imports_pdf_jpeg2000_color_key_mask_using_source_samples() {
+        let source = include_bytes!("../tests/fixtures/red-blue-32x32.jp2");
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 32);
+        dict.set("Height", 32);
+        dict.set("Filter", Object::Name(b"JPXDecode".to_vec()));
+        let mask = vec![
+            250.into(),
+            255.into(),
+            0.into(),
+            5.into(),
+            0.into(),
+            5.into(),
+        ];
+        dict.set("Mask", Object::Array(mask.clone()));
+        let (data, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), source.to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let pixels = image::load_from_memory(&data).unwrap().to_rgba8();
+        assert_eq!(pixels.get_pixel(4, 16)[3], 0);
+        assert_eq!(pixels.get_pixel(28, 16)[3], 255);
+
+        let mut pdf =
+            lopdf::Document::load_mem(&image_pdf(source, Some(Filter::JpxDecode), false)).unwrap();
+        let mask_low = pdf.add_object(mask[0].clone());
+        let mut indirect_mask = mask.clone();
+        indirect_mask[0] = Object::Reference(mask_low);
+        let mask_id = pdf.add_object(Object::Array(indirect_mask));
+        let mut indirect_pdf = pdf.clone();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Mask", Object::Array(mask));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(pixels.get_pixel(4, 16)[3], 0);
+        assert_eq!(pixels.get_pixel(28, 16)[3], 255);
+        indirect_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Mask", Object::Reference(mask_id));
+        let mut indirect_bytes = Vec::new();
+        indirect_pdf.save_to(&mut indirect_bytes).unwrap();
+        let indirect = OfdDocument::from_pdf_bytes(&indirect_bytes).unwrap();
+        assert_eq!(
+            indirect.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+        assert!(indirect.validate_references().unwrap().is_empty());
+
+        dict.set("Mask", Object::Array(vec![0.into(), 255.into()]));
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), source.to_vec())).is_err());
+        dict.set(
+            "Mask",
+            Object::Array(vec![
+                250.into(),
+                256.into(),
+                0.into(),
+                5.into(),
+                0.into(),
+                5.into(),
+            ]),
+        );
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), source.to_vec())).is_err());
+        dict.set(
+            "Mask",
+            Object::Array(vec![
+                250.into(),
+                255.into(),
+                0.into(),
+                5.into(),
+                0.into(),
+                Object::Name(b"bad".to_vec()),
+            ]),
+        );
+        assert!(image_bytes(&lopdf::Stream::new(dict, source.to_vec())).is_err());
+    }
+
+    #[test]
+    fn imports_pdf_jpeg2000_with_calibrated_color_space_array() {
+        let source = include_bytes!("../tests/fixtures/red-blue-32x32.jp2");
+        let mut profile = lopdf::Dictionary::new();
+        profile.set(
+            "WhitePoint",
+            Object::Array(vec![0.95047.into(), 1.into(), 1.08883.into()]),
+        );
+        let color_space = Object::Array(vec![
+            Object::Name(b"CalRGB".to_vec()),
+            Object::Dictionary(profile.clone()),
+        ]);
+        let mut images = Vec::new();
+        for mode in 0..3 {
+            let mut pdf =
+                PdfDocument::load_mem(&image_pdf(source, Some(Filter::JpxDecode), false)).unwrap();
+            let color_space = match mode {
+                1 => Object::Reference(pdf.add_object(color_space.clone())),
+                2 => Object::Array(vec![
+                    Object::Name(b"CalRGB".to_vec()),
+                    Object::Reference(pdf.add_object(Object::Dictionary(profile.clone()))),
+                ]),
+                _ => color_space.clone(),
+            };
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("ColorSpace", color_space);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let image = document.page_image_data(0, 0).unwrap().to_vec();
+            let pixels = image::load_from_memory(&image).unwrap().to_rgb8();
+            assert!(pixels.get_pixel(4, 16)[0] > 200);
+            assert!(pixels.get_pixel(28, 16)[2] > 200);
+            assert!(document.validate_references().unwrap().is_empty());
+            images.push(image);
+        }
+        assert_eq!(images[0], images[1]);
+        assert_eq!(images[0], images[2]);
+
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(source, Some(Filter::JpxDecode), false)).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"CalGray".to_vec()),
+                    Object::Dictionary(profile),
+                ]),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("color space does not match")
+        ));
+    }
+
+    #[test]
+    fn remaps_pdf_jpeg2000_with_default_rgb_and_keeps_source_mask() {
+        let source = include_bytes!("../tests/fixtures/red-blue-32x32.jp2");
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(source, Some(Filter::JpxDecode), false)).unwrap();
+        let profile = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"N" => 3},
+            include_bytes!("../tests/fixtures/swapped-rg.icc").to_vec(),
+        ));
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "ColorSpace",
+                dictionary! {
+                    "DefaultRGB" => Object::Array(vec![
+                        Object::Name(b"ICCBased".to_vec()),
+                        Object::Reference(profile),
+                    ])
+                },
+            );
+        let resources = pdf
+            .get_object((3, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Resources")
+            .unwrap();
+        let expected = selected_color_space(&pdf, resources, b"DeviceRGB")
+            .unwrap()
+            .color(&[1.0, 0.0, 0.0])
+            .unwrap();
+        let mut alpha_pdf = pdf.clone();
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            document.page_images(0).unwrap()[0].format.as_deref(),
+            Some("PNG")
+        );
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(&pixels.get_pixel(4, 16).0[..3], &expected);
+        assert_eq!(pixels.get_pixel(4, 16)[3], 255);
+
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "Mask",
+                Object::Array(vec![
+                    250.into(),
+                    255.into(),
+                    0.into(),
+                    5.into(),
+                    0.into(),
+                    5.into(),
+                ]),
+            );
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(pixels.get_pixel(4, 16)[3], 0);
+        assert_eq!(pixels.get_pixel(28, 16)[3], 255);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let stream = alpha_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream
+            .set_content(include_bytes!("../tests/fixtures/red-premultiplied-32x32.jp2").to_vec());
+        stream.dict.set("SMaskInData", 2);
+        bytes.clear();
+        alpha_pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        let pixel = pixels.get_pixel(16, 16);
+        assert!((i16::from(pixel[3]) - 127).abs() <= 1);
+        for channel in 0..3 {
+            assert!((i16::from(pixel[channel]) - i16::from(expected[channel])).abs() <= 3);
+        }
+    }
+
+    #[test]
+    fn imports_pdf_jpeg2000_color_key_mask_at_sixteen_bits() {
+        let source = include_bytes!("../tests/fixtures/gray16-pair-32x32.jp2");
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 32);
+        dict.set("Height", 32);
+        dict.set("Filter", Object::Name(b"JPXDecode".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        dict.set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        dict.set("Mask", Object::Array(vec![0x1234.into(), 0x1234.into()]));
+        let (png, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), source.to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let pixels = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(pixels.get_pixel(4, 16)[3], 0);
+        assert_eq!(pixels.get_pixel(28, 16)[3], 255);
+        dict.set("Mask", Object::Array(vec![0x1234.into(), 65536.into()]));
+        assert!(image_bytes(&lopdf::Stream::new(dict, source.to_vec())).is_err());
+    }
+
+    #[test]
+    fn remaps_sixteen_bit_pdf_jpeg2000_gray_samples() {
+        let source = include_bytes!("../tests/fixtures/gray16-pair-32x32.jp2");
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(source, Some(Filter::JpxDecode), true)).unwrap();
+        let calgray = Object::Array(vec![
+            Object::Name(b"CalGray".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![
+                    Object::Real(0.9505), Object::Integer(1), Object::Real(1.089),
+                ]),
+                "Gamma" => Object::Integer(1),
+            }),
+        ]);
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ColorSpace", dictionary! {"DefaultGray" => calgray});
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        let expected = PdfColorSpace::CalGray { gamma: 1.0 }
+            .color(&[f64::from(0x1234) / 65535.0])
+            .unwrap();
+        assert_eq!(&pixels.get_pixel(4, 16).0[..3], &expected);
+        assert_eq!(pixels.get_pixel(4, 16)[3], 255);
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn decodes_packed_pdf_image_samples_with_row_padding_and_decode() {
+        for (bits, width, raw, first, last) in [
+            (1, 5, vec![0b1010_1000, 0b0101_0000], 255, 0),
+            (2, 3, vec![0b0001_1000, 0b1110_0100], 0, 85),
+            (4, 3, vec![0x05, 0xf0, 0xf5, 0x00], 0, 0),
+        ] {
+            let mut dict = lopdf::Dictionary::new();
+            dict.set("Width", width);
+            dict.set("Height", 2);
+            dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            dict.set("BitsPerComponent", bits);
+            let (png, _) = image_bytes(&lopdf::Stream::new(dict.clone(), raw.clone())).unwrap();
+            let image = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            assert_eq!(image.pixel(0, 0).unwrap().red(), first);
+            assert_eq!(image.pixel(width as u32 - 1, 1).unwrap().red(), last);
+
+            dict.set("Decode", Object::Array(vec![1.into(), 0.into()]));
+            let (png, _) = image_bytes(&lopdf::Stream::new(dict.clone(), raw.clone())).unwrap();
+            let inverted = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            assert_eq!(inverted.pixel(0, 0).unwrap().red(), 255 - first);
+
+            dict.remove(b"Decode");
+            dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+            let mut compressor =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut compressor, &raw).unwrap();
+            let compressed = compressor.finish().unwrap();
+            let (png, _) = image_bytes(&lopdf::Stream::new(dict, compressed)).unwrap();
+            let decoded = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            assert_eq!(decoded.pixel(0, 0).unwrap().red(), first);
+        }
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 1);
+        dict.set("Height", 1);
+        dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        dict.set("BitsPerComponent", 2);
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict.clone(), vec![0b1100_1000])).unwrap();
+        let image = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let pixel = image.pixel(0, 0).unwrap();
+        assert_eq!((pixel.red(), pixel.green(), pixel.blue()), (255, 0, 170));
+
+        dict.set("Decode", Object::Array(vec![0.into(), 1.into()]));
+        assert!(image_bytes(&lopdf::Stream::new(dict.clone(), vec![0b1100_1000])).is_err());
+        dict.remove(b"Decode");
+        assert!(image_bytes(&lopdf::Stream::new(dict, vec![])).is_err());
+    }
+
+    #[test]
+    fn decodes_pdf_image_ascii_and_run_length_filters_with_bounds() {
+        assert_eq!(
+            decode_pdf_run_length(&[255, 0, 255, 255, 128], 4).unwrap(),
+            [0, 0, 255, 255]
+        );
+        assert_eq!(decode_pdf_ascii_hex(b"00 0f A>", 3).unwrap(), [0, 15, 160]);
+        assert_eq!(decode_pdf_ascii85(b"z~>", 4).unwrap(), [0; 4]);
+        assert_eq!(decode_pdf_ascii85(b"!!~>", 1).unwrap(), [0]);
+        assert_eq!(
+            decode_pdf_ascii85(b"!!*-'\"9eu~>", 7).unwrap(),
+            [0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(decode_pdf_ascii85(b"s8W*~>", 3).unwrap(), [255; 3]);
+        assert!(decode_pdf_run_length(&[255, 0, 255, 255, 128], 3).is_err());
+        assert!(decode_pdf_run_length(&[2, 0], 4).is_err());
+        assert!(decode_pdf_run_length(&[255, 0], 4).is_err());
+        assert!(decode_pdf_ascii_hex(b"0G>", 2).is_err());
+        assert!(decode_pdf_ascii_hex(b"00", 2).is_err());
+        assert!(decode_pdf_ascii85(b"!z~>", 4).is_err());
+        assert!(decode_pdf_ascii85(b"!~>", 4).is_err());
+        assert!(decode_pdf_ascii85(b"uuuuu~>", 4).is_err());
+        assert!(decode_pdf_ascii85(b"z", 4).is_err());
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 2);
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        dict.set(
+            "Filter",
+            Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"RunLengthDecode".to_vec()),
+            ]),
+        );
+        let (png, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), b"FF00FFFF80>".to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 0);
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 255);
+
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &[0, 0, 255, 255]).unwrap();
+        let compressed = compressor.finish().unwrap();
+        let encoded = compressed
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>()
+            + ">";
+        dict.set(
+            "Filter",
+            Object::Array(vec![
+                Object::Name(b"AHx".to_vec()),
+                Object::Name(b"Fl".to_vec()),
+            ]),
+        );
+        let (png, _) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), encoded.into_bytes())).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 255);
+
+        dict.set("Filter", Object::Name(b"A85".to_vec()));
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict, b"z~>".to_vec())).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 0);
+    }
+
+    #[test]
+    fn decodes_pdf_lzw_images_with_both_code_width_modes() {
+        let samples = (0..4096)
+            .map(|value| (value % 251) as u8)
+            .collect::<Vec<_>>();
+        for early_change in [0, 1] {
+            let compressed = if early_change == 1 {
+                weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+                    .encode(&samples)
+                    .unwrap()
+            } else {
+                weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8)
+                    .encode(&samples)
+                    .unwrap()
+            };
+            assert_eq!(
+                decode_pdf_lzw(&compressed, samples.len(), early_change).unwrap(),
+                samples
+            );
+            assert!(decode_pdf_lzw(&compressed, samples.len() - 1, early_change).is_err());
+
+            let mut dict = lopdf::Dictionary::new();
+            dict.set("Width", samples.len() as i64);
+            dict.set("Height", 1);
+            dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            dict.set("BitsPerComponent", 8);
+            dict.set("Filter", Object::Name(b"LZWDecode".to_vec()));
+            dict.set(
+                "DecodeParms",
+                lopdf::dictionary! { "EarlyChange" => early_change },
+            );
+            let (png, format) = image_bytes(&lopdf::Stream::new(dict, compressed)).unwrap();
+            assert_eq!(format, "png");
+            let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            assert_eq!(raster.pixel(0, 0).unwrap().red(), samples[0]);
+            assert_eq!(raster.pixel(3000, 0).unwrap().red(), samples[3000]);
+        }
+        assert!(decode_pdf_lzw(&[0x80], 10, 1).is_err());
+    }
+
+    #[test]
+    fn decodes_pdf_tiff_and_png_predictors_after_lzw_or_flate() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 2);
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        dict.set("Filter", Object::Name(b"LZWDecode".to_vec()));
+        dict.set(
+            "DecodeParms",
+            lopdf::dictionary! {
+                "Predictor" => 2,
+                "Colors" => 1,
+                "BitsPerComponent" => 8,
+                "Columns" => 2,
+            },
+        );
+        let predicted = [10, 10, 30, 20];
+        let compressed = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .encode(&predicted)
+            .unwrap();
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict.clone(), compressed)).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 10);
+        assert_eq!(raster.pixel(1, 0).unwrap().red(), 20);
+        assert_eq!(raster.pixel(0, 1).unwrap().red(), 30);
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 50);
+
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        dict.set(
+            "DecodeParms",
+            lopdf::dictionary! {
+                "Predictor" => 15,
+                "Colors" => 1,
+                "BitsPerComponent" => 8,
+                "Columns" => 2,
+            },
+        );
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &[1, 10, 10, 2, 20, 30]).unwrap();
+        let (png, _) = image_bytes(&lopdf::Stream::new(
+            dict.clone(),
+            compressor.finish().unwrap(),
+        ))
+        .unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 50);
+
+        let params = PdfImageFilterParams {
+            predictor: 2,
+            colors: 1,
+            bits: 2,
+            columns: 3,
+            ..PdfImageFilterParams::default()
+        };
+        assert_eq!(
+            apply_pdf_predictor(vec![0b0001_0100], &params, 1).unwrap(),
+            [0b0001_1000]
+        );
+        let params = PdfImageFilterParams {
+            predictor: 15,
+            colors: 1,
+            bits: 8,
+            columns: 2,
+            ..PdfImageFilterParams::default()
+        };
+        assert_eq!(
+            apply_pdf_predictor(vec![0, 10, 20, 4, 20, 20], &params, 4).unwrap(),
+            [10, 20, 30, 50]
+        );
+        assert!(apply_pdf_predictor(vec![7, 10, 20], &params, 2).is_err());
+        assert!(apply_pdf_predictor(vec![0, 10], &params, 2).is_err());
+    }
+
+    #[test]
+    fn imports_lzw_pdf_image_with_tiff_predictor() {
+        let source = include_bytes!("../tests/fixtures/lzw-predictor-image.pdf");
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        let raster =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 10);
+        assert_eq!(raster.pixel(1, 0).unwrap().red(), 20);
+        assert_eq!(raster.pixel(0, 1).unwrap().red(), 30);
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 50);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn aligns_pdf_decode_parameters_with_filter_chain_and_rejects_invalid_values() {
+        let compressed = weezl::encode::Encoder::new(weezl::BitOrder::Msb, 8)
+            .encode(&[10, 20, 30, 40])
+            .unwrap();
+        let encoded = compressed
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            + ">";
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 2);
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        dict.set(
+            "Filter",
+            Object::Array(vec![
+                Object::Name(b"AHx".to_vec()),
+                Object::Name(b"LZW".to_vec()),
+            ]),
+        );
+        dict.set(
+            "DecodeParms",
+            Object::Array(vec![
+                Object::Null,
+                Object::Dictionary(lopdf::dictionary! { "EarlyChange" => 0 }),
+            ]),
+        );
+        let (png, _) = image_bytes(&lopdf::Stream::new(
+            dict.clone(),
+            encoded.as_bytes().to_vec(),
+        ))
+        .unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 40);
+
+        for invalid in [
+            Object::Array(vec![Object::Null]),
+            Object::Dictionary(lopdf::dictionary! { "EarlyChange" => 0 }),
+            Object::Array(vec![
+                Object::Null,
+                Object::Dictionary(lopdf::dictionary! { "EarlyChange" => 2 }),
+            ]),
+            Object::Array(vec![
+                Object::Null,
+                Object::Dictionary(lopdf::dictionary! { "Predictor" => 9 }),
+            ]),
+            Object::Array(vec![
+                Object::Dictionary(lopdf::dictionary! { "Predictor" => 1 }),
+                Object::Null,
+            ]),
+        ] {
+            dict.set("DecodeParms", invalid);
+            assert!(image_bytes(&lopdf::Stream::new(
+                dict.clone(),
+                encoded.as_bytes().to_vec()
+            ))
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn imports_pdf_image_with_chained_asciihex_and_runlength_filters() {
+        let source = include_bytes!("../tests/fixtures/asciihex-runlength-image.pdf");
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        let raster =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 0);
+        assert_eq!(raster.pixel(1, 0).unwrap().red(), 0);
+        assert_eq!(raster.pixel(0, 1).unwrap().red(), 255);
+        assert_eq!(raster.pixel(1, 1).unwrap().red(), 255);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_pdf_stencil_with_chained_asciihex_and_runlength_filters() {
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(&[255, 0, 0].repeat(4), None, false)).unwrap();
+        let stencil = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stencil.dict.remove(b"ColorSpace");
+        stencil.dict.set("ImageMask", true);
+        stencil.dict.set("BitsPerComponent", 1);
+        stencil.dict.set(
+            "Filter",
+            Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"RunLengthDecode".to_vec()),
+            ]),
+        );
+        stencil.set_content(b"01408080>".to_vec());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let raster =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().alpha(), 255);
+        assert_eq!(raster.pixel(1, 0).unwrap().alpha(), 0);
+        assert_eq!(raster.pixel(0, 1).unwrap().alpha(), 0);
+        assert_eq!(raster.pixel(1, 1).unwrap().alpha(), 255);
+    }
+
+    #[test]
+    fn decodes_packed_indexed_pdf_images_with_decode_and_color_key() {
+        let palette = Object::Array(vec![
+            Object::Name(b"Indexed".to_vec()),
+            Object::Name(b"DeviceRGB".to_vec()),
+            Object::Integer(2),
+            Object::String(
+                vec![255, 0, 0, 0, 255, 0, 0, 0, 255],
+                lopdf::StringFormat::Literal,
+            ),
+        ]);
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 3);
+        dict.set("Height", 2);
+        dict.set("BitsPerComponent", 2);
+        dict.set("ColorSpace", palette.clone());
+        let samples = vec![0b0001_1000, 0b1001_0000];
+        let (png, format) =
+            image_bytes(&lopdf::Stream::new(dict.clone(), samples.clone())).unwrap();
+        assert_eq!(format, "png");
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 255);
+        assert_eq!(raster.pixel(1, 0).unwrap().green(), 255);
+        assert_eq!(raster.pixel(2, 0).unwrap().blue(), 255);
+        assert_eq!(raster.pixel(0, 1).unwrap().blue(), 255);
+
+        dict.set("Decode", Object::Array(vec![2.into(), (-1).into()]));
+        dict.set("Mask", Object::Array(vec![1.into(), 1.into()]));
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict.clone(), samples.clone())).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().blue(), 255);
+        assert_eq!(raster.pixel(1, 0).unwrap().alpha(), 0);
+        assert_eq!(raster.pixel(2, 0).unwrap().red(), 255);
+
+        dict.remove(b"Mask");
+        dict.remove(b"Decode");
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &samples).unwrap();
+        let (png, _) = image_bytes(&lopdf::Stream::new(
+            dict.clone(),
+            compressor.finish().unwrap(),
+        ))
+        .unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(2, 0).unwrap().blue(), 255);
+
+        dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Integer(3),
+                Object::String(vec![0; 9], lopdf::StringFormat::Literal),
+            ]),
+        );
+        assert!(image_bytes(&lopdf::Stream::new(dict, samples)).is_err());
+    }
+
+    #[test]
+    fn imports_indexed_jpeg_with_decode_and_color_key() {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[128; 32 * 32], 32, 32, image::ExtendedColorType::L8)
+            .unwrap();
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(&jpeg, Some(Filter::DctDecode), true)).unwrap();
+        let mut palette = vec![0; 256 * 3];
+        palette[128 * 3] = 255;
+        palette[127 * 3 + 1] = 255;
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Integer(255),
+                Object::String(palette, lopdf::StringFormat::Literal),
+            ]),
+        );
+        image
+            .dict
+            .set("Mask", Object::Array(vec![128.into(), 128.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgba = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 0]);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image
+            .dict
+            .set("Decode", Object::Array(vec![255.into(), 0.into()]));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let rgba = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(rgba.get_pixel(0, 0).0, [0, 255, 0, 0]);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut rgb_jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut rgb_jpeg)
+            .encode(&[128; 32 * 32 * 3], 32, 32, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(rgb_jpeg);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("channel count does not match")
+        ));
+    }
+
+    #[test]
+    fn imports_indexed_pdf_image_with_named_space_and_lookup_stream() {
+        let source = image_pdf(&[0, 1, 2, 0], None, false);
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let lookup = pdf.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            vec![255, 0, 0, 0, 255, 0, 0, 0, 255],
+        ));
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                lopdf::dictionary! {
+                    "XObject" => lopdf::dictionary! { "Im1" => Object::Reference((5, 0)) },
+                    "ColorSpace" => lopdf::dictionary! {
+                        "Pal" => Object::Array(vec![
+                            Object::Name(b"Indexed".to_vec()),
+                            Object::Name(b"DeviceRGB".to_vec()),
+                            Object::Integer(2),
+                            Object::Reference(lookup),
+                        ])
+                    }
+                },
+            );
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("ColorSpace", Object::Name(b"Pal".to_vec()));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let png = document.page_image_data(0, 0).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 255);
+        assert_eq!(raster.pixel(1, 0).unwrap().green(), 255);
+        assert_eq!(raster.pixel(0, 1).unwrap().blue(), 255);
+        assert!(document.validate_references().unwrap().is_empty());
+        assert!(OfdDocument::from_bytes(&document.to_bytes().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn decodes_device_cmyk_images_with_mask_and_flate() {
+        let pixels = vec![0, 255, 255, 0, 0, 0, 0, 255];
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 1);
+        dict.set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        let stream = lopdf::Stream::new(dict.clone(), pixels.clone());
+        let (png, format) = image_bytes(&stream).unwrap();
+        assert_eq!(format, "png");
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let red = raster.pixel(0, 0).unwrap();
+        let black = raster.pixel(1, 0).unwrap();
+        assert_eq!((red.red(), red.green(), red.blue()), (255, 0, 0));
+        assert_eq!((black.red(), black.green(), black.blue()), (0, 0, 0));
+
+        dict.set(
+            "Mask",
+            Object::Array(vec![
+                0.into(),
+                0.into(),
+                255.into(),
+                255.into(),
+                255.into(),
+                255.into(),
+                0.into(),
+                0.into(),
+            ]),
+        );
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict.clone(), pixels.clone())).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(raster.pixel(1, 0).unwrap().alpha(), 255);
+
+        dict.remove(b"Mask");
+        dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &pixels).unwrap();
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict, encoder.finish().unwrap())).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().red(), 255);
+    }
+
+    #[test]
+    fn decodes_device_cmyk_jpeg_to_rgb_png() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 1);
+        dict.set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        let jpeg = include_bytes!("../tests/fixtures/cmyk.jpg");
+        let (png, format) = image_bytes(&lopdf::Stream::new(dict.clone(), jpeg.to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let red = raster.pixel(0, 0).unwrap();
+        let black = raster.pixel(1, 0).unwrap();
+        assert!(red.red() > 240 && red.green() < 20 && red.blue() < 20);
+        assert!(black.red() < 20 && black.green() < 20 && black.blue() < 20);
+        let mut decoder = JpegDecoder::new_with_options(
+            ZCursor::new(jpeg.as_slice()),
+            DecoderOptions::default().jpeg_set_out_colorspace(JpegColorSpace::CMYK),
+        );
+        let samples = decoder.decode().unwrap();
+        assert_eq!(decoder.input_colorspace(), Some(JpegColorSpace::CMYK));
+        dict.set(
+            "Mask",
+            Object::Array(
+                samples[..4]
+                    .iter()
+                    .flat_map(|value| {
+                        [
+                            Object::Integer(i64::from(*value)),
+                            Object::Integer(i64::from(*value)),
+                        ]
+                    })
+                    .collect(),
+            ),
+        );
+        let (png, format) = image_bytes(&lopdf::Stream::new(dict.clone(), jpeg.to_vec())).unwrap();
+        assert_eq!(format, "png");
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(raster.pixel(1, 0).unwrap().alpha(), 255);
+
+        let ycck = include_bytes!("../tests/fixtures/ycck.jpg");
+        let mut decoder = JpegDecoder::new_with_options(
+            ZCursor::new(ycck.as_slice()),
+            DecoderOptions::default().jpeg_set_out_colorspace(JpegColorSpace::YCCK),
+        );
+        let mut samples = decoder.decode().unwrap();
+        assert_eq!(decoder.input_colorspace(), Some(JpegColorSpace::YCCK));
+        ycck_to_cmyk(&mut samples);
+        dict.set(
+            "Mask",
+            Object::Array(
+                samples[..4]
+                    .iter()
+                    .flat_map(|value| {
+                        [
+                            Object::Integer(i64::from(*value)),
+                            Object::Integer(i64::from(*value)),
+                        ]
+                    })
+                    .collect(),
+            ),
+        );
+        let (png, _) = image_bytes(&lopdf::Stream::new(dict, ycck.to_vec())).unwrap();
+        let raster = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(raster.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(raster.pixel(1, 0).unwrap().alpha(), 255);
+    }
+
+    #[test]
+    fn decodes_unmarked_four_channel_pdf_jpeg_color_transform() {
+        let marked = include_bytes!("../tests/fixtures/ycck.jpg");
+        assert_eq!(jpeg_adobe_color_transform(marked).unwrap().unwrap().0, 2);
+        let mut jpeg = marked[..2].to_vec();
+        jpeg.extend_from_slice(&marked[18..]);
+        assert!(jpeg_adobe_color_transform(&jpeg).unwrap().is_none());
+        let raw = decode_four_channel_jpeg_samples(&jpeg, 2, 1).unwrap();
+        let converted = decode_four_channel_pdf_jpeg_samples(&jpeg, 2, 1, true).unwrap();
+        assert_eq!(converted[3], raw[3]);
+        assert_ne!(&converted[..3], &raw[..3]);
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 1);
+        dict.set("BitsPerComponent", 8);
+        dict.set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        dict.set("DecodeParms", dictionary! { "ColorTransform" => 1 });
+        let (png, format) = image_bytes(&lopdf::Stream::new(dict.clone(), jpeg.clone())).unwrap();
+        assert_eq!(format, "png");
+        let image = image::load_from_memory(&png).unwrap().to_rgb8();
+        let mapped: [f64; 4] = std::array::from_fn(|index| f64::from(converted[index]) / 255.0);
+        let expected = cmyk_color(&mapped).unwrap();
+        assert_eq!(image.get_pixel(0, 0).0, expected);
+
+        dict.set("DecodeParms", dictionary! { "ColorTransform" => 0 });
+        let (plain, _) = image_bytes(&lopdf::Stream::new(dict.clone(), jpeg.clone())).unwrap();
+        let plain = image::load_from_memory(&plain).unwrap().to_rgb8();
+        assert_ne!(plain.get_pixel(0, 0).0, expected);
+
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&[0; 12], None, false)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.set_content(jpeg);
+        image.dict.set("Width", 2);
+        image.dict.set("Height", 1);
+        image
+            .dict
+            .set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        image
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        image
+            .dict
+            .set("DecodeParms", dictionary! { "ColorTransform" => 1 });
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let imported = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(imported.get_pixel(0, 0).0, expected);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let profile = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let profile_id = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile.to_vec(),
+        )));
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(profile_id),
+            ]),
+        );
+        image.dict.set(
+            "Mask",
+            Object::Array(
+                converted[..4]
+                    .iter()
+                    .flat_map(|value| {
+                        [
+                            Object::Integer(i64::from(*value)),
+                            Object::Integer(i64::from(*value)),
+                        ]
+                    })
+                    .collect(),
+            ),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let imported = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        let profile = ColorProfile::new_from_slice(profile).unwrap();
+        let transform = profile
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions::default(),
+            )
+            .unwrap();
+        let mut expected = [0_u8; 3];
+        transform.transform(&converted[..4], &mut expected).unwrap();
+        assert_eq!(&imported.get_pixel(0, 0).0[..3], &expected);
+        assert_eq!(imported.get_pixel(0, 0).0[3], 0);
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn applies_pdf_jpeg_color_transform_and_adobe_override() {
+        let source = [235_u8, 20, 50].repeat(4);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&source, 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let raw = decode_three_channel_jpeg_samples(&jpeg, 2, 2, 0).unwrap();
+        let transformed = decode_three_channel_jpeg_samples(&jpeg, 2, 2, 1).unwrap();
+        assert_ne!(&raw[..3], &transformed[..3]);
+
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&source, None, false)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.set_content(jpeg.clone());
+        image
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        image
+            .dict
+            .set("DecodeParms", dictionary! { "ColorTransform" => 0 });
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixel = image::load_from_memory(imported.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(0, 0)
+            .0;
+        assert_eq!(pixel, raw[..3]);
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image
+            .dict
+            .set("DecodeParms", dictionary! { "ColorTransform" => 1 });
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixel = image::load_from_memory(imported.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(0, 0)
+            .0;
+        assert_eq!(pixel, transformed[..3]);
+
+        let mut marked = jpeg[..2].to_vec();
+        marked.extend_from_slice(b"\xff\xee\x00\x0eAdobe\x00\x64\x00\x00\x00\x00\x00");
+        marked.extend_from_slice(&jpeg[2..]);
+        assert_eq!(jpeg_adobe_color_transform(&marked).unwrap().unwrap().0, 0);
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image.set_content(marked.clone());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let pixel = image::load_from_memory(imported.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(0, 0)
+            .0;
+        assert_eq!(pixel, raw[..3]);
+
+        for invalid in [
+            dictionary! { "ColorTransform" => 2 },
+            dictionary! { "ColorTransform" => "invalid" },
+            dictionary! { "Predictor" => 1 },
+        ] {
+            let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+            image.set_content(jpeg.clone());
+            image.dict.set("DecodeParms", invalid);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn applies_device_jpeg_decode_after_color_key_matching() {
+        for channels in [1, 3] {
+            let source = if channels == 1 {
+                vec![30_u8, 210]
+            } else {
+                vec![245_u8, 15, 20, 5, 20, 235]
+            };
+            let mut jpeg = Vec::new();
+            let color = if channels == 1 {
+                image::ExtendedColorType::L8
+            } else {
+                image::ExtendedColorType::Rgb8
+            };
+            image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+                .encode(&source, 2, 1, color)
+                .unwrap();
+            let decoded = decode_mask_image(&jpeg, "jpeg", 2, 1).unwrap();
+            let samples = if channels == 1 {
+                decoded.to_luma8().into_raw()
+            } else {
+                decoded.to_rgb8().into_raw()
+            };
+            let mut dict = lopdf::Dictionary::new();
+            dict.set("Width", 2);
+            dict.set("Height", 1);
+            dict.set("BitsPerComponent", 8);
+            dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+            dict.set(
+                "ColorSpace",
+                Object::Name(if channels == 1 {
+                    b"DeviceGray".to_vec()
+                } else {
+                    b"DeviceRGB".to_vec()
+                }),
+            );
+            dict.set(
+                "Decode",
+                Object::Array((0..channels).flat_map(|_| [1.into(), 0.into()]).collect()),
+            );
+            dict.set(
+                "Mask",
+                Object::Array(
+                    samples[..channels]
+                        .iter()
+                        .flat_map(|value| {
+                            [
+                                Object::Integer(i64::from(*value)),
+                                Object::Integer(i64::from(*value)),
+                            ]
+                        })
+                        .collect(),
+                ),
+            );
+            let (png, format) =
+                image_bytes(&lopdf::Stream::new(dict.clone(), jpeg.clone())).unwrap();
+            assert_eq!(format, "png");
+            let image = image::load_from_memory(&png).unwrap().to_rgba8();
+            let first = image.get_pixel(0, 0).0;
+            let second = image.get_pixel(1, 0).0;
+            assert_eq!(first[3], 0);
+            assert_eq!(second[3], 255);
+            for channel in 0..3 {
+                assert_eq!(first[channel], 255 - samples[channel % channels]);
+                assert_eq!(
+                    second[channel],
+                    255 - samples[channels + channel % channels]
+                );
+            }
+            dict.remove(b"Mask");
+            let (png, format) = image_bytes(&lopdf::Stream::new(dict, jpeg)).unwrap();
+            assert_eq!(format, "png");
+            let unmasked = image::load_from_memory(&png).unwrap().to_rgb8();
+            assert_eq!(unmasked.get_pixel(0, 0).0, first[..3]);
+        }
+    }
+
+    #[test]
+    fn applies_device_cmyk_jpeg_decode_and_keeps_raw_mask_samples() {
+        for source in [
+            include_bytes!("../tests/fixtures/cmyk.jpg").as_slice(),
+            include_bytes!("../tests/fixtures/ycck.jpg").as_slice(),
+        ] {
+            let samples = decode_four_channel_jpeg_samples(source, 2, 1).unwrap();
+            let mut dict = lopdf::Dictionary::new();
+            dict.set("Width", 2);
+            dict.set("Height", 1);
+            dict.set("BitsPerComponent", 8);
+            dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+            dict.set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+            dict.set(
+                "Decode",
+                Object::Array((0..4).flat_map(|_| [1.into(), 0.into()]).collect()),
+            );
+            dict.set(
+                "Mask",
+                Object::Array(
+                    samples[..4]
+                        .iter()
+                        .flat_map(|value| {
+                            [
+                                Object::Integer(i64::from(*value)),
+                                Object::Integer(i64::from(*value)),
+                            ]
+                        })
+                        .collect(),
+                ),
+            );
+            let (png, format) =
+                image_bytes(&lopdf::Stream::new(dict.clone(), source.to_vec())).unwrap();
+            assert_eq!(format, "png");
+            let image = image::load_from_memory(&png).unwrap().to_rgba8();
+            assert_eq!(image.get_pixel(0, 0).0[3], 0);
+            assert_eq!(image.get_pixel(1, 0).0[3], 255);
+            let first = image.get_pixel(0, 0).0;
+            assert!(
+                first[0] > 230 && first[1] < 30 && first[2] < 30,
+                "{first:?}"
+            );
+            dict.remove(b"Mask");
+            let (png, _) = image_bytes(&lopdf::Stream::new(dict, source.to_vec())).unwrap();
+            let unmasked = image::load_from_memory(&png).unwrap().to_rgb8();
+            assert_eq!(unmasked.get_pixel(0, 0).0, first[..3]);
+        }
+    }
+
+    #[test]
+    fn imports_affine_pdf_images_and_rejects_degenerate_transforms() {
+        let pixels = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        for (matrix, red_at, green_at) in [
+            ([-36.0, 0.0, 0.0, 36.0, 36.0, 0.0], (10, 15), (2, 15)),
+            ([0.0, 36.0, -36.0, 0.0, 36.0, 0.0], (2, 23), (2, 15)),
+            ([36.0, 0.0, 18.0, 36.0, 0.0, 0.0], (6, 15), (15, 15)),
+        ] {
+            let pdf = image_pdf_with_transform(&pixels, None, false, matrix);
+            let document = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+            assert!(document.page_images(0).unwrap()[0].ctm.is_some());
+            let raster =
+                resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+            let red = raster.pixel(red_at.0, red_at.1).unwrap();
+            let green = raster.pixel(green_at.0, green_at.1).unwrap();
+            assert!(red.red() > 200 && red.green() < 50, "{matrix:?}: {red:?}");
+            assert!(
+                green.green() > 200 && green.red() < 50,
+                "{matrix:?}: {green:?}"
+            );
+            assert!(document.validate_references().unwrap().is_empty());
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_images(0).unwrap().len(), 1);
+        }
+        for matrix in [
+            [0.0, 0.0, 0.0, 36.0, 0.0, 0.0],
+            [36.0, 0.0, 36.0, 0.0, 0.0, 0.0],
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&image_pdf_with_transform(
+                &pixels, None, false, matrix,
+            ))
+            .is_err());
+        }
+        assert!(OfdDocument::from_pdf_bytes(&image_pdf(&pixels[..11], None, false)).is_err());
+    }
+
+    #[test]
+    fn composes_pdf_page_rotation_with_affine_image_transform() {
+        let pixels = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let bytes =
+            image_pdf_with_transform(&pixels, None, false, [-36.0, 0.0, 0.0, 36.0, 36.0, 0.0]);
+        let mut pdf = PdfDocument::load_mem(&bytes).unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 90);
+        let mut rotated = Vec::new();
+        pdf.save_to(&mut rotated).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&rotated).unwrap();
+        let image = &document.page_images(0).unwrap()[0];
+        assert!(image.ctm.is_some());
+        let raster =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let red = raster.pixel(9, 10).unwrap();
+        assert!(red.red() > 200 && red.green() < 50, "{red:?}");
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn imports_pdf_soft_mask_image_as_rgba_and_rejects_invalid_masks() {
+        let parent = [255, 0, 0].repeat(4);
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&parent, None, false)).unwrap();
+        let mut mask_dict = lopdf::Dictionary::new();
+        mask_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        mask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        mask_dict.set("Width", 2);
+        mask_dict.set("Height", 2);
+        mask_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        mask_dict.set("BitsPerComponent", 8);
+        let mask_id = pdf.add_object(lopdf::Stream::new(
+            mask_dict.clone(),
+            vec![0, 128, 255, 255],
+        ));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("SMask", Object::Reference(mask_id));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 128);
+        assert_eq!(image.pixel(0, 1).unwrap().alpha(), 255);
+        let page =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let clear = page.pixel(3, 14).unwrap();
+        let opaque = page.pixel(3, 22).unwrap();
+        assert!(clear.green() > 240 && clear.blue() > 240);
+        assert!(opaque.red() > 230 && opaque.green() < 30);
+        assert!(lopdf::Document::load_mem(&document.to_pdf().unwrap()).is_ok());
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut indirect = PdfDocument::load_mem(&bytes).unwrap();
+        let dimension = indirect.add_object(Object::Integer(2));
+        let bits = indirect.add_object(Object::Integer(8));
+        for id in [(5, 0), mask_id] {
+            let stream = indirect
+                .get_object_mut(id)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap();
+            stream.dict.set("Width", Object::Reference(dimension));
+            stream.dict.set("Height", Object::Reference(dimension));
+            stream.dict.set("BitsPerComponent", Object::Reference(bits));
+        }
+        let mut indirect_bytes = Vec::new();
+        indirect.save_to(&mut indirect_bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&indirect_bytes).unwrap();
+        assert_eq!(
+            imported.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+
+        let mut malformed = PdfDocument::load_mem(&bytes).unwrap();
+        malformed
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matte", Object::Array(vec![Object::Real(1.0); 2]));
+        let mut invalid = Vec::new();
+        malformed.save_to(&mut invalid).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&invalid).is_err());
+        malformed
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matte", Object::Array(vec![Object::Real(1.2); 3]));
+        let mut invalid = Vec::new();
+        malformed.save_to(&mut invalid).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&invalid).is_err());
+
+        let mut scaled = PdfDocument::load_mem(&bytes).unwrap();
+        let mask = scaled
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        mask.dict.set("Width", 1);
+        mask.dict.set("Height", 1);
+        mask.set_content(vec![128]);
+        let mut scaled_bytes = Vec::new();
+        scaled.save_to(&mut scaled_bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&scaled_bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(imported.page_image_data(0, 0).unwrap()).unwrap();
+        assert!((0..2).all(|x| (0..2).all(|y| image.pixel(x, y).unwrap().alpha() == 128)));
+    }
+
+    #[test]
+    fn imports_preblended_pdf_soft_mask_images_with_matte() {
+        for (gray, samples, matte, expected) in [
+            (
+                false,
+                vec![255, 255, 255, 255, 127, 127, 10, 20, 30, 191, 191, 255],
+                vec![Object::Real(1.0); 3],
+                [[0, 0, 0], [255, 0, 0], [10, 20, 30], [0, 0, 255]],
+            ),
+            (
+                true,
+                vec![255, 127, 42, 191],
+                vec![Object::Real(1.0)],
+                [[0, 0, 0], [0, 0, 0], [42, 42, 42], [0, 0, 0]],
+            ),
+        ] {
+            let mut pdf = PdfDocument::load_mem(&image_pdf(&samples, None, gray)).unwrap();
+            let mut mask_dict = lopdf::Dictionary::new();
+            mask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+            mask_dict.set("Width", 2);
+            mask_dict.set("Height", 2);
+            mask_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            mask_dict.set("BitsPerComponent", 8);
+            if gray {
+                let matte_id = pdf.add_object(Object::Array(matte));
+                mask_dict.set("Matte", Object::Reference(matte_id));
+            } else {
+                mask_dict.set("Matte", Object::Array(matte));
+            }
+            let mask_id = pdf.add_object(lopdf::Stream::new(mask_dict, vec![0, 128, 255, 64]));
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("SMask", Object::Reference(mask_id));
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let imported = image::load_from_memory_with_format(
+                document.page_image_data(0, 0).unwrap(),
+                image::ImageFormat::Png,
+            )
+            .unwrap()
+            .to_rgba8();
+            for (index, (pixel, expected)) in imported.pixels().zip(expected).enumerate() {
+                assert_eq!(pixel[3], [0, 128, 255, 64][index]);
+                for channel in 0..3 {
+                    assert!(
+                        pixel[channel].abs_diff(expected[channel]) <= 2,
+                        "pixel {index}, channel {channel}: {pixel:?}"
+                    );
+                }
+            }
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn imports_jpeg_image_with_flate_soft_mask() {
+        let parent = [255, 0, 0].repeat(4);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&parent, 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&parent, None, false)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        image.set_content(jpeg);
+        let mask_samples = [0, 128, 255, 255];
+        let mut compressor =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressor, &mask_samples).unwrap();
+        let mut mask_dict = lopdf::Dictionary::new();
+        mask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        mask_dict.set("Width", 2);
+        mask_dict.set("Height", 2);
+        mask_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        mask_dict.set("BitsPerComponent", 8);
+        mask_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let mask_id = pdf.add_object(lopdf::Stream::new(mask_dict, compressor.finish().unwrap()));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("SMask", Object::Reference(mask_id));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 128);
+        assert_eq!(image.pixel(0, 1).unwrap().alpha(), 255);
+        assert!(image.pixel(0, 1).unwrap().red() > 220);
+    }
+
+    #[test]
+    fn imports_pdf_color_key_mask_before_decode() {
+        let raw = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0];
+        for compressed in [false, true] {
+            let mut pdf = PdfDocument::load_mem(&image_pdf(&raw, None, false)).unwrap();
+            let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+            image.dict.set(
+                "Mask",
+                Object::Array(vec![
+                    255.into(),
+                    255.into(),
+                    0.into(),
+                    0.into(),
+                    0.into(),
+                    0.into(),
+                ]),
+            );
+            if compressed {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                std::io::Write::write_all(&mut encoder, &raw).unwrap();
+                image.set_content(encoder.finish().unwrap());
+                image
+                    .dict
+                    .set("Filter", Object::Name(b"FlateDecode".to_vec()));
+            }
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let png = document.page_image_data(0, 0).unwrap();
+            let image = resvg::tiny_skia::Pixmap::decode_png(png).unwrap();
+            assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+            assert_eq!(image.pixel(1, 0).unwrap().alpha(), 255);
+            assert_eq!(image.pixel(0, 1).unwrap().alpha(), 255);
+            let rendered =
+                resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+            assert!(rendered.pixel(2, 15).unwrap().green() > 240);
+            assert!(document.validate_references().unwrap().is_empty());
+            assert!(OfdDocument::from_bytes(&document.to_bytes().unwrap()).is_ok());
+        }
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 2);
+        dict.set("Height", 1);
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        dict.set("BitsPerComponent", 2);
+        dict.set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        dict.set("Mask", Object::Array(vec![0.into(), 0.into()]));
+        let (png, format) = image_bytes(&lopdf::Stream::new(dict, vec![0b0011_0000])).unwrap();
+        assert_eq!(format, "png");
+        let image = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 255);
+        assert_eq!(image.pixel(1, 0).unwrap().red(), 0);
+    }
+
+    #[test]
+    fn imports_indirect_pdf_image_mask_and_decode_arrays() {
+        let samples = [0, 85, 170, 255];
+        let mask = Object::Array(vec![0.into(), 0.into()]);
+        let decode = Object::Array(vec![1.into(), 0.into()]);
+        let mut results = Vec::new();
+        for mode in 0..3 {
+            let mut pdf = PdfDocument::load_mem(&image_pdf(&samples, None, true)).unwrap();
+            let (mask, decode) = if mode == 2 {
+                let zero = Object::Reference(pdf.add_object(Object::Integer(0)));
+                let one = Object::Reference(pdf.add_object(Object::Integer(1)));
+                (
+                    Object::Reference(pdf.add_object(Object::Array(vec![zero.clone(), zero]))),
+                    Object::Reference(pdf.add_object(Object::Array(vec![one, 0.into()]))),
+                )
+            } else if mode == 1 {
+                (
+                    Object::Reference(pdf.add_object(mask.clone())),
+                    Object::Reference(pdf.add_object(decode.clone())),
+                )
+            } else {
+                (mask.clone(), decode.clone())
+            };
+            let dimensions = if mode == 2 {
+                Some((
+                    pdf.add_object(Object::Integer(2)),
+                    pdf.add_object(Object::Integer(8)),
+                ))
+            } else {
+                None
+            };
+            let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+            image.dict.set("Mask", mask);
+            image.dict.set("Decode", decode);
+            if let Some((dimension, bits)) = dimensions {
+                image.dict.set("Width", Object::Reference(dimension));
+                image.dict.set("Height", Object::Reference(dimension));
+                image.dict.set("BitsPerComponent", Object::Reference(bits));
+            }
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert!(document.validate_references().unwrap().is_empty());
+            let png = document.page_image_data(0, 0).unwrap().to_vec();
+            let pixels = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            assert_eq!(pixels.pixel(0, 0).unwrap().alpha(), 0);
+            assert_eq!(pixels.pixel(1, 0).unwrap().red(), 170);
+            assert_eq!(pixels.pixel(0, 1).unwrap().red(), 85);
+            assert_eq!(pixels.pixel(1, 1).unwrap().red(), 0);
+            results.push(png);
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[2]);
+
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&samples, None, true)).unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Width", Object::Reference((999, 0)));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("invalid PDF image Width")
+        ));
+    }
+
+    #[test]
+    fn imports_jpeg_color_key_mask_and_rejects_invalid_ranges() {
+        let rgb = [255, 0, 0].repeat(4);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&rgb, 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&rgb, None, false)).unwrap();
+        let image = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        image
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        image.dict.set(
+            "Mask",
+            Object::Array(vec![
+                240.into(),
+                255.into(),
+                0.into(),
+                20.into(),
+                0.into(),
+                20.into(),
+            ]),
+        );
+        image.set_content(jpeg);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Width", 1);
+        dict.set("Height", 1);
+        dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+        dict.set("BitsPerComponent", 8);
+        for ranges in [
+            vec![],
+            vec![2.into(), 1.into()],
+            vec![0.into(), 256.into()],
+            vec![Object::Real(0.0), 1.into()],
+        ] {
+            dict.set("Mask", Object::Array(ranges));
+            assert!(image_bytes(&lopdf::Stream::new(dict.clone(), vec![0])).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_explicit_pdf_image_mask_and_decode_polarity() {
+        let rgb = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&rgb, None, false)).unwrap();
+        let mut mask_dict = lopdf::Dictionary::new();
+        mask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        mask_dict.set("Width", 2);
+        mask_dict.set("Height", 2);
+        mask_dict.set("ImageMask", true);
+        mask_dict.set("BitsPerComponent", 1);
+        let mask_id = pdf.add_object(lopdf::Stream::new(
+            mask_dict.clone(),
+            vec![0b0100_0000, 0b1000_0000],
+        ));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Mask", Object::Reference(mask_id));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 255);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(0, 1).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 1).unwrap().alpha(), 255);
+        let page =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        assert!(page.pixel(3, 14).unwrap().red() > 230);
+        assert!(page.pixel(10, 14).unwrap().green() > 230);
+        assert!(document.validate_references().unwrap().is_empty());
+        assert!(OfdDocument::from_bytes(&document.to_bytes().unwrap()).is_ok());
+
+        let mut indirect = PdfDocument::load_mem(&bytes).unwrap();
+        let dimension = indirect.add_object(Object::Integer(2));
+        let bit = indirect.add_object(Object::Integer(1));
+        let zero = indirect.add_object(Object::Integer(0));
+        let decode = indirect.add_object(Object::Array(vec![Object::Reference(zero), 1.into()]));
+        let stencil = indirect
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stencil.dict.set("Width", Object::Reference(dimension));
+        stencil.dict.set("Height", Object::Reference(dimension));
+        stencil.dict.set("BitsPerComponent", Object::Reference(bit));
+        stencil.dict.set("Decode", Object::Reference(decode));
+        let mut indirect_bytes = Vec::new();
+        indirect.save_to(&mut indirect_bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&indirect_bytes).unwrap();
+        assert_eq!(
+            imported.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+
+        let mut inverted = PdfDocument::load_mem(&bytes).unwrap();
+        let mask = inverted
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        mask.dict.set(
+            "Decode",
+            Object::Array(vec![Object::Real(1.0), Object::Real(0.0)]),
+        );
+        let mut compressed =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut compressed, &mask.content).unwrap();
+        mask.set_content(compressed.finish().unwrap());
+        mask.dict
+            .set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let mut inverted_bytes = Vec::new();
+        inverted.save_to(&mut inverted_bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&inverted_bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 255);
+    }
+
+    #[test]
+    fn explicit_pdf_image_mask_resamples_and_rejects_invalid_properties() {
+        let rgb = [255, 0, 0].repeat(4);
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&rgb, None, false)).unwrap();
+        let mut mask_dict = lopdf::Dictionary::new();
+        mask_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        mask_dict.set("Width", 1);
+        mask_dict.set("Height", 1);
+        mask_dict.set("ImageMask", true);
+        mask_dict.set("BitsPerComponent", 1);
+        let mask_id = pdf.add_object(lopdf::Stream::new(mask_dict, vec![0]));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Mask", Object::Reference(mask_id));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert!((0..2).all(|x| (0..2).all(|y| image.pixel(x, y).unwrap().alpha() == 255)));
+
+        let mut malformed = PdfDocument::load_mem(&bytes).unwrap();
+        malformed
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("ImageMask", false);
+        let mut invalid = Vec::new();
+        malformed.save_to(&mut invalid).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&invalid).is_err());
+
+        let mut malformed = PdfDocument::load_mem(&bytes).unwrap();
+        malformed
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Decode", Object::Array(vec![0.into(), 0.into()]));
+        let mut invalid = Vec::new();
+        malformed.save_to(&mut invalid).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&invalid).is_err());
+
+        let mut malformed = PdfDocument::load_mem(&bytes).unwrap();
+        malformed
+            .get_object_mut(mask_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(vec![]);
+        let mut invalid = Vec::new();
+        malformed.save_to(&mut invalid).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&invalid).is_err());
+    }
+
+    #[test]
+    fn imports_painted_pdf_image_mask_using_nonstroking_color() {
+        let mut pdf =
+            PdfDocument::load_mem(&image_pdf(&[255, 0, 0].repeat(4), None, false)).unwrap();
+        let stencil = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stencil.dict.remove(b"ColorSpace");
+        stencil.dict.set("ImageMask", true);
+        stencil.dict.set("BitsPerComponent", 1);
+        stencil.set_content(vec![0b0100_0000, 0b1000_0000]);
+        pdf.get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"q 0 1 0 rg 36 0 0 36 0 0 cm /Im1 Do Q".to_vec());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 255);
+        assert_eq!(image.pixel(0, 0).unwrap().green(), 255);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(0, 1).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 1).unwrap().alpha(), 255);
+        let page =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        assert!(page.pixel(3, 14).unwrap().green() > 240);
+        assert!(page.pixel(10, 14).unwrap().red() > 240);
+        assert!(document.validate_references().unwrap().is_empty());
+        assert!(OfdDocument::from_bytes(&document.to_bytes().unwrap()).is_ok());
+
+        let mut indirect = PdfDocument::load_mem(&bytes).unwrap();
+        let flag = indirect.add_object(Object::Boolean(true));
+        indirect
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("ImageMask", Object::Reference(flag));
+        let mut indirect_bytes = Vec::new();
+        indirect.save_to(&mut indirect_bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&indirect_bytes).unwrap();
+        assert_eq!(
+            imported.page_image_data(0, 0).unwrap(),
+            document.page_image_data(0, 0).unwrap()
+        );
+
+        let mut inverted = PdfDocument::load_mem(&bytes).unwrap();
+        let stencil = inverted
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stencil
+            .dict
+            .set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &stencil.content).unwrap();
+        stencil.set_content(encoder.finish().unwrap());
+        stencil
+            .dict
+            .set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        let mut inverted_bytes = Vec::new();
+        inverted.save_to(&mut inverted_bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&inverted_bytes).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(document.page_image_data(0, 0).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0).unwrap().alpha(), 0);
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 255);
+    }
+
+    #[test]
+    fn rejects_pdf_image_formats_that_cannot_be_preserved() {
+        let mut base = lopdf::Dictionary::new();
+        base.set("Width", 2);
+        base.set("Height", 2);
+        base.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+        base.set("BitsPerComponent", 8);
+        let pixels = vec![255; 12];
+        for (key, value) in [
+            ("SMask", Object::Reference((7, 0))),
+            ("Mask", Object::Array(vec![])),
+            ("Decode", Object::Array(vec![])),
+            ("DecodeParms", Object::Dictionary(lopdf::Dictionary::new())),
+            ("ImageMask", Object::Boolean(true)),
+            ("BitsPerComponent", Object::Integer(16)),
+            ("ColorSpace", Object::Name(b"DeviceCMYK".to_vec())),
+            ("Filter", Object::Name(b"JPXDecode".to_vec())),
+            ("Width", Object::Integer(0)),
+        ] {
+            let mut dict = base.clone();
+            dict.set(key, value);
+            assert!(
+                image_bytes(&lopdf::Stream::new(dict, pixels.clone())).is_err(),
+                "{key}"
+            );
+        }
+        let mut jpeg = base.clone();
+        jpeg.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        assert!(image_bytes(&lopdf::Stream::new(jpeg, pixels.clone())).is_err());
+        let mut flate = base;
+        flate.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        assert!(image_bytes(&lopdf::Stream::new(flate, pixels)).is_err());
+        assert!(OfdDocument::from_pdf_bytes(&vector_pdf(b"/Missing Do")).is_err());
+    }
+
+    #[test]
+    fn imports_positioned_type1_text_without_losing_unicode() {
+        let bytes = text_pdf(b"BT /F1 12 Tf 1 0 0 1 10 20 Tm (Hello) Tj ET", b"Helvetica");
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["Hello"]);
+        let object = &document.page_text_objects(0).unwrap()[0];
+        let box_ = object.boundary.unwrap();
+        assert!((box_[0] - 10.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((box_[1] - 40.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.page_svg(0).unwrap().contains("Hello"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["Hello"]);
+        let accented = text_pdf(b"BT /F1 12 Tf 10 20 Td (Caf\xe9) Tj ET", b"Helvetica");
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&accented)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["Café"]
+        );
+    }
+
+    #[test]
+    fn imports_type1_tounicode_text_with_original_glyph_spacing() {
+        let bytes = include_bytes!("../tests/fixtures/type1-tounicode.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let objects = document.page_text_objects(0).unwrap();
+        assert_eq!(objects[0].codes[0].text, "中文");
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 6.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["中文"]);
+
+        let original = PdfDocument::load_mem(bytes).unwrap();
+        let cmap = original.get_object((6, 0)).unwrap().as_stream().unwrap();
+        let source = String::from_utf8(cmap.content.clone()).unwrap();
+        for (from, to) in [
+            ("<42> <6587>", "<43> <6587>"),
+            ("<41> <4E2D>", "<41> <D800>"),
+            ("<41> <4E2D>", "<41> <4E2D6587>"),
+        ] {
+            let mut bad = original.clone();
+            let stream = bad.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+            stream.content = source.replace(from, to).into_bytes();
+            stream.dict.set("Length", stream.content.len() as i64);
+            let mut altered = Vec::new();
+            bad.save_to(&mut altered).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_subset_type1_with_encoding_differences_and_tounicode() {
+        let bytes = include_bytes!("../tests/fixtures/type1-subset-tounicode.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 6.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.validate_references().unwrap().is_empty());
+        assert_eq!(
+            OfdDocument::from_bytes(&document.to_bytes().unwrap())
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["中文"]
+        );
+
+        let mut without_map = PdfDocument::load_mem(bytes).unwrap();
+        without_map
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"ToUnicode");
+        let mut altered = Vec::new();
+        without_map.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn imports_rotated_text_and_preserves_its_baseline_and_advance() {
+        let bytes = include_bytes!("../tests/fixtures/rotated-tounicode.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 6.0 * MM_PER_PT).abs() < 1e-6);
+
+        let pages = document.pages().unwrap();
+        let source = document.entry(&pages[0].path).unwrap().unwrap();
+        let parsed = parse_xml(&pages[0].path, source).unwrap();
+        let object = parsed
+            .descendants()
+            .find(|node| is_element(*node, "TextObject"))
+            .unwrap();
+        let boundary = parse_box(object.attribute("Boundary").unwrap()).unwrap();
+        let ctm = crate::parse_ctm(object.attribute("CTM").unwrap()).unwrap();
+        let size = object.attribute("Size").unwrap().parse::<f64>().unwrap();
+        assert!(ctm[0].abs() < 1e-9 && (ctm[1] + 1.0).abs() < 1e-9);
+        assert!((ctm[2] - 1.0).abs() < 1e-9 && ctm[3].abs() < 1e-9);
+        let baseline_x = boundary[0] + ctm[4] + ctm[2] * size;
+        let baseline_y = boundary[1] + ctm[5] + ctm[3] * size;
+        assert!((baseline_x - 30.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((baseline_y - 52.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.page_svg(0).unwrap().contains("matrix(0 -1 1 0"));
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(png.pixels().any(|pixel| pixel.0 != [255, 255, 255]));
+        let pdf = PdfDocument::load_mem(&document.to_pdf().unwrap()).unwrap();
+        assert_eq!(pdf.get_pages().len(), 1);
+        assert!(document.validate_references().unwrap().is_empty());
+        assert_eq!(
+            OfdDocument::from_bytes(&document.to_bytes().unwrap())
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["中文"]
+        );
+
+        let graphics_rotation = text_pdf_with_widths(
+            b"q 0 1 -1 0 72 0 cm BT /F1 12 Tf 10 20 Td (AB) Tj ET Q",
+            b"Helvetica",
+            Some((b'A', &[600.0, 500.0])),
+        );
+        let graphics_document = OfdDocument::from_pdf_bytes(&graphics_rotation).unwrap();
+        assert_eq!(graphics_document.page_text(0).unwrap(), ["AB"]);
+        assert!(graphics_document
+            .page_svg(0)
+            .unwrap()
+            .contains("matrix(0 -1 1 0"));
+
+        let consecutive = text_pdf_with_widths(
+            b"BT /F1 12 Tf 0 1 -1 0 30 20 Tm (A) Tj (B) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0, 500.0])),
+        );
+        let objects = OfdDocument::from_pdf_bytes(&consecutive)
+            .unwrap()
+            .page_text_objects(0)
+            .unwrap();
+        assert_eq!(objects[0].codes[0].text, "A");
+        assert_eq!(objects[1].codes[0].text, "B");
+        assert!(
+            (objects[1].boundary.unwrap()[1] - objects[0].boundary.unwrap()[1] + 7.2 * MM_PER_PT)
+                .abs()
+                < 1e-6
+        );
+
+        for stream in [
+            b"BT /F1 12 Tf 2 0 0.5 1 30 20 Tm (AB) Tj ET".as_slice(),
+            b"q 2 0 0.5 1 0 0 cm BT /F1 12 Tf 10 20 Td (AB) Tj ET Q".as_slice(),
+        ] {
+            let pdf = text_pdf_with_widths(stream, b"Helvetica", Some((b'A', &[600.0, 500.0])));
+            let document = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), ["AB"]);
+            let pages = document.pages().unwrap();
+            let source = document.entry(&pages[0].path).unwrap().unwrap();
+            let parsed = parse_xml(&pages[0].path, source).unwrap();
+            let object = parsed
+                .descendants()
+                .find(|node| is_element(*node, "TextObject"))
+                .unwrap();
+            let ctm = crate::parse_ctm(object.attribute("CTM").unwrap()).unwrap();
+            assert!((ctm[0] - 1.0).abs() < 1e-9);
+            assert!((ctm[2] + 0.25).abs() < 1e-9);
+            assert!((ctm[3] - 0.5).abs() < 1e-9);
+            let boundary = parse_box(object.attribute("Boundary").unwrap()).unwrap();
+            let size = object.attribute("Size").unwrap().parse::<f64>().unwrap();
+            let baseline_x = boundary[0] + ctm[4] + ctm[2] * size;
+            let baseline_y = boundary[1] + ctm[5] + ctm[3] * size;
+            assert!((baseline_x - 30.0 * MM_PER_PT).abs() < 1e-6);
+            assert!((baseline_y - 52.0 * MM_PER_PT).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn composes_page_rotation_with_existing_text_ctm() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/rotated-tounicode.pdf"))
+                .unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 90);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let ctm = document.page_objects(0).unwrap()[0].ctm.unwrap();
+        for (actual, expected) in ctm[..4].iter().zip([1.0, 0.0, 0.0, 1.0]) {
+            assert!((actual - expected).abs() < 1e-9, "{ctm:?}");
+        }
+        assert!(document.validate_references().unwrap().is_empty());
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(png.pixels().any(|pixel| pixel.0 != [255, 255, 255]));
+    }
+
+    #[test]
+    fn imports_rgb_page_transparency_group_and_rejects_other_group_spaces() {
+        let mut pdf = PdfDocument::load_mem(&vector_pdf(b"1 0 0 rg 10 10 20 20 re f")).unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        let group = dictionary! {
+            "Type" => Object::Name(b"Group".to_vec()),
+            "S" => Object::Name(b"Transparency".to_vec()),
+            "CS" => Object::Name(b"DeviceRGB".to_vec()),
+        };
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Group", Object::Dictionary(group));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_paths(0).unwrap().len(), 1);
+        assert!(document.page_svg(0).unwrap().contains("#ff0000"));
+
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Group")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"CS");
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_png(0, 25.4)
+                .unwrap(),
+            document.page_png(0, 25.4).unwrap()
+        );
+
+        let rgb_id = pdf.add_object(Object::Name(b"DeviceRGB".to_vec()));
+        let false_id = pdf.add_object(Object::Boolean(false));
+        let group = pdf
+            .get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Group")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        group.set("CS", Object::Reference(rgb_id));
+        group.set("I", Object::Reference(false_id));
+        group.set("K", Object::Reference(false_id));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_png(0, 25.4)
+                .unwrap(),
+            document.page_png(0, 25.4).unwrap()
+        );
+
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Group")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("CS", Object::Name(b"DeviceCMYK".to_vec()));
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("page transparency group is unsupported")
+        ));
+    }
+
+    #[test]
+    fn imports_isolated_knockout_page_group_with_opaque_nested_forms() {
+        let source = form_pdf(b"/Fm2 Do", Rect::new(0.0, 0.0, 20.0, 20.0), true);
+        let baseline = OfdDocument::from_pdf_bytes(&source).unwrap();
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let page_id = *pdf.get_pages().values().next().unwrap();
+        let true_id = pdf.add_object(Object::Boolean(true));
+        let false_id = pdf.add_object(Object::Boolean(false));
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Group",
+                lopdf::dictionary! {
+                    "Type" => Object::Name(b"Group".to_vec()),
+                    "S" => Object::Name(b"Transparency".to_vec()),
+                    "CS" => Object::Name(b"DeviceRGB".to_vec()),
+                    "I" => Object::Reference(true_id),
+                    "K" => Object::Reference(true_id),
+                },
+            );
+        let mut bytes = Vec::new();
+        for (isolated, knockout) in [(true, false), (false, true), (true, true)] {
+            let group = pdf
+                .get_object_mut(page_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .get_mut(b"Group")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            group.set(
+                "I",
+                Object::Reference(if isolated { true_id } else { false_id }),
+            );
+            group.set(
+                "K",
+                Object::Reference(if knockout { true_id } else { false_id }),
+            );
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(
+                imported.page_paths(0).unwrap(),
+                baseline.page_paths(0).unwrap()
+            );
+            assert_eq!(
+                imported.page_png(0, 25.4).unwrap(),
+                baseline.page_png(0, 25.4).unwrap()
+            );
+            assert!(imported.validate_references().unwrap().is_empty());
+        }
+
+        let nested = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        nested.content = b"/Translucent gs 1 0 0 rg 0 0 10 10 re f".to_vec();
+        nested.dict.set("Length", nested.content.len() as i64);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("requires opaque content")
+        ));
+    }
+
+    #[test]
+    fn imports_and_exports_document_info() {
+        let bytes = include_bytes!("../tests/fixtures/metadata-tounicode.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let info = &document.document_info().unwrap()[0];
+        assert_eq!(info.title.as_deref(), Some("示例文档"));
+        assert_eq!(info.author.as_deref(), Some("Alice"));
+        assert_eq!(info.subject.as_deref(), Some("主题"));
+        assert_eq!(info.creator.as_deref(), Some("ofdrw test"));
+        assert_eq!(info.keywords, ["测试, Rust"]);
+        assert_eq!(info.creation_date.as_deref(), Some("2024-02-29"));
+        assert_eq!(info.mod_date.as_deref(), Some("2024-03-01"));
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.document_info().unwrap()[0], *info);
+
+        let output_pdf = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let (_, output_info) = output_pdf
+            .dereference(output_pdf.trailer.get(b"Info").unwrap())
+            .unwrap();
+        let output_info = output_info.as_dict().unwrap();
+        for (key, expected) in [
+            (b"Title".as_slice(), "示例文档"),
+            (b"Author".as_slice(), "Alice"),
+            (b"Subject".as_slice(), "主题"),
+            (b"Creator".as_slice(), "ofdrw test"),
+            (b"Keywords".as_slice(), "测试, Rust"),
+        ] {
+            assert_eq!(
+                lopdf::decode_text_string(output_info.get(key).unwrap()).unwrap(),
+                expected
+            );
+        }
+        let dates = [
+            (b"CreationDate".as_slice(), b"D:20240229".as_slice()),
+            (b"ModDate".as_slice(), b"D:20240301".as_slice()),
+        ];
+        for (key, prefix) in dates {
+            assert!(output_info
+                .get(key)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .starts_with(prefix));
+        }
+
+        let mut invalid = PdfDocument::load_mem(bytes).unwrap();
+        invalid
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Title", 123);
+        let mut altered = Vec::new();
+        invalid.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut invalid_date = PdfDocument::load_mem(bytes).unwrap();
+        invalid_date
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("CreationDate", lopdf::text_string("D:20240230"));
+        let mut altered = Vec::new();
+        invalid_date.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        for invalid_suffix in ["D:20240229123059+24'00'", "D:20240229123059garbage"] {
+            invalid_date
+                .get_object_mut((7, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("CreationDate", lopdf::text_string(invalid_suffix));
+            altered.clear();
+            invalid_date.save_to(&mut altered).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&altered)
+                .unwrap_err()
+                .to_string()
+                .contains("PDF Info date is invalid"));
+        }
+
+        let mut truncated_text = PdfDocument::load_mem(bytes).unwrap();
+        truncated_text
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Title",
+                Object::String(vec![0xfe, 0xff, 0x00], lopdf::StringFormat::Literal),
+            );
+        let mut altered = Vec::new();
+        truncated_text.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn pdf_info_date_preserves_only_complete_valid_calendar_days() {
+        assert_eq!(pdf_info_date("D:2024").unwrap(), None);
+        assert_eq!(pdf_info_date("D:202402").unwrap(), None);
+        assert_eq!(
+            pdf_info_date("D:20240229123059-08'30'").unwrap(),
+            Some("2024-02-29".into())
+        );
+        for invalid in [
+            "D:2024junk",
+            "D:2024022912Z",
+            "D:20240229246000",
+            "D:20240229123059+25'00'",
+        ] {
+            assert!(pdf_info_date(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn imports_nested_pdf_outlines_and_rejects_cycles() {
+        let bytes = include_bytes!("../tests/fixtures/outline-tounicode.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        let outlines = document.outlines().unwrap();
+        assert_eq!(outlines.len(), 3);
+        assert_eq!(outlines[0].title, "章节一");
+        assert_eq!(outlines[0].parent_index, None);
+        assert!(!outlines[0].expanded);
+        assert_eq!(outlines[0].destination.as_ref().unwrap().kind, "Fit");
+        assert_eq!(outlines[1].title, "Section 1.1");
+        assert_eq!(outlines[1].parent_index, Some(0));
+        assert_eq!(outlines[1].destination.as_ref().unwrap().kind, "XYZ");
+        assert_eq!(outlines[2].title, "Chapter 2");
+        assert_eq!(outlines[2].parent_index, None);
+        assert_eq!(outlines[2].destination.as_ref().unwrap().kind, "Fit");
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.outlines().unwrap(), outlines);
+        let pdf_roundtrip = PdfDocument::load_mem(&reopened.to_pdf().unwrap()).unwrap();
+        let catalog = pdf_roundtrip.catalog().unwrap();
+        let (_, root) = pdf_roundtrip
+            .dereference(catalog.get(b"Outlines").unwrap())
+            .unwrap();
+        let root = root.as_dict().unwrap();
+        assert_eq!(root.get(b"Count").unwrap().as_i64().unwrap(), 2);
+        let first = root.get(b"First").unwrap().as_reference().unwrap();
+        let first = pdf_roundtrip.get_object(first).unwrap().as_dict().unwrap();
+        assert_eq!(
+            lopdf::decode_text_string(first.get(b"Title").unwrap()).unwrap(),
+            "章节一"
+        );
+        assert_eq!(first.get(b"Count").unwrap().as_i64().unwrap(), -1);
+        assert!(first.get(b"Dest").unwrap().as_array().is_ok());
+        let child = first.get(b"First").unwrap().as_reference().unwrap();
+        let child = pdf_roundtrip.get_object(child).unwrap().as_dict().unwrap();
+        assert_eq!(
+            lopdf::decode_text_string(child.get(b"Title").unwrap()).unwrap(),
+            "Section 1.1"
+        );
+        let second = first.get(b"Next").unwrap().as_reference().unwrap();
+        let second = pdf_roundtrip.get_object(second).unwrap().as_dict().unwrap();
+        assert_eq!(
+            lopdf::decode_text_string(second.get(b"Title").unwrap()).unwrap(),
+            "Chapter 2"
+        );
+        let full_roundtrip = OfdDocument::from_pdf_bytes(&reopened.to_pdf().unwrap()).unwrap();
+        let roundtrip_outlines = full_roundtrip.outlines().unwrap();
+        assert_eq!(roundtrip_outlines.len(), outlines.len());
+        for (actual, expected) in roundtrip_outlines.iter().zip(&outlines) {
+            assert_eq!(actual.title, expected.title);
+            assert_eq!(actual.parent_index, expected.parent_index);
+            assert_eq!(actual.expanded, expected.expanded);
+            let actual_destination = actual.destination.as_ref().unwrap();
+            let expected_destination = expected.destination.as_ref().unwrap();
+            assert_eq!(actual_destination.kind, expected_destination.kind);
+            for (actual, expected) in [
+                (actual_destination.left, expected_destination.left),
+                (actual_destination.top, expected_destination.top),
+            ] {
+                if let (Some(actual), Some(expected)) = (actual, expected) {
+                    assert!((actual - expected).abs() < 1e-6);
+                } else {
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+
+        let mut cycle = PdfDocument::load_mem(bytes).unwrap();
+        cycle
+            .get_object_mut((10, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Next", Object::Reference((8, 0)));
+        let mut altered = Vec::new();
+        cycle.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut wrong_parent = PdfDocument::load_mem(bytes).unwrap();
+        wrong_parent
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Parent", Object::Reference((7, 0)));
+        let mut altered = Vec::new();
+        wrong_parent.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut action_pdf = PdfDocument::load_mem(bytes).unwrap();
+        let item = action_pdf
+            .get_object_mut((8, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        let destination = item.remove(b"Dest").unwrap();
+        item.set("A", lopdf::dictionary! {"S" => "GoTo", "D" => destination});
+        let mut altered = Vec::new();
+        action_pdf.save_to(&mut altered).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&altered).unwrap();
+        assert_eq!(
+            imported.outlines().unwrap()[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .kind,
+            "Fit"
+        );
+
+        let mut unsupported_action = action_pdf.clone();
+        unsupported_action
+            .get_object_mut((8, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"A")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("S", "URI");
+        let mut altered = Vec::new();
+        unsupported_action.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut missing_destination = action_pdf.clone();
+        missing_destination
+            .get_object_mut((8, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"A")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"D");
+        let mut altered = Vec::new();
+        missing_destination.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut invalid_count = PdfDocument::load_mem(bytes).unwrap();
+        invalid_count
+            .get_object_mut((8, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Count", "invalid");
+        let mut altered = Vec::new();
+        invalid_count.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut invalid_root = PdfDocument::load_mem(bytes).unwrap();
+        let catalog_id = invalid_root
+            .trailer
+            .get(b"Root")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        invalid_root
+            .get_object_mut(catalog_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Outlines", 123);
+        let mut altered = Vec::new();
+        invalid_root.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+
+        let mut invalid_first = PdfDocument::load_mem(bytes).unwrap();
+        let root_id = invalid_first
+            .catalog()
+            .unwrap()
+            .get(b"Outlines")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        invalid_first
+            .get_object_mut(root_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("First", 123);
+        let mut altered = Vec::new();
+        invalid_first.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn imports_pdf_image_intent_with_icc_color() {
+        let profile_bytes = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let source_color = [77_u8, 51, 26, 51];
+        let mut source =
+            PdfDocument::load_mem(&image_pdf(&source_color.repeat(4), None, false)).unwrap();
+        let profile_id = source.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile_bytes.to_vec(),
+        )));
+        source
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference(profile_id),
+                ]),
+            );
+        let profile = ColorProfile::new_from_slice(profile_bytes).unwrap();
+        for (name, intent) in [
+            ("Perceptual", RenderingIntent::Perceptual),
+            (
+                "RelativeColorimetric",
+                RenderingIntent::RelativeColorimetric,
+            ),
+            ("Saturation", RenderingIntent::Saturation),
+            (
+                "AbsoluteColorimetric",
+                RenderingIntent::AbsoluteColorimetric,
+            ),
+            ("VendorIntent", RenderingIntent::RelativeColorimetric),
+        ] {
+            let mut pdf = source.clone();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("Intent", Object::Name(name.as_bytes().to_vec()));
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            let converter = profile
+                .create_transform_8bit(
+                    Layout::Rgba,
+                    &ColorProfile::new_srgb(),
+                    Layout::Rgb,
+                    TransformOptions {
+                        rendering_intent: intent,
+                        ..TransformOptions::default()
+                    },
+                )
+                .unwrap();
+            let mut expected = [0_u8; 3];
+            converter.transform(&source_color, &mut expected).unwrap();
+            assert_eq!(image.get_pixel(0, 0).0, expected, "{name}");
+        }
+
+        let mut invalid = source;
+        invalid
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Intent", Object::Integer(1));
+        let mut bytes = Vec::new();
+        invalid.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(OfdError::Invalid(message)) if message.contains("PDF image Intent must be a name")
+        ));
+    }
+
+    #[test]
+    fn imports_icc_based_pdf_vector_color() {
+        let profile = include_bytes!("../tests/fixtures/gamma18-rgb.icc");
+        let mut pdf =
+            PdfDocument::load_mem(&vector_pdf(b"/CS1 cs 0.5 0.5 0.5 scn 20 30 20 20 re f"))
+                .unwrap();
+        let profile_id = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 3},
+            profile.to_vec(),
+        )));
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Resources",
+                Object::Dictionary(dictionary! {
+                    "ColorSpace" => Object::Dictionary(dictionary! {
+                        "CS1" => Object::Array(vec![
+                            Object::Name(b"ICCBased".to_vec()),
+                            Object::Reference(profile_id),
+                        ])
+                    })
+                }),
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let png = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let painted = png
+            .pixels()
+            .find(|pixel| pixel.0 != [255, 255, 255])
+            .unwrap()
+            .0;
+        assert_ne!(painted, [0, 0, 0]);
+        assert!(document.validate_references().unwrap().is_empty());
+
+        let mut raw_pdf = PdfDocument::load_mem(&image_pdf(&[128; 12], None, false)).unwrap();
+        let image_profile = raw_pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 3},
+            profile.to_vec(),
+        )));
+        raw_pdf
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference(image_profile),
+                ]),
+            );
+        let mut image_bytes = Vec::new();
+        raw_pdf.save_to(&mut image_bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&image_bytes).unwrap();
+        let image = image::load_from_memory(imported.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let profile = ColorProfile::new_from_slice(profile).unwrap();
+        let transform = profile
+            .create_transform_8bit(
+                Layout::Rgb,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions::default(),
+            )
+            .unwrap();
+        let mut expected = [0_u8; 3];
+        transform.transform(&[128_u8; 3], &mut expected).unwrap();
+        assert_eq!(image.get_pixel(0, 0).0, expected);
+
+        for (gray, profile_bytes, channels) in [
+            (
+                true,
+                include_bytes!("../tests/fixtures/gamma18-gray.icc").as_slice(),
+                1_usize,
+            ),
+            (
+                false,
+                include_bytes!("../tests/fixtures/gamma18-rgb.icc").as_slice(),
+                3_usize,
+            ),
+        ] {
+            let source = vec![128_u8; 4 * channels];
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+                .encode(
+                    &source,
+                    2,
+                    2,
+                    if gray {
+                        image::ExtendedColorType::L8
+                    } else {
+                        image::ExtendedColorType::Rgb8
+                    },
+                )
+                .unwrap();
+            let decoded = image::load_from_memory(&jpeg).unwrap();
+            let sample = if gray {
+                decoded.to_luma8().get_pixel(0, 0).0.to_vec()
+            } else {
+                decoded.to_rgb8().get_pixel(0, 0).0.to_vec()
+            };
+            let mut jpeg_pdf = PdfDocument::load_mem(&image_pdf(&source, None, gray)).unwrap();
+            let profile_id = jpeg_pdf.add_object(Object::Stream(lopdf::Stream::new(
+                dictionary! {"N" => channels as i64},
+                profile_bytes.to_vec(),
+            )));
+            let jpeg_image = jpeg_pdf
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap();
+            jpeg_image.content = jpeg;
+            jpeg_image
+                .dict
+                .set("Length", jpeg_image.content.len() as i64);
+            jpeg_image
+                .dict
+                .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+            jpeg_image.dict.set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference(profile_id),
+                ]),
+            );
+            jpeg_image.dict.set(
+                "Decode",
+                Object::Array(
+                    (0..channels)
+                        .flat_map(|_| [Object::Integer(1), Object::Integer(0)])
+                        .collect(),
+                ),
+            );
+            jpeg_image.dict.set(
+                "Mask",
+                Object::Array(
+                    (0..channels)
+                        .flat_map(|_| [Object::Integer(0), Object::Integer(255)])
+                        .collect(),
+                ),
+            );
+            let mut encoded = Vec::new();
+            jpeg_pdf.save_to(&mut encoded).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&encoded).unwrap();
+            let pixel = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgba8()
+                .get_pixel(0, 0)
+                .0;
+            let source_profile = ColorProfile::new_from_slice(profile_bytes).unwrap();
+            let converter = source_profile
+                .create_transform_8bit(
+                    if gray { Layout::Gray } else { Layout::Rgb },
+                    &ColorProfile::new_srgb(),
+                    Layout::Rgb,
+                    TransformOptions::default(),
+                )
+                .unwrap();
+            let mut expected = [0_u8; 3];
+            converter
+                .transform(
+                    &sample.iter().map(|value| 255 - value).collect::<Vec<_>>(),
+                    &mut expected,
+                )
+                .unwrap();
+            assert_eq!(pixel, [expected[0], expected[1], expected[2], 0]);
+            let jpeg_image = jpeg_pdf
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap();
+            jpeg_image.dict.remove(b"Mask");
+            jpeg_image.dict.remove(b"Decode");
+            let mut bytes = Vec::new();
+            jpeg_pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let pixel = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgb8()
+                .get_pixel(0, 0)
+                .0;
+            converter.transform(&sample, &mut expected).unwrap();
+            assert_eq!(pixel, expected);
+            if gray {
+                let mut wrong_jpeg = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new(&mut wrong_jpeg)
+                    .encode(&[128_u8; 12], 2, 2, image::ExtendedColorType::Rgb8)
+                    .unwrap();
+                let stream = jpeg_pdf
+                    .get_object_mut((5, 0))
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap();
+                stream.content = wrong_jpeg;
+                stream.dict.set("Length", stream.content.len() as i64);
+                let mut bytes = Vec::new();
+                jpeg_pdf.save_to(&mut bytes).unwrap();
+                assert!(OfdDocument::from_pdf_bytes(&bytes)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("channel count"));
+            }
+        }
+
+        let mut bad_n = pdf.clone();
+        bad_n
+            .get_object_mut(profile_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("N", 4);
+        let mut altered = Vec::new();
+        bad_n.save_to(&mut altered).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn imports_cmyk_icc_jpeg_with_decode_and_mask() {
+        let profile = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let jpeg = include_bytes!("../tests/fixtures/cmyk.jpg");
+        let mut pdf = PdfDocument::load_mem(&image_pdf(&[128; 12], None, false)).unwrap();
+        let profile_id = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile.to_vec(),
+        )));
+        let stream = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stream.content = jpeg.to_vec();
+        stream.dict.set("Length", jpeg.len() as i64);
+        stream.dict.set("Width", 2);
+        stream.dict.set("Height", 1);
+        stream
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        stream.dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(profile_id),
+            ]),
+        );
+        stream.dict.set(
+            "Decode",
+            Object::Array(
+                (0..4)
+                    .flat_map(|_| [Object::Integer(1), Object::Integer(0)])
+                    .collect(),
+            ),
+        );
+        let mut decoder = JpegDecoder::new_with_options(
+            ZCursor::new(jpeg.as_slice()),
+            DecoderOptions::default().jpeg_set_out_colorspace(JpegColorSpace::CMYK),
+        );
+        let samples = decoder.decode().unwrap();
+        assert_eq!(decoder.input_colorspace(), Some(JpegColorSpace::CMYK));
+        let first: Vec<_> = samples[..4].iter().map(|value| 255 - value).collect();
+        let profile = ColorProfile::new_from_slice(profile).unwrap();
+        let transform = profile
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions::default(),
+            )
+            .unwrap();
+        let mut expected = [0_u8; 3];
+        transform.transform(&first, &mut expected).unwrap();
+
+        let mut encoded = Vec::new();
+        pdf.save_to(&mut encoded).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&encoded).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(pixels.get_pixel(0, 0).0, expected);
+
+        let mut intended = pdf.clone();
+        intended
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Intent", Object::Name(b"AbsoluteColorimetric".to_vec()));
+        let mut intended_bytes = Vec::new();
+        intended.save_to(&mut intended_bytes).unwrap();
+        let intended_document = OfdDocument::from_pdf_bytes(&intended_bytes).unwrap();
+        let intended_pixels =
+            image::load_from_memory(intended_document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgb8();
+        let absolute = profile
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions {
+                    rendering_intent: RenderingIntent::AbsoluteColorimetric,
+                    ..TransformOptions::default()
+                },
+            )
+            .unwrap();
+        absolute.transform(&first, &mut expected).unwrap();
+        assert_eq!(intended_pixels.get_pixel(0, 0).0, expected);
+        transform.transform(&first, &mut expected).unwrap();
+
+        let stream = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stream.dict.set(
+            "Mask",
+            Object::Array(
+                samples[..4]
+                    .iter()
+                    .flat_map(|value| {
+                        [
+                            Object::Integer(i64::from(*value)),
+                            Object::Integer(i64::from(*value)),
+                        ]
+                    })
+                    .collect(),
+            ),
+        );
+        let mut encoded = Vec::new();
+        pdf.save_to(&mut encoded).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&encoded).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(
+            pixels.get_pixel(0, 0).0,
+            [expected[0], expected[1], expected[2], 0]
+        );
+        assert_eq!(pixels.get_pixel(1, 0).0[3], 255);
+
+        let ycck = include_bytes!("../tests/fixtures/ycck.jpg");
+        let mut decoder = JpegDecoder::new_with_options(
+            ZCursor::new(ycck.as_slice()),
+            DecoderOptions::default().jpeg_set_out_colorspace(JpegColorSpace::YCCK),
+        );
+        let mut ycck_samples = decoder.decode().unwrap();
+        assert_eq!(decoder.input_colorspace(), Some(JpegColorSpace::YCCK));
+        ycck_to_cmyk(&mut ycck_samples);
+        for (actual, expected) in ycck_samples[..4].iter().zip([255_u8, 0, 0, 255]) {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "YCCK pixel {:?}",
+                &ycck_samples[..4]
+            );
+        }
+        for (actual, expected) in ycck_samples[4..8].iter().zip([255_u8, 255, 255, 0]) {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "YCCK pixel {:?}",
+                &ycck_samples[4..8]
+            );
+        }
+        let stream = pdf.get_object_mut((5, 0)).unwrap().as_stream_mut().unwrap();
+        stream.content = ycck.to_vec();
+        stream.dict.set("Length", ycck.len() as i64);
+        stream.dict.remove(b"Mask");
+        let mut encoded = Vec::new();
+        pdf.save_to(&mut encoded).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&encoded).unwrap();
+        let pixels = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let first: Vec<_> = ycck_samples[..4].iter().map(|value| 255 - value).collect();
+        transform.transform(&first, &mut expected).unwrap();
+        assert_eq!(pixels.get_pixel(0, 0).0, expected);
+        let second: Vec<_> = ycck_samples[4..8].iter().map(|value| 255 - value).collect();
+        transform.transform(&second, &mut expected).unwrap();
+        assert_eq!(pixels.get_pixel(1, 0).0, expected);
+    }
+
+    #[test]
+    fn exports_expanded_and_bookmark_targeted_outlines() {
+        let mut document = OfdDocument::new();
+        document.add_blank_page(72.0, 72.0).unwrap();
+        let page_id = document.pages().unwrap()[0].id.clone();
+        let destination = DestinationInfo {
+            page_id,
+            kind: "FitH".into(),
+            left: None,
+            top: Some(20.0),
+            right: None,
+            bottom: None,
+            zoom: None,
+        };
+        document
+            .add_bookmark(0, "target", destination.clone())
+            .unwrap();
+        let parent = document.add_outline(0, "Parent", None, None, true).unwrap();
+        let child = document
+            .add_outline(0, "Child", Some(parent), Some(destination.clone()), true)
+            .unwrap();
+        let grandchild = document
+            .add_outline(
+                0,
+                "Grandchild",
+                Some(child),
+                Some(DestinationInfo {
+                    kind: "FitV".into(),
+                    left: Some(10.0),
+                    top: None,
+                    ..destination.clone()
+                }),
+                false,
+            )
+            .unwrap();
+        document
+            .add_outline(0, "Great-grandchild", Some(grandchild), None, true)
+            .unwrap();
+        document
+            .add_outline(0, "Bookmark", None, None, true)
+            .unwrap();
+        let path = "Doc_0/Document.xml";
+        let source = std::str::from_utf8(document.entry(path).unwrap().unwrap()).unwrap();
+        let changed = source.replace(
+            "Title=\"Bookmark\" Expanded=\"true\"></ofd:OutlineElem>",
+            "Title=\"Bookmark\" Expanded=\"true\"><ofd:Actions><ofd:Action Event=\"CLICK\"><ofd:Goto><ofd:Bookmark Name=\"target\"/></ofd:Goto></ofd:Action></ofd:Actions></ofd:OutlineElem>",
+        );
+        assert_ne!(changed, source);
+        document.set_entry(path, changed.into_bytes()).unwrap();
+        assert_eq!(
+            document.outlines().unwrap()[4].bookmark_name.as_deref(),
+            Some("target")
+        );
+        let pdf = document.to_pdf().unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&pdf).unwrap();
+        let outlines = imported.outlines().unwrap();
+        assert_eq!(outlines.len(), 5);
+        assert_eq!(outlines[0].parent_index, None);
+        assert_eq!(outlines[1].parent_index, Some(0));
+        assert_eq!(outlines[2].parent_index, Some(1));
+        assert_eq!(outlines[3].parent_index, Some(2));
+        assert_eq!(outlines[4].parent_index, None);
+        assert!(outlines[0].expanded);
+        assert!(!outlines[2].expanded);
+        assert_eq!(outlines[1].destination.as_ref().unwrap().kind, "FitH");
+        assert_eq!(outlines[2].destination.as_ref().unwrap().kind, "FitV");
+        assert_eq!(outlines[4].destination.as_ref().unwrap().kind, "FitH");
+
+        let mut missing = document.clone();
+        let source = std::str::from_utf8(missing.entry(path).unwrap().unwrap()).unwrap();
+        missing
+            .set_entry(
+                path,
+                source
+                    .replace("Name=\"target\"/>", "Name=\"missing\"/>")
+                    .into_bytes(),
+            )
+            .unwrap();
+        assert!(missing.to_pdf().is_err());
+    }
+
+    #[test]
+    fn imports_identity_h_cid_text_with_widths_and_rejects_bad_mappings() {
+        let bytes = include_bytes!("../tests/fixtures/type0-identity-tounicode.pdf");
+        let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 6.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["中文"]);
+
+        let original = PdfDocument::load_mem(bytes).unwrap();
+        let mut with_range = original.clone();
+        let descendant = with_range
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        descendant.set("W", Object::Array(vec![1.into(), 2.into(), 600.into()]));
+        let mut range_bytes = Vec::new();
+        with_range.save_to(&mut range_bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&range_bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["中文"]
+        );
+
+        let mut invalid_width = original.clone();
+        invalid_width
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "W",
+                Object::Array(vec![1.into(), Object::Array(vec![(-1).into()])]),
+            );
+        let mut invalid_bytes = Vec::new();
+        invalid_width.save_to(&mut invalid_bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&invalid_bytes).is_err());
+
+        let mut default_width = original.clone();
+        let descendant = default_width
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        descendant.remove(b"W");
+        descendant.set("DW", 700);
+        let mut default_bytes = Vec::new();
+        default_width.save_to(&mut default_bytes).unwrap();
+        let default_text = OfdDocument::from_pdf_bytes(&default_bytes).unwrap();
+        let default_delta: f64 = default_text.page_text_objects(0).unwrap()[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((default_delta - 7.2 * MM_PER_PT).abs() < 1e-6);
+
+        let mut vertical = original.clone();
+        vertical
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", Object::Name(b"Identity-V".to_vec()));
+        let mut vertical_bytes = Vec::new();
+        vertical.save_to(&mut vertical_bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&vertical_bytes).is_err());
+
+        let mut odd_code = original.clone();
+        let stream = odd_code
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.content = String::from_utf8(stream.content.clone())
+            .unwrap()
+            .replace("<0001> 100", "<01> 100")
+            .into_bytes();
+        stream.dict.set("Length", stream.content.len() as i64);
+        let mut odd_bytes = Vec::new();
+        odd_code.save_to(&mut odd_bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&odd_bytes).is_err());
+
+        let mut no_mapping = original.clone();
+        let stream = no_mapping
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.content = String::from_utf8(stream.content.clone())
+            .unwrap()
+            .replace("<0002> <6587>", "<0003> <6587>")
+            .into_bytes();
+        stream.dict.set("Length", stream.content.len() as i64);
+        let mut no_mapping_bytes = Vec::new();
+        no_mapping.save_to(&mut no_mapping_bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&no_mapping_bytes).is_err());
+
+        let mut multiple_chars = original.clone();
+        let stream = multiple_chars
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.content = String::from_utf8(stream.content.clone())
+            .unwrap()
+            .replace("<0001> <4E2D>", "<0001> <4E2D6587>")
+            .into_bytes();
+        stream.dict.set("Length", stream.content.len() as i64);
+        let mut multiple_bytes = Vec::new();
+        multiple_chars.save_to(&mut multiple_bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&multiple_bytes).is_err());
+    }
+
+    #[test]
+    fn imports_simple_truetype_font_and_reuses_embedded_resource() {
+        let font_bytes = include_bytes!("../tests/fixtures/dejavu-sans.ttf");
+        let source = text_pdf_with_widths(
+            b"BT /F1 12 Tf 10 20 Td (AB) Tj ET BT /F1 12 Tf 10 40 Td (AB) Tj ET",
+            b"DejaVuSans",
+            Some((b'A', &[600.0, 600.0])),
+        );
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let font_file = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"Length1" => font_bytes.len() as i64},
+            font_bytes.to_vec(),
+        )));
+        let descriptor = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"FontDescriptor".to_vec()),
+            "FontName" => Object::Name(b"DejaVuSans".to_vec()),
+            "FontFile2" => Object::Reference(font_file),
+        }));
+        let font = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("FontDescriptor", Object::Reference(descriptor));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "AB"]);
+        let fonts = document.fonts().unwrap();
+        let embedded: Vec<_> = fonts
+            .iter()
+            .enumerate()
+            .filter(|(_, font)| font.embedded_path.is_some())
+            .collect();
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(embedded[0].1.font_name, "DejaVu Sans");
+        assert_eq!(document.font_data(embedded[0].0).unwrap(), font_bytes);
+        for object in document.page_text_objects(0).unwrap() {
+            assert_eq!(object.font_id.as_deref(), Some(embedded[0].1.id.as_str()));
+        }
+        assert!(document.validate_references().unwrap().is_empty());
+        assert!(document
+            .page_svg(0)
+            .unwrap()
+            .contains("font-family=\"ofd-embedded-font-"));
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["AB", "AB"]);
+        assert_eq!(reopened.font_data(embedded[0].0).unwrap(), font_bytes);
+
+        let mut custom_encoding = pdf.clone();
+        custom_encoding
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", Object::Name(b"UnsupportedEncoding".to_vec()));
+        let mut bytes = Vec::new();
+        custom_encoding.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+
+        let mut no_embedding = pdf;
+        no_embedding
+            .get_object_mut(descriptor)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"FontFile2");
+        let mut bytes = Vec::new();
+        no_embedding.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "AB"]);
+        assert!(document
+            .fonts()
+            .unwrap()
+            .iter()
+            .all(|font| font.embedded_path.is_none()));
+
+        let source = text_pdf_with_widths(
+            b"BT /F1 12 Tf 10 20 Td (\x8e) Tj ET",
+            b"DejaVuSans",
+            Some((0x8e, &[600.0])),
+        );
+        let mut mac_roman = PdfDocument::load_mem(&source).unwrap();
+        let font_file = mac_roman.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"Length1" => font_bytes.len() as i64},
+            font_bytes.to_vec(),
+        )));
+        let descriptor = mac_roman.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"FontDescriptor".to_vec()),
+            "FontName" => Object::Name(b"DejaVuSans".to_vec()),
+            "FontFile2" => Object::Reference(font_file),
+        }));
+        let font = mac_roman
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("Encoding", Object::Name(b"MacRomanEncoding".to_vec()));
+        font.set("FontDescriptor", Object::Reference(descriptor));
+        let mut bytes = Vec::new();
+        mac_roman.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["é"]);
+        assert_eq!(
+            document
+                .fonts()
+                .unwrap()
+                .iter()
+                .filter(|font| font.embedded_path.is_some())
+                .count(),
+            1
+        );
+
+        let mut remapped =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/type1-tounicode.pdf")).unwrap();
+        let font_file = remapped.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"Length1" => font_bytes.len() as i64},
+            font_bytes.to_vec(),
+        )));
+        let descriptor = remapped.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"FontDescriptor".to_vec()),
+            "FontName" => Object::Name(b"DejaVuSans".to_vec()),
+            "FontFile2" => Object::Reference(font_file),
+        }));
+        let font = remapped
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("FontDescriptor", Object::Reference(descriptor));
+        let mut bytes = Vec::new();
+        remapped.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        assert!(document
+            .fonts()
+            .unwrap()
+            .iter()
+            .all(|font| font.embedded_path.is_none()));
+    }
+
+    #[test]
+    fn imports_usable_embedded_pdf_font_once_for_multiple_text_runs() {
+        let source = include_bytes!("../tests/fixtures/type0-identity-tounicode.pdf");
+        let font_bytes = include_bytes!("../tests/fixtures/dejavu-sans.ttf");
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let font_file = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"Length1" => font_bytes.len() as i64},
+            font_bytes.to_vec(),
+        )));
+        let descriptor = pdf.add_object(Object::Dictionary(dictionary! {
+            "Type" => Object::Name(b"FontDescriptor".to_vec()),
+            "FontName" => Object::Name(b"DejaVuSans".to_vec()),
+            "FontFile2" => Object::Reference(font_file),
+        }));
+        let face = ttf_parser::Face::parse(font_bytes, 0).unwrap();
+        let mut gid_map = vec![0_u8; 6];
+        gid_map[2..4].copy_from_slice(&face.glyph_index('A').unwrap().0.to_be_bytes());
+        gid_map[4..6].copy_from_slice(&face.glyph_index('B').unwrap().0.to_be_bytes());
+        let gid_map_id = pdf.add_object(Object::Stream(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            gid_map,
+        )));
+        pdf.get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("FontDescriptor", Object::Reference(descriptor));
+        pdf.get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("CIDToGIDMap", Object::Reference(gid_map_id));
+        let cmap = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        let source = std::str::from_utf8(&cmap.content).unwrap();
+        cmap.content = source
+            .replace("<4E2D>", "<0041>")
+            .replace("<6587>", "<0042>")
+            .into_bytes();
+        cmap.dict.set("Length", cmap.content.len() as i64);
+        let content = pdf.get_object_mut((4, 0)).unwrap().as_stream_mut().unwrap();
+        content.content = b"BT /F1 12 Tf 10 20 Td [<0001> 100 <0002>] TJ ET BT /F1 12 Tf 10 40 Td [<0001> 100 <0002>] TJ ET".to_vec();
+        content.dict.set("Length", content.content.len() as i64);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "AB"]);
+        let fonts = document.fonts().unwrap();
+        let embedded: Vec<_> = fonts
+            .iter()
+            .enumerate()
+            .filter(|(_, font)| font.embedded_path.is_some())
+            .collect();
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(embedded[0].1.font_name, "DejaVu Sans");
+        assert_eq!(document.font_data(embedded[0].0).unwrap(), font_bytes);
+        for object in document.page_text_objects(0).unwrap() {
+            assert_eq!(object.font_id.as_deref(), Some(embedded[0].1.id.as_str()));
+        }
+        assert!(document.validate_references().unwrap().is_empty());
+        assert!(document
+            .page_svg(0)
+            .unwrap()
+            .contains("font-family=\"ofd-embedded-font-"));
+        assert!(document.page_png(0, 72.0).unwrap().starts_with(b"\x89PNG"));
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["AB", "AB"]);
+        assert_eq!(reopened.font_data(embedded[0].0).unwrap(), font_bytes);
+
+        let mut opentype = pdf.clone();
+        let descriptor = opentype
+            .get_object_mut(descriptor)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        descriptor.remove(b"FontFile2");
+        descriptor.set("FontFile3", Object::Reference(font_file));
+        opentype
+            .get_object_mut(font_file)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Subtype", Object::Name(b"OpenType".to_vec()));
+        let mut bytes = Vec::new();
+        opentype.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "AB"]);
+        assert_eq!(
+            document
+                .fonts()
+                .unwrap()
+                .iter()
+                .filter(|font| font.embedded_path.is_some())
+                .count(),
+            1
+        );
+
+        let mut wrong_glyph = pdf.clone();
+        wrong_glyph
+            .get_object_mut(gid_map_id)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .content[3] = 0;
+        let mut bytes = Vec::new();
+        wrong_glyph.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document
+            .fonts()
+            .unwrap()
+            .iter()
+            .all(|font| font.embedded_path.is_none()));
+
+        let mut missing_glyph = pdf.clone();
+        let cmap = missing_glyph
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let source = std::str::from_utf8(&cmap.content).unwrap();
+        cmap.content = source
+            .replace("<0041>", "<4E2D>")
+            .replace("<0042>", "<6587>")
+            .into_bytes();
+        let mut bytes = Vec::new();
+        missing_glyph.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文", "中文"]);
+        assert!(document
+            .fonts()
+            .unwrap()
+            .iter()
+            .all(|font| font.embedded_path.is_none()));
+    }
+
+    #[test]
+    fn imports_explicitly_positioned_type1_text_lines() {
+        let bytes = text_pdf(
+            b"BT /F1 8 Tf 10 50 Td (One) Tj 0 -12 TD (Two) Tj T* (Three) Tj ET",
+            b"Times-Roman",
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["One", "Two", "Three"]);
+        let objects = document.page_text_objects(0).unwrap();
+        assert!(objects[0].boundary.unwrap()[1] < objects[1].boundary.unwrap()[1]);
+        assert!(objects[1].boundary.unwrap()[1] < objects[2].boundary.unwrap()[1]);
+    }
+
+    #[test]
+    fn imports_type1_text_advance_and_tj_spacing_with_declared_widths() {
+        let bytes = text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td (AB) Tj (C) Tj [(D) 120 (E)] TJ ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 5])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "C", "DE"]);
+        let objects = document.page_text_objects(0).unwrap();
+        assert!((objects[1].boundary.unwrap()[0] - 22.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((objects[2].boundary.unwrap()[0] - 28.0 * MM_PER_PT).abs() < 1e-6);
+        let delta: f64 = objects[2].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 4.8 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["AB", "C", "DE"]);
+        let next_line = text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td 12 TL (AB) Tj T* (C) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 3])),
+        );
+        let lines = OfdDocument::from_pdf_bytes(&next_line)
+            .unwrap()
+            .page_text_objects(0)
+            .unwrap();
+        assert!((lines[1].boundary.unwrap()[0] - 10.0 * MM_PER_PT).abs() < 1e-6);
+        let leading_adjustment = text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td [100 (A) 100 (B)] TJ ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 2])),
+        );
+        let shifted = OfdDocument::from_pdf_bytes(&leading_adjustment)
+            .unwrap()
+            .page_text_objects(0)
+            .unwrap();
+        assert!((shifted[0].boundary.unwrap()[0] - 9.0 * MM_PER_PT).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pdf_graphics_stack_restores_text_font_size() {
+        let bytes = text_pdf(
+            b"BT /F1 10 Tf 10 20 Td (A) Tj ET q BT /F1 20 Tf 10 30 Td (B) Tj ET Q BT 10 40 Td (C) Tj ET",
+            b"Helvetica",
+        );
+        let objects = OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_text_objects(0)
+            .unwrap();
+        assert_eq!(objects.len(), 3);
+        assert_eq!(objects[0].size, objects[2].size);
+        assert!((objects[1].size.unwrap() - 2.0 * objects[0].size.unwrap()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn imports_ext_gstate_indirect_font_without_font_resource_name() {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2));
+        page.media_box(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.contents(Ref::new(4));
+        let mut resources = page.resources();
+        resources.ext_g_states().pair(Name(b"GS1"), Ref::new(5));
+        resources.fonts().pair(Name(b"F1"), Ref::new(6));
+        drop(resources);
+        page.finish();
+        pdf.stream(Ref::new(4), b"BT /F1 8 Tf 10 20 Td (A) Tj ET q /GS1 gs BT 10 40 Td (B) Tj ET Q BT 10 60 Td (C) Tj ET");
+        pdf.ext_graphics(Ref::new(5));
+        for (id, name) in [(6, b"Helvetica".as_slice()), (7, b"Courier".as_slice())] {
+            let mut font = pdf.type1_font(Ref::new(id));
+            font.base_font(Name(name))
+                .encoding_predefined(Name(b"WinAnsiEncoding"));
+        }
+        let source = pdf.finish();
+        let mut changed = PdfDocument::load_mem(&source).unwrap();
+        changed
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Font",
+                Object::Array(vec![Object::Reference((7, 0)), 20.into()]),
+            );
+        let mut bytes = Vec::new();
+        changed.save_to(&mut bytes).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(imported.page_text(0).unwrap(), ["A", "B", "C"]);
+        let objects = imported.page_text_objects(0).unwrap();
+        assert_eq!(objects[0].size, objects[2].size);
+        assert!((objects[1].size.unwrap() - 2.5 * objects[0].size.unwrap()).abs() < 1e-6);
+        assert!(imported.validate_references().unwrap().is_empty());
+
+        for array in [
+            vec![Object::Name(b"F1".to_vec()), 20.into()],
+            vec![Object::Reference((99, 0)), 20.into()],
+            vec![Object::Reference((7, 0)), 0.into()],
+            vec![Object::Reference((7, 0))],
+        ] {
+            let mut malformed = PdfDocument::load_mem(&source).unwrap();
+            malformed
+                .get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Font", Object::Array(array));
+            let mut bytes = Vec::new();
+            malformed.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn imports_type1_character_and_word_spacing_with_declared_widths() {
+        let bytes = text_pdf_with_widths(
+            b"BT /F1 10 Tf 1 Tc 2 Tw 10 20 Td ( A) Tj (B) Tj ET",
+            b"Helvetica",
+            Some((b' ', &[600.0; 35])),
+        );
+        let objects = OfdDocument::from_pdf_bytes(&bytes)
+            .unwrap()
+            .page_text_objects(0)
+            .unwrap();
+        assert_eq!(objects.len(), 2);
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 9.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((objects[1].boundary.unwrap()[0] - 26.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf(
+            b"BT /F1 10 Tf 1 Tc 10 20 Td (AB) Tj ET",
+            b"Helvetica"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn imports_type1_text_line_shorthand_operators() {
+        let bytes = text_pdf_with_widths(
+            b"BT /F1 10 Tf 100 Tz 0 Tr 0 Ts 10 50 Td 12 TL (A) Tj (B) ' 2 1 (C) \" ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 3])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A", "B", "C"]);
+        let objects = document.page_text_objects(0).unwrap();
+        for object in &objects {
+            assert!((object.boundary.unwrap()[0] - 10.0 * MM_PER_PT).abs() < 1e-6);
+        }
+        assert!(objects[0].boundary.unwrap()[1] < objects[1].boundary.unwrap()[1]);
+        assert!(objects[1].boundary.unwrap()[1] < objects[2].boundary.unwrap()[1]);
+    }
+
+    #[test]
+    fn imports_type1_text_rise_colors_and_paint_modes() {
+        let bytes = text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td 1 0 0 rg (A) Tj 1 Tr 0 0 1 RG (B) Tj 2 Tr (C) Tj 3 Tr (D) Tj 0 Tr 2 Ts (E) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 5])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A", "B", "C", "D", "E"]);
+        let objects = document.page_text_objects(0).unwrap();
+        assert!(
+            (objects[4].boundary.unwrap()[1] - objects[0].boundary.unwrap()[1] + 2.0 * MM_PER_PT)
+                .abs()
+                < 1e-6
+        );
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let nodes: Vec<_> = parsed
+            .descendants()
+            .filter(|node| is_element(*node, "TextObject"))
+            .collect();
+        assert_eq!(nodes.len(), 5);
+        assert_eq!(nodes[1].attribute("Fill"), Some("false"));
+        assert_eq!(nodes[1].attribute("Stroke"), Some("true"));
+        assert_eq!(nodes[2].attribute("Stroke"), Some("true"));
+        assert_eq!(nodes[3].attribute("Fill"), Some("false"));
+        assert!(nodes[3].attribute("Stroke").is_none());
+        assert_eq!(
+            nodes[0]
+                .children()
+                .find(|node| is_element(*node, "FillColor"))
+                .unwrap()
+                .attribute("Value"),
+            Some("255 0 0")
+        );
+        assert_eq!(
+            nodes[1]
+                .children()
+                .find(|node| is_element(*node, "StrokeColor"))
+                .unwrap()
+                .attribute("Value"),
+            Some("0 0 255")
+        );
+        let svg = document.page_svg(0).unwrap();
+        assert!(svg.contains("fill=\"#ff0000\""));
+        assert!(svg.contains("stroke=\"#0000ff\""));
+        assert!(svg.contains("fill=\"none\""));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), svg);
+
+        for mode in ["-1", "8", "0.5"] {
+            let stream = format!("BT /F1 10 Tf 10 20 Td {mode} Tr (A) Tj ET");
+            assert!(OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+                stream.as_bytes(),
+                b"Helvetica",
+                Some((b'A', &[600.0]))
+            ))
+            .is_err());
+        }
+        let hairline = OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td 0 w 1 Tr (A) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        ))
+        .unwrap();
+        let page = &hairline.pages().unwrap()[0];
+        let parsed = parse_xml(&page.path, hairline.entry(&page.path).unwrap().unwrap()).unwrap();
+        let text = parsed
+            .descendants()
+            .find(|node| is_element(*node, "TextObject"))
+            .unwrap();
+        assert_eq!(text.attribute("Stroke"), Some("true"));
+        assert_eq!(text.attribute("LineWidth"), Some("0.1"));
+        assert!(hairline
+            .page_svg(0)
+            .unwrap()
+            .contains("stroke-width=\"0.1\""));
+        assert!(!hairline.page_png(0, 25.4).unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&hairline.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["A"]);
+    }
+
+    #[test]
+    fn imports_text_clipping_modes_as_union_after_et_and_restores_on_q() {
+        let bytes = text_pdf_with_widths(
+            b"q BT /F1 20 Tf 10 36 Td 7 Tr (A) Tj 32 0 Td (B) Tj ET 1 0 0 rg 0 0 72 72 re f Q 0 1 0 rg 0 0 10 10 re f",
+            b"Helvetica",
+            Some((b'A', &[600.0, 600.0])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A", "B"]);
+        let page = document.pages().unwrap().remove(0);
+        let parsed = parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+        let clip = parsed
+            .descendants()
+            .find(|node| is_element(*node, "Clip"))
+            .unwrap();
+        assert_eq!(
+            clip.children()
+                .filter(|node| is_element(*node, "Area"))
+                .count(),
+            2
+        );
+        assert!(clip
+            .descendants()
+            .filter(|node| is_element(*node, "Text"))
+            .all(|node| node.attribute("ID").is_none()));
+        let svg = document.page_svg(0).unwrap();
+        assert_eq!(svg.matches("<clipPath id=\"ofd-clip-").count(), 1);
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let red_pixels = |left: u32, right: u32| {
+            (left..right)
+                .flat_map(|x| (5..16).map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    let pixel = image.pixel(x, y).unwrap();
+                    pixel.red() > 230 && pixel.green() < 220
+                })
+                .count()
+        };
+        assert!(red_pixels(3, 10) > 3);
+        assert!(red_pixels(14, 22) > 3);
+        let gap = image.pixel(12, 10).unwrap();
+        assert!(gap.red() > 230 && gap.green() > 230);
+        let restored = image.pixel(1, 23).unwrap();
+        assert!(restored.green() > 230 && restored.red() < 30);
+        assert!(lopdf::Document::load_mem(&document.to_pdf().unwrap()).is_ok());
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pdf_text_clipping_modes_keep_paint_and_empty_clip_semantics() {
+        for (mode, fill, stroke) in [
+            (4, true, false),
+            (5, false, true),
+            (6, true, true),
+            (7, false, false),
+        ] {
+            let stream =
+                format!("BT /F1 20 Tf 10 36 Td {mode} Tr (A) Tj ET 1 0 0 rg 0 0 72 72 re f");
+            let document = OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+                stream.as_bytes(),
+                b"Helvetica",
+                Some((b'A', &[600.0])),
+            ))
+            .unwrap();
+            let page = document.pages().unwrap().remove(0);
+            let parsed =
+                parse_xml(&page.path, document.entry(&page.path).unwrap().unwrap()).unwrap();
+            let text = parsed
+                .descendants()
+                .find(|node| is_element(*node, "TextObject"))
+                .unwrap();
+            assert_eq!(text.attribute("Fill") != Some("false"), fill, "mode {mode}");
+            assert_eq!(
+                text.attribute("Stroke") == Some("true"),
+                stroke,
+                "mode {mode}"
+            );
+            assert!(document
+                .page_svg(0)
+                .unwrap()
+                .contains("<clipPath id=\"ofd-clip-"));
+        }
+        let empty = text_pdf_with_widths(
+            b"BT /F1 20 Tf 10 36 Td 7 Tr () Tj ET 1 0 0 rg 0 0 72 72 re f",
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&empty).unwrap();
+        let image =
+            resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
+        let outside = image.pixel(12, 12).unwrap();
+        assert!(outside.red() > 230 && outside.green() > 230);
+        let invalid = text_pdf_with_widths(
+            b"BT /F1 20 Tf 10 36 Td 7 Tr (A) Tj 0 Tr ET",
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        );
+        assert!(OfdDocument::from_pdf_bytes(&invalid).is_err());
+        let scaled = text_pdf_with_widths(
+            b"BT /F1 20 Tf 10 36 Td 50 Tz 7 Tr (A) Tj ET 1 0 0 rg 0 0 72 72 re f",
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        );
+        let svg = OfdDocument::from_pdf_bytes(&scaled)
+            .unwrap()
+            .page_svg(0)
+            .unwrap();
+        assert!(svg.contains("scale(0.5 1)"));
+    }
+
+    #[test]
+    fn imports_type1_horizontal_scaling_and_scaled_advances() {
+        let bytes = text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td 50 Tz (AB) Tj (C) Tj 150 Tz (D) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 4])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let objects = document.page_text_objects(0).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "C", "D"]);
+        assert_eq!(objects[0].h_scale, Some(0.5));
+        assert_eq!(objects[2].h_scale, Some(1.5));
+        assert!((objects[1].boundary.unwrap()[0] - 16.0 * MM_PER_PT).abs() < 1e-6);
+        assert!((objects[2].boundary.unwrap()[0] - 19.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(
+            (objects[0].codes[0]
+                .delta_x
+                .as_deref()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                - 3.0 * MM_PER_PT)
+                .abs()
+                < 1e-6
+        );
+        let page = document.pages().unwrap().remove(0);
+        let xml = std::str::from_utf8(document.entry(&page.path).unwrap().unwrap()).unwrap();
+        assert!(xml.contains("HScale=\"0.5\""));
+        assert!(xml.contains("HScale=\"1.5\""));
+        assert!(document.page_svg(0).unwrap().contains("scale(0.5 1)"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["AB", "C", "D"]);
+
+        let spaced = text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td 50 Tz 1 Tc [(A) 100 (B)] TJ (C) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 3])),
+        );
+        let objects = OfdDocument::from_pdf_bytes(&spaced)
+            .unwrap()
+            .page_text_objects(0)
+            .unwrap();
+        assert!(
+            (objects[0].codes[0]
+                .delta_x
+                .as_deref()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                - 3.0 * MM_PER_PT)
+                .abs()
+                < 1e-6
+        );
+        assert!((objects[1].boundary.unwrap()[0] - 16.5 * MM_PER_PT).abs() < 1e-6);
+
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+            b"BT /F1 10 Tf 10 20 Td 0 Tz (A) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0]))
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn imports_negative_pdf_horizontal_scaling_as_mirrored_ofd_text() {
+        let bytes = text_pdf_with_widths(
+            b"BT /F1 10 Tf 20 20 Td -50 Tz (AB) Tj (C) Tj 100 Tz (D) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 4])),
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["AB", "C", "D"]);
+        let text = document.page_text_objects(0).unwrap();
+        assert_eq!(text[0].h_scale, Some(0.5));
+        assert_eq!(text[1].h_scale, Some(0.5));
+        assert_eq!(text[2].h_scale, None);
+        assert!(
+            (text[0].codes[0]
+                .delta_x
+                .as_deref()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                - 3.0 * MM_PER_PT)
+                .abs()
+                < 1e-6
+        );
+        let objects = document.page_objects(0).unwrap();
+        assert!((objects[0].ctm.unwrap()[0] + 1.0).abs() < 1e-9);
+        assert!((objects[1].ctm.unwrap()[0] + 1.0).abs() < 1e-9);
+        assert!((objects[2].boundary.unwrap()[0] - 11.0 * MM_PER_PT).abs() < 1e-6);
+        assert!(document.page_svg(0).unwrap().contains("scale(0.5 1)"));
+        assert!(document.page_png(0, 72.0).unwrap().starts_with(b"\x89PNG"));
+        assert!(document.to_pdf().unwrap().starts_with(b"%PDF-"));
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["AB", "C", "D"]);
+
+        let spaced = text_pdf_with_widths(
+            b"BT /F1 10 Tf 20 20 Td -50 Tz [(A) 100 (B)] TJ ET",
+            b"Helvetica",
+            Some((b'A', &[600.0; 2])),
+        );
+        let spaced = OfdDocument::from_pdf_bytes(&spaced).unwrap();
+        let delta = spaced.page_text_objects(0).unwrap()[0].codes[0]
+            .delta_x
+            .as_deref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!((delta - 2.5 * MM_PER_PT).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rejects_type1_text_when_position_or_encoding_is_unsupported() {
+        for stream in [
+            b"BT /F1 12 Tf (Hello) Tj ET".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET".as_slice(),
+            b"BT /F1 12 Tf 0 0 0 1 10 20 Tm (A) Tj ET".as_slice(),
+            b"BT /F1 12 Tf 1 0 1 0 10 20 Tm (A) Tj ET".as_slice(),
+            b"BT /F1 0 Tf 10 20 Td (A) Tj ET".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td (\x00) Tj ET".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td (A) Tj".as_slice(),
+            b"ET".as_slice(),
+            b"BT BT ET ET".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td [(A) 100 (B)] TJ ET".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td 0 0 m (A) Tj ET".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td /Im1 Do (A) Tj ET".as_slice(),
+            b"q 0 0 0 1 0 0 cm BT /F1 12 Tf 10 20 Td (A) Tj ET Q".as_slice(),
+        ] {
+            assert!(OfdDocument::from_pdf_bytes(&text_pdf(stream, b"Helvetica")).is_err());
+        }
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf(
+            b"BT /F1 12 Tf 10 20 Td (A) Tj ET",
+            b"Symbol"
+        ))
+        .is_err());
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+            b"BT /F1 12 Tf 10 20 Td (AB) Tj ET",
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        ))
+        .is_err());
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+            b"BT /F1 12 Tf 10 20 Td [(A) /Bad] TJ ET",
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn accepts_text_state_operators_before_text_object() {
+        let stream = b"/F1 12 Tf 2 Tc 3 Tw 90 Tz 0 Tr 1 Ts 14 TL BT 10 20 Td (A) Tj ET";
+        let document = OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
+            stream,
+            b"Helvetica",
+            Some((b'A', &[600.0])),
+        ))
+        .unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A"]);
+        assert!(OfdDocument::from_pdf_bytes(&text_pdf(b"(A) Tj", b"Helvetica")).is_err());
+    }
+}

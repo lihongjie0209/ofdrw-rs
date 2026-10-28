@@ -1,0 +1,48 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [10 20 82 92] /Contents 7 0 R /Annots [5 0 R 6 0 R] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 8 0 R >>
+endobj
+5 0 obj
+<< /Type /Annot /Subtype /Link /Rect [20 30 40 50] /F 4 /Border [0 0 0] /QuadPoints [22 32 32 32 30 40 20 40 33 42 38 42 38 48 33 48] /A << /S /URI /URI (https://example.org/quads) >> >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Link /Rect [45 30 65 50] /F 4 /Border [0 0 0] /Dest [4 0 R /Fit] >>
+endobj
+7 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+8 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000236 00000 n 
+0000000321 00000 n 
+0000000523 00000 n 
+0000000632 00000 n 
+0000000681 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+730
+%%EOF
