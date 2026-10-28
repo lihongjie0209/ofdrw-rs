@@ -65,6 +65,11 @@ Linux wheel 经过 auditwheel 修复，CI 会安装修复后的 manylinux wheel�
 发布中断时可用 Release 工作流的 Run workflow 按钮，输入原有标签继续；
 不要移动已对外发布的版本标签。
 
+若 GitHub Release 已存在，也可单独运行 `Publish existing Python release`
+工作流（`publish-python.yml`），输入原有版本标签。它验证该源提交已有成功 CI，
+检查 Release 中六个平台 wheel 的版本及 `SHA256SUMS`，再仅补传 PyPI 缺失文件。
+此流程不依赖其他语言仓库的发布状态，完成后会在六个平台从公开 PyPI 安装并验证库。
+
 注册表可能在接受上传后继续处理数分钟。可见性校验超时只表示验证尚未完成，
 请先检查原版本状态，避免把上传成功后的等待误判为上传失败。
 

@@ -1,0 +1,110 @@
+name: Publish existing Python release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-python-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Check package version
+        run: python scripts/check_release_version.py "$RELEASE_TAG"
+      - name: Require successful CI for the released source
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const source = (await exec.getExecOutput('git', ['rev-parse', 'HEAD'])).stdout.trim();
+            const {data} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: source, per_page: 100
+            });
+            const verified = data.workflow_runs.find(run =>
+              run.head_sha === source && run.event === 'push' && run.head_branch === 'main' &&
+              run.status === 'completed' && run.conclusion === 'success');
+            if (!verified) throw new Error('No successful main CI for the released source');
+            core.notice(`Verified source using ${verified.html_url}`);
+      - name: Download existing release wheels
+        run: |
+          gh release download "$RELEASE_TAG" --dir dist --pattern '*.whl' --pattern SHA256SUMS
+      - name: Verify wheel count, version and release checksums
+        shell: python
+        run: |
+          import hashlib
+          import os
+          from pathlib import Path
+          directory = Path('dist')
+          checksums = {}
+          for line in (directory / 'SHA256SUMS').read_text().splitlines():
+              digest, name = line.split(maxsplit=1)
+              checksums[name.lstrip('*')] = digest
+          wheels = sorted(directory.glob('*.whl'))
+          assert len(wheels) == 6, 'Expected exactly six release wheels'
+          prefix = f"ofdrw_rs-{os.environ['RELEASE_TAG'][1:]}-"
+          for wheel in wheels:
+              assert wheel.name.startswith(prefix), f'Wrong version: {wheel.name}'
+              with wheel.open('rb') as source:
+                  actual = hashlib.file_digest(source, 'sha256').hexdigest()
+              assert actual == checksums.get(wheel.name), f'Checksum mismatch: {wheel.name}'
+              print(f'Verified {wheel.name}')
+      - name: Validate Python distributions
+        run: |
+          python -m pip install twine
+          python -m twine check --strict dist/*.whl
+      - name: Publish immutable Python wheels
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          TWINE_REPOSITORY_URL: https://upload.pypi.org/legacy/
+        run: python scripts/publish_native_registry.py pypi "$RELEASE_TAG" dist
+
+  verify-installed-package:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install package from public PyPI
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python -m pip install --only-binary=:all: --index-url https://pypi.org/simple "ofdrw-rs==${RELEASE_TAG#v}"
+      - name: Exercise installed native library
+        shell: python
+        run: |
+          from ofdrw_rs import Document
+          with Document.new() as document:
+              document.add_text_page('PyPI \u4e2d\u6587', 40, 30)
+              assert document.page_text(0) == ['PyPI \u4e2d\u6587']
+              assert document.page_png(0, 72).startswith(b'\x89PNG\r\n\x1a\n')
+              with Document.from_bytes(document.to_bytes()) as reopened:
+                  assert reopened.page_text(0) == ['PyPI \u4e2d\u6587']
+                  assert reopened.validate_references() == []
