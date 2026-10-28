@@ -1458,6 +1458,11 @@ objects. Scalar CalGray Gamma may also be indirect. The same validation and
 color conversion apply to vector paint, image samples and shading; missing or
 cyclic references return errors.
 
+Color-space family names, ICC profile `N` channel counts and Indexed `hival`
+may also be indirect objects. ICC counts must still be integers matching the
+embedded profile, and Indexed `hival` must be an integer from 0 through 255;
+lookup length is checked against the resolved count and base space.
+
 The PDF `cs`/`CS` and `sc`/`SC`/`scn`/`SCN` operators support DeviceGray,
 DeviceRGB, DeviceCMYK, CalGray, CalRGB, and Lab, including names mapped by
 the current page or Form resource dictionary. Selecting a space resets its

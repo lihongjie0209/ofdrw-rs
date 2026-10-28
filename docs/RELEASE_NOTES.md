@@ -1,5 +1,10 @@
 Unreleased source changes after v0.1.0:
 
+- Color-space family names, ICC channel counts and Indexed palette bounds
+  accept indirect objects. ICC profile compatibility and palette length/type
+  checks remain enforced. Tests cover Gray/RGB/CMYK ICC image and vector
+  conversion, Indexed palettes, invalid types and cyclic references.
+
 - CalGray, CalRGB and Lab parameters accept indirect arrays and numeric
   entries, including scalar CalGray Gamma. Direct and indirect definitions
   retain equivalent vector, image and shading output. Invalid references and

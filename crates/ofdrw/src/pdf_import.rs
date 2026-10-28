@@ -1518,6 +1518,7 @@ fn parse_color_space_inner(
         .as_array()
         .map_err(|_| OfdError::Invalid("unsupported PDF color space resource".into()))?;
     if let [kind, profile] = array.as_slice() {
+        let kind = pdf_color_value(pdf, kind, "color space family")?;
         if kind.as_name().ok() == Some(b"CalGray".as_slice()) {
             let profile = if matches!(profile, Object::Reference(_)) {
                 pdf.ok_or_else(|| OfdError::Invalid("PDF CalGray is unresolved".into()))?
@@ -1651,8 +1652,10 @@ fn parse_color_space_inner(
         let channels = profile
             .dict
             .get(b"N")
-            .and_then(Object::as_i64)
             .map_err(|_| OfdError::Invalid("PDF ICC N is missing".into()))?;
+        let channels = pdf_color_value(Some(pdf), channels, "ICC N")?
+            .as_i64()
+            .map_err(|_| OfdError::Invalid("PDF ICC N is not an integer".into()))?;
         let (channels, expected, layout) = match channels {
             1 => (1, DataColorSpace::Gray, Layout::Gray),
             3 => (3, DataColorSpace::Rgb, Layout::Rgb),
@@ -1706,6 +1709,7 @@ fn parse_color_space_inner(
     let [kind, base, high, lookup] = array.as_slice() else {
         return Err(OfdError::Invalid("invalid PDF Indexed color space".into()));
     };
+    let kind = pdf_color_value(pdf, kind, "color space family")?;
     if kind.as_name().ok() != Some(b"Indexed".as_slice())
         && kind.as_name().ok() != Some(b"I".as_slice())
     {
@@ -1717,7 +1721,7 @@ fn parse_color_space_inner(
             "PDF Indexed base cannot be Indexed".into(),
         ));
     }
-    let high = high
+    let high = pdf_color_value(pdf, high, "Indexed hival")?
         .as_i64()
         .map_err(|_| OfdError::Invalid("PDF Indexed hival is not an integer".into()))?;
     if !(0..=255).contains(&high) {
@@ -16845,6 +16849,164 @@ mod tests {
     }
 
     #[test]
+    fn indirect_icc_channel_count_preserves_image_and_vector_conversion() {
+        for (channels, profile) in [
+            (
+                1,
+                include_bytes!("../tests/fixtures/gamma18-gray.icc").as_slice(),
+            ),
+            (
+                3,
+                include_bytes!("../tests/fixtures/swapped-rg.icc").as_slice(),
+            ),
+            (
+                4,
+                include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc").as_slice(),
+            ),
+        ] {
+            let samples = vec![128; 4 * channels];
+            let mut pdf = PdfDocument::load_mem(&image_pdf(&samples, None, channels == 1)).unwrap();
+            let profile_id = pdf.add_object(lopdf::Stream::new(
+                dictionary! {"N" => channels as i64},
+                profile.to_vec(),
+            ));
+            let direct = Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(profile_id),
+            ]);
+            let expected = parse_color_space(Some(&pdf), None, &direct, 0)
+                .unwrap()
+                .color(&vec![128.0 / 255.0; channels])
+                .unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("ColorSpace", direct.clone());
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let direct_document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let count = pdf.add_object(Object::Integer(channels as i64));
+            pdf.get_object_mut(profile_id)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("N", Object::Reference(count));
+            let kind = pdf.add_object(Object::Name(b"ICCBased".to_vec()));
+            let indirect =
+                Object::Array(vec![Object::Reference(kind), Object::Reference(profile_id)]);
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("ColorSpace", indirect.clone());
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(
+                document.page_png(0, 72.0).unwrap(),
+                direct_document.page_png(0, 72.0).unwrap()
+            );
+            let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            assert_eq!(image.get_pixel(0, 0).0, expected);
+            pdf.get_object_mut((3, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Resources",
+                    dictionary! {"ColorSpace" => dictionary! {"CS1" => indirect}},
+                );
+            let operands = vec!["0.5019608"; channels].join(" ");
+            pdf.get_object_mut((4, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(format!("/CS1 cs {operands} sc 10 20 18 18 re f").into_bytes());
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert!(document.page_svg(0).unwrap().contains(&format!(
+                "#{:02x}{:02x}{:02x}",
+                expected[0], expected[1], expected[2]
+            )));
+            assert!(document.validate_references().unwrap().is_empty());
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                document.page_png(0, 72.0).unwrap(),
+                reopened.page_png(0, 72.0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn indirect_icc_channel_count_rejects_invalid_or_mismatched_profiles() {
+        for value in [
+            Object::Integer(0),
+            Object::Integer(2),
+            Object::Integer(5),
+            Object::Integer(1),
+            Object::Real(3.0),
+            Object::Name(b"bad".to_vec()),
+            Object::Reference((999, 0)),
+            Object::Reference((1, 0)),
+        ] {
+            let mut pdf = PdfDocument::new();
+            let mismatched = matches!(value, Object::Integer(1));
+            let count = pdf.add_object(value);
+            let profile = pdf.add_object(lopdf::Stream::new(
+                dictionary! {"N" => Object::Reference(count)},
+                include_bytes!("../tests/fixtures/swapped-rg.icc").to_vec(),
+            ));
+            let space = Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(profile),
+            ]);
+            let error = parse_color_space(Some(&pdf), None, &space, 0)
+                .err()
+                .unwrap();
+            if mismatched {
+                assert!(error.to_string().contains("does not match profile"));
+            }
+        }
+    }
+
+    #[test]
+    fn indirect_color_family_names_resolve_and_reject_invalid_references() {
+        for mut space in [calgray_space(), calrgb_space(), lab_space()] {
+            let expected = parse_color_space(None, None, &space, 0).unwrap();
+            let mut pdf = PdfDocument::new();
+            let kind = pdf.add_object(space.as_array().unwrap()[0].clone());
+            space.as_array_mut().unwrap()[0] = Object::Reference(kind);
+            let parsed = parse_color_space(Some(&pdf), None, &space, 0).unwrap();
+            let values = if expected.channels() == 1 {
+                vec![0.5]
+            } else {
+                vec![0.5; 3]
+            };
+            assert_eq!(
+                parsed.color(&values).unwrap(),
+                expected.color(&values).unwrap()
+            );
+            assert!(parse_color_space(None, None, &space, 0).is_err());
+            for invalid in [
+                Object::Integer(1),
+                Object::Name(b"Unknown".to_vec()),
+                Object::Reference((999, 0)),
+                Object::Reference(kind),
+            ] {
+                pdf.objects.insert(kind, invalid);
+                assert!(parse_color_space(Some(&pdf), None, &space, 0).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn form_inherits_selected_color_then_uses_its_own_default_gray() {
         let mut pdf = PdfDocument::load_mem(&form_pdf(
             b"0 0 20 20 re f 0.5 g 20 0 20 20 re f",
@@ -22409,6 +22571,90 @@ mod tests {
         assert_eq!(raster.pixel(0, 1).unwrap().blue(), 255);
         assert!(document.validate_references().unwrap().is_empty());
         assert!(OfdDocument::from_bytes(&document.to_bytes().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn indirect_indexed_descriptor_renders_palette_samples_and_vector_colors() {
+        for family in [b"Indexed".as_slice(), b"I".as_slice()] {
+            let mut pdf = PdfDocument::load_mem(&image_pdf(&[0, 1, 2, 0], None, false)).unwrap();
+            let kind = pdf.add_object(Object::Name(family.to_vec()));
+            let base = pdf.add_object(Object::Name(b"DeviceRGB".to_vec()));
+            let high = pdf.add_object(Object::Integer(2));
+            let lookup = pdf.add_object(Object::String(
+                vec![255, 0, 0, 0, 255, 0, 0, 0, 255],
+                lopdf::StringFormat::Hexadecimal,
+            ));
+            let space = Object::Array(vec![
+                Object::Reference(kind),
+                Object::Reference(base),
+                Object::Reference(high),
+                Object::Reference(lookup),
+            ]);
+            let parsed = parse_color_space(Some(&pdf), None, &space, 0).unwrap();
+            for (index, expected) in [[255, 0, 0], [0, 255, 0], [0, 0, 255]]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(parsed.color(&[index as f64]).unwrap(), expected);
+            }
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("ColorSpace", space.clone());
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let image = image::load_from_memory(document.page_image_data(0, 0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            assert_eq!(
+                image.as_raw(),
+                &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0]
+            );
+            assert!(document.validate_references().unwrap().is_empty());
+            pdf.get_object_mut((3, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Resources",
+                    dictionary! {"ColorSpace" => dictionary! {"Pal" => space}},
+                );
+            pdf.get_object_mut((4, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(b"/Pal cs 1 sc 10 20 18 18 re f".to_vec());
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert!(document.page_svg(0).unwrap().contains("#00ff00"));
+        }
+    }
+
+    #[test]
+    fn indirect_indexed_hival_rejects_wrong_types_ranges_and_references() {
+        for value in [
+            Object::Integer(-1),
+            Object::Integer(256),
+            Object::Real(2.0),
+            Object::Name(b"bad".to_vec()),
+            Object::Reference((999, 0)),
+            Object::Reference((1, 0)),
+        ] {
+            let mut pdf = PdfDocument::new();
+            pdf.objects.insert((1, 0), value);
+            let space = Object::Array(vec![
+                Object::Name(b"Indexed".to_vec()),
+                Object::Name(b"DeviceRGB".to_vec()),
+                Object::Reference((1, 0)),
+                Object::String(vec![0; 9], lopdf::StringFormat::Literal),
+            ]);
+            assert!(parse_color_space(Some(&pdf), None, &space, 0).is_err());
+            assert!(parse_color_space(None, None, &space, 0).is_err());
+        }
     }
 
     #[test]
