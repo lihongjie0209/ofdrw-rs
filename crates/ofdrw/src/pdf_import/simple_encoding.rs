@@ -67,7 +67,8 @@ impl SimpleEncoding {
                 };
                 (base, dictionary.get(b"Differences").ok())
             }
-            None => (default, None),
+            None if standard_builtin => (default, None),
+            None => return Err(invalid("requires an explicit Encoding or a ToUnicode map")),
             _ => return Err(invalid("is not a name or dictionary")),
         };
         let mut result = match base {
@@ -87,7 +88,10 @@ impl SimpleEncoding {
             Base::Named(base) => {
                 if !matches!(
                     base,
-                    b"StandardEncoding" | b"WinAnsiEncoding" | b"MacRomanEncoding"
+                    b"StandardEncoding"
+                        | b"WinAnsiEncoding"
+                        | b"MacRomanEncoding"
+                        | b"MacExpertEncoding"
                 ) {
                     return Err(invalid("BaseEncoding is unsupported"));
                 }
@@ -335,6 +339,7 @@ mod tests {
     #[test]
     fn differences_validate_codes_types_and_missing_base_encodings() {
         let pdf = PdfDocument::new();
+        assert!(SimpleEncoding::parse(&pdf, &lopdf::Dictionary::new(), false).is_err());
         for values in [
             vec![(-1).into()],
             vec![256.into()],
@@ -384,6 +389,30 @@ mod tests {
                 SimpleEncoding::parse(&pdf, &dictionary! {"Encoding" => encoding}, true).is_err()
             );
         }
+    }
+
+    #[test]
+    fn macexpert_encoding_keeps_private_use_small_caps_and_differences() {
+        let pdf = PdfDocument::new();
+        let definition = dictionary! {"Encoding" => Object::Name(b"MacExpertEncoding".to_vec())};
+        assert_eq!(
+            SimpleEncoding::parse(&pdf, &definition, false)
+                .unwrap()
+                .decode(&[32, 33, 97])
+                .unwrap(),
+            " \u{f721}\u{f761}"
+        );
+        let definition = dictionary! {"Encoding" => dictionary! {
+            "BaseEncoding" => Object::Name(b"MacExpertEncoding".to_vec()),
+            "Differences" => Object::Array(vec![97.into(), Object::Name(b"uni4E2D".to_vec())]),
+        }};
+        assert_eq!(
+            SimpleEncoding::parse(&pdf, &definition, false)
+                .unwrap()
+                .decode(&[32, 33, 97])
+                .unwrap(),
+            " \u{f721}中"
+        );
     }
 
     #[test]

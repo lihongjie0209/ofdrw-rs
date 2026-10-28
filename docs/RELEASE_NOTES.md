@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- Custom and subset Type1 fonts import without ToUnicode when an explicit
+  named encoding or named BaseEncoding/Differences provides the character
+  mapping. MacExpertEncoding is accepted alongside the other predefined
+  single-byte encodings. Unknown built-in encodings require explicit metadata;
+  PDF source-code widths and ToUnicode precedence remain intact. Unit and
+  Python/Go/Node.js integration tests cover decoding and package round trips.
+
 - PDF text preserves standard-font and FontDescriptor weight/italic styles,
   including indirect descriptor fields and CID descendants. Safely reused
   embedded TrueType/OpenType programs supply their intrinsic style. Tests

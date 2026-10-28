@@ -637,6 +637,7 @@ def test_mixed_password_and_certificate_recipients(tmp_path):
     "type0-identity-tounicode.pdf",
     "type0-indirect-widths.pdf",
     "encoding-differences.pdf",
+    "custom-type1-differences.pdf",
     "simple-indirect-widths.pdf",
     "text-default-origin.pdf",
 ])

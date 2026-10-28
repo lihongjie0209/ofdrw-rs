@@ -64,16 +64,18 @@ test('import standard font metrics and symbolic encodings without Widths', () =>
 });
 
 test('decode PDF Differences glyph names without a ToUnicode map', () => {
-  const document = Document.fromPdfBytes(fs.readFileSync(fixture('encoding-differences.pdf')));
-  try {
-    assert.deepEqual(document.pageText(0), ['中文']);
-    const reopened = Document.fromBytes(document.toBytes());
+  for (const name of ['encoding-differences.pdf', 'custom-type1-differences.pdf']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
     try {
-      assert.deepEqual(reopened.pageText(0), ['中文']);
-      assert.deepEqual(reopened.validateReferences(), []);
-      assert.deepEqual(reopened.pagePng(0, 72), document.pagePng(0, 72));
-    } finally { reopened.close(); }
-  } finally { document.close(); }
+      assert.deepEqual(document.pageText(0), ['中文']);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pageText(0), ['中文']);
+        assert.deepEqual(reopened.validateReferences(), []);
+        assert.deepEqual(reopened.pagePng(0, 72), document.pagePng(0, 72));
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
 });
 
 test('import Chinese Type0 text with indirect encoding and CID width metadata', () => {

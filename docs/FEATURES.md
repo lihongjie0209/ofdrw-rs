@@ -1659,8 +1659,9 @@ when available, or the built-in advances of the fourteen standard Type1 faces
 when `Widths` is omitted. One-byte `ToUnicode` CMaps override text decoding while
 the original character codes still determine spacing. A code mapping to more
 than one Unicode character is rejected because this layout path positions one
-character per code. Type1 subset fonts and custom `Encoding` dictionaries are
-accepted when a complete `ToUnicode` CMap supplies the text. Type0 CID fonts
+character per code. Custom and subset Type1 fonts may use an explicit named
+encoding or an Encoding dictionary with a named BaseEncoding and Differences;
+a complete ToUnicode CMap retains priority when supplied. Type0 CID fonts
 with two-byte `Identity-H` codes and a
 `ToUnicode` CMap also import as OFD text; descendant `DW` and both forms of
 `W` determine glyph advance. Embedded TrueType/OpenType programs from
@@ -1671,10 +1672,11 @@ Unicode character map agrees with the decoded text; repeated text runs reuse
 the same OFD font resource.
 
 Simple-font `Encoding` dictionaries may provide a named `BaseEncoding`
-(`StandardEncoding`, `WinAnsiEncoding` or `MacRomanEncoding`) and a
+(`StandardEncoding`, `WinAnsiEncoding`, `MacRomanEncoding` or `MacExpertEncoding`) and a
 `Differences` array. Standard Latin Type1 faces use StandardEncoding when the
-dictionary omits its base; TrueType dictionaries require an explicit base or
-a ToUnicode map. Adobe glyph-list names, variant suffixes, `uniXXXX` and
+dictionary omits its base; custom Type1 and TrueType fonts require an explicit
+encoding/base or a ToUnicode map. Unavailable built-in font encodings are not
+inferred from the font name. Adobe glyph-list names, variant suffixes, `uniXXXX` and
 `uXXXX`–`uXXXXXX` names recover a single Unicode scalar per source code,
 including supplementary-plane characters. Source codes still select widths
 and word spacing. ToUnicode retains precedence when present.
@@ -1685,6 +1687,10 @@ text. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
 glyph name. Embedded TrueType reuse also checks overridden glyph names
 against the font's Unicode glyphs; mismatches use the fallback font.
 The mapping follows the [Adobe Glyph List specification](https://github.com/adobe-type-tools/agl-specification).
+Named and difference encodings follow
+[ISO 32000-1, section 9.6.6](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
+MacExpert mappings retain their Unicode private-use characters for small caps
+and similar glyph variants; displaying them still requires a suitable font.
 
 Standard-font advances come from Adobe AFM data and do not depend on installed
 substitute-font metrics. Explicit `Widths` retain priority, and no kerning is

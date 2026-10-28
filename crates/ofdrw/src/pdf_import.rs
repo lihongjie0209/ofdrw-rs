@@ -6306,11 +6306,6 @@ fn import_text(
         None
     };
     let encoding = if unicode_map.is_none() {
-        if !standard_face && !true_type {
-            return Err(OfdError::Invalid(
-                "PDF Type1 font is not a standard Latin face".into(),
-            ));
-        }
         Some(simple_encoding::SimpleEncoding::parse(
             page.pdf,
             font,
@@ -14016,6 +14011,72 @@ mod tests {
         }
         drop(font);
         pdf.finish()
+    }
+
+    #[test]
+    fn custom_type1_fonts_decode_explicit_encodings_without_tounicode() {
+        for (encoding, bytes, expected) in [
+            (b"WinAnsiEncoding".as_slice(), b"A\x80B".as_slice(), "A€B"),
+            (b"MacRomanEncoding".as_slice(), b"A\x8eB".as_slice(), "AéB"),
+            (b"StandardEncoding".as_slice(), b"A\xa1B".as_slice(), "A¡B"),
+        ] {
+            let mut content = b"BT /F1 12 Tf 10 20 Td (".to_vec();
+            content.extend_from_slice(bytes);
+            content.extend_from_slice(b") Tj (A) Tj ET");
+            let source =
+                text_pdf_with_widths(&content, b"ABCDEF+CustomFont", Some((0, &[600.0; 256])));
+            let mut pdf = PdfDocument::load_mem(&source).unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Encoding", Object::Name(encoding.to_vec()));
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), [expected, "A"]);
+            let objects = document.page_text_objects(0).unwrap();
+            let advances = crate::expand_text_deltas(objects[0].codes[0].delta_x.as_deref(), 2)
+                .unwrap()
+                .unwrap();
+            assert!(advances
+                .iter()
+                .all(|advance| (*advance - 7.2 * MM_PER_PT).abs() < 1e-6));
+            assert!(
+                (objects[1].boundary.unwrap()[0]
+                    - objects[0].boundary.unwrap()[0]
+                    - 21.6 * MM_PER_PT)
+                    .abs()
+                    < 1e-6
+            );
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+            assert_eq!(
+                document.page_png(0, 72.0).unwrap(),
+                reopened.page_png(0, 72.0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn custom_type1_differences_keep_explicit_widths_and_unicode_text() {
+        let standard = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/encoding-differences.pdf"
+        ))
+        .unwrap();
+        let custom = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/custom-type1-differences.pdf"
+        ))
+        .unwrap();
+        assert_eq!(custom.page_text(0).unwrap(), ["中文"]);
+        assert_eq!(
+            custom.page_text_objects(0).unwrap(),
+            standard.page_text_objects(0).unwrap()
+        );
+        assert_eq!(
+            custom.page_png(0, 72.0).unwrap(),
+            standard.page_png(0, 72.0).unwrap()
+        );
     }
 
     #[test]
@@ -23839,7 +23900,26 @@ mod tests {
             .remove(b"ToUnicode");
         let mut altered = Vec::new();
         without_map.save_to(&mut altered).unwrap();
-        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+        let decoded = OfdDocument::from_pdf_bytes(&altered).unwrap();
+        assert_eq!(decoded.page_text(0).unwrap(), ["中文"]);
+        assert_eq!(decoded.page_text_objects(0).unwrap(), objects);
+        assert_eq!(
+            decoded.page_png(0, 72.0).unwrap(),
+            document.page_png(0, 72.0).unwrap()
+        );
+        without_map
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Encoding")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"BaseEncoding");
+        let mut ambiguous = Vec::new();
+        without_map.save_to(&mut ambiguous).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&ambiguous).is_err());
     }
 
     #[test]
@@ -26514,11 +26594,20 @@ mod tests {
         ] {
             assert!(OfdDocument::from_pdf_bytes(&text_pdf(stream, b"Helvetica")).is_err());
         }
-        assert!(OfdDocument::from_pdf_bytes(&text_pdf(
+        let mut unknown = PdfDocument::load_mem(&text_pdf(
             b"BT /F1 12 Tf 10 20 Td (A) Tj ET",
-            b"UnknownTypeface"
+            b"UnknownTypeface",
         ))
-        .is_err());
+        .unwrap();
+        unknown
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Encoding");
+        let mut bytes = Vec::new();
+        unknown.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
         assert!(OfdDocument::from_pdf_bytes(&text_pdf_with_widths(
             b"BT /F1 12 Tf 10 20 Td (AB) Tj ET",
             b"Helvetica",
