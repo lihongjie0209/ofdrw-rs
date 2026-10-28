@@ -1655,7 +1655,8 @@ Soft masks and other unsupported extended graphics-state entries return an error
 Basic horizontal Type1 and simple TrueType text with explicit positioning is
 imported as OFD text, using the document's fallback font. Consecutive text
 strings, `TJ` adjustments, and `Tc`/`Tw` spacing use explicit PDF font widths
-when available. One-byte `ToUnicode` CMaps override text decoding while
+when available, or the built-in advances of the fourteen standard Type1 faces
+when `Widths` is omitted. One-byte `ToUnicode` CMaps override text decoding while
 the original character codes still determine spacing. A code mapping to more
 than one Unicode character is rejected because this layout path positions one
 character per code. Type1 subset fonts and custom `Encoding` dictionaries are
@@ -1684,6 +1685,16 @@ text. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
 glyph name. Embedded TrueType reuse also checks overridden glyph names
 against the font's Unicode glyphs; mismatches use the fallback font.
 The mapping follows the [Adobe Glyph List specification](https://github.com/adobe-type-tools/agl-specification).
+
+Standard-font advances come from Adobe AFM data and do not depend on installed
+substitute-font metrics. Explicit `Widths` retain priority, and no kerning is
+implicitly added. Known standard-font names with a six-uppercase-letter subset
+prefix also resolve. `Symbol` and `ZapfDingbats` use their native encodings when
+no encoding is specified, including when a Differences dictionary omits its
+base. ToUnicode still changes extracted text without changing source glyph
+advances. These tables provide metrics, not font outlines; preview font fallback
+still applies. Data provenance and permissions are retained in the
+[font metric notice](../crates/ofdrw/assets/core14/NOTICE) and distributed packages.
 
 Type0 `Identity-H` encoding names, default CID widths (`DW`), `W` arrays,
 range endpoints, per-CID width arrays and individual widths may be indirect

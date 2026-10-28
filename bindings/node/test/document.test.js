@@ -11,6 +11,26 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('import standard font metrics and symbolic encodings without Widths', () => {
+  for (const [name, text, advance] of [
+    ['standard14-tounicode.pdf', '中文', 6.804],
+    ['standard14-symbol.pdf', 'ΑΒ', 8.664],
+    ['standard14-dingbats.pdf', '✁✂', 11.688],
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
+    try {
+      assert.deepEqual(document.pageText(0), [text]);
+      const delta = Number(document.pageTextObjects(0)[0].codes[0].delta_x);
+      assert.ok(Math.abs(delta - advance * 25.4 / 72) < 1e-6);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pageText(0), [text]);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
+
 test('decode PDF Differences glyph names without a ToUnicode map', () => {
   const document = Document.fromPdfBytes(fs.readFileSync(fixture('encoding-differences.pdf')));
   try {

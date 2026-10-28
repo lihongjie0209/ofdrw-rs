@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- All fourteen standard Type1 faces have built-in AFM advances when Widths
+  is omitted, including consecutive text runs, TJ adjustments, character and
+  word spacing. Symbol and ZapfDingbats default encodings also import.
+  Explicit widths retain priority and ToUnicode does not change source-code
+  advances. Numerical regressions and Python/Go/Node.js integration cases
+  cover these paths; distribution notices include the source data permissions.
+
 - Simple-font Encoding dictionaries support named base encodings and
   Differences glyph-name overrides without ToUnicode. Tests cover Adobe
   glyph names, Unicode names, indirect entries, spacing, embedded TrueType

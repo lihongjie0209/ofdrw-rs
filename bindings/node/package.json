@@ -8,6 +8,7 @@
     "index.js",
     "index.d.ts",
     "README.md",
+    "NOTICE",
     "native/**"
   ],
   "engines": {

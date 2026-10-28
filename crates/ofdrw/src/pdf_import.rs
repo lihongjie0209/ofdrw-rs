@@ -2,6 +2,8 @@
 
 mod scalar_function;
 mod simple_encoding;
+mod standard_font_data;
+mod standard_fonts;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -6285,22 +6287,10 @@ fn import_text(
         .get(b"BaseFont")
         .and_then(Object::as_name)
         .map_err(|_| OfdError::Invalid("PDF simple font has no BaseFont".into()))?;
-    let standard_face = [
-        b"Helvetica".as_slice(),
-        b"Helvetica-Bold".as_slice(),
-        b"Helvetica-Oblique".as_slice(),
-        b"Helvetica-BoldOblique".as_slice(),
-        b"Times-Roman".as_slice(),
-        b"Times-Bold".as_slice(),
-        b"Times-Italic".as_slice(),
-        b"Times-BoldItalic".as_slice(),
-        b"Courier".as_slice(),
-        b"Courier-Bold".as_slice(),
-        b"Courier-Oblique".as_slice(),
-        b"Courier-BoldOblique".as_slice(),
-    ]
-    .contains(&base)
-        && !true_type;
+    let standard_font = (!true_type)
+        .then(|| standard_fonts::StandardFont::from_name(base))
+        .flatten();
+    let standard_face = standard_font.is_some();
     let unicode_map = if font.get(b"ToUnicode").is_ok() {
         // lopdf parses ToUnicode for Identity encodings. Keep the original
         // dictionary intact and ask its CMap parser through a temporary copy.
@@ -6357,6 +6347,13 @@ fn import_text(
         (Err(_), Err(_)) => None,
         _ => return Err(OfdError::Invalid("PDF font widths are incomplete".into())),
     };
+    let metric_encoding = if standard_face && encoding.is_none() {
+        simple_encoding::SimpleEncoding::parse(page.pdf, font, true).ok()
+    } else {
+        None
+    };
+    let builtin_metrics = standard_font.zip(encoding.as_ref().or(metric_encoding.as_ref()));
+    let has_widths = widths.is_some() || builtin_metrics.is_some();
     let mut text = String::new();
     let mut simple_codes = Vec::new();
     let mut positions = Vec::new();
@@ -6407,7 +6404,7 @@ fn import_text(
                     positions.push(pen);
                     text.push(ch);
                     simple_codes.push(*byte);
-                    if let Some((first, widths)) = widths {
+                    let width = if let Some((first, widths)) = widths {
                         let index = i64::from(*byte) - first;
                         let width = usize::try_from(index)
                             .ok()
@@ -6418,6 +6415,11 @@ fn import_text(
                             .ok_or_else(|| {
                                 OfdError::Invalid("PDF glyph width is invalid".into())
                             })?;
+                        Some(width)
+                    } else {
+                        builtin_metrics.map(|(font, encoding)| encoding.width(font, *byte))
+                    };
+                    if let Some(width) = width {
                         pen += width * state.size_pt / 1000.0
                             + state.char_spacing
                             + if *byte == b' ' {
@@ -6450,7 +6452,7 @@ fn import_text(
             ));
         }
     }
-    if widths.is_none()
+    if !has_widths
         && !text.is_empty()
         && (has_adjustment || state.char_spacing != 0.0 || state.word_spacing != 0.0)
     {
@@ -6470,7 +6472,7 @@ fn import_text(
             simple_codes: Some(&simple_codes),
             positions: &positions,
             pen,
-            has_widths: widths.is_some(),
+            has_widths,
         },
         visible,
     )
@@ -25718,6 +25720,153 @@ mod tests {
     }
 
     #[test]
+    fn standard14_metrics_position_tj_spacing_without_explicit_widths() {
+        let bytes = text_pdf(
+            b"BT /F1 10 Tf 10 20 Td 1 Tc 2 Tw [(A ) 100 (B)] TJ (C) Tj ET",
+            b"Helvetica",
+        );
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["A B", "C"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let deltas: Vec<f64> = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert!((deltas[0] - 7.67 * MM_PER_PT).abs() < 1e-6);
+        assert!((deltas[1] - 4.78 * MM_PER_PT).abs() < 1e-6);
+        assert!((objects[1].boundary.unwrap()[0] - 30.12 * MM_PER_PT).abs() < 1e-6);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["A B", "C"]);
+    }
+
+    #[test]
+    fn standard14_metrics_keep_consecutive_text_runs_positioned() {
+        for (name, expected) in [
+            (b"Helvetica".as_slice(), 667.0),
+            (b"Courier".as_slice(), 600.0),
+            (b"Times-Italic".as_slice(), 611.0),
+            (b"ABCDEF+Helvetica".as_slice(), 667.0),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(&text_pdf(
+                b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET",
+                name,
+            ))
+            .unwrap();
+            assert_eq!(document.page_text(0).unwrap(), ["A", "B"]);
+            let objects = document.page_text_objects(0).unwrap();
+            assert!(
+                (objects[1].boundary.unwrap()[0] - (10.0 + expected * 12.0 / 1000.0) * MM_PER_PT)
+                    .abs()
+                    < 1e-6
+            );
+        }
+    }
+
+    #[test]
+    fn standard14_symbol_and_dingbats_use_builtin_encoding_and_widths() {
+        for (font, content, expected, width) in [
+            (
+                b"Symbol".as_slice(),
+                b"BT /F1 12 Tf 10 20 Td (AB) Tj ET".as_slice(),
+                "ΑΒ",
+                722.0,
+            ),
+            (
+                b"ZapfDingbats".as_slice(),
+                b"BT /F1 12 Tf 10 20 Td (!\") Tj ET".as_slice(),
+                "✁✂",
+                974.0,
+            ),
+        ] {
+            let mut pdf = PdfDocument::load_mem(&text_pdf(content, font)).unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .remove(b"Encoding");
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), [expected]);
+            let objects = document.page_text_objects(0).unwrap();
+            let delta: f64 = objects[0].codes[0]
+                .delta_x
+                .as_ref()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((delta - width * 12.0 / 1000.0 * MM_PER_PT).abs() < 1e-6);
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_text(0).unwrap(), [expected]);
+            assert!(reopened.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn standard14_metrics_follow_source_encoding_under_tounicode() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/type1-tounicode.pdf")).unwrap();
+        let font = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        font.remove(b"Widths");
+        font.remove(b"FirstChar");
+        font.remove(b"LastChar");
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - (667.0 * 12.0 / 1000.0 - 1.2) * MM_PER_PT).abs() < 1e-6);
+    }
+
+    #[test]
+    fn standard14_metrics_follow_differences_but_explicit_widths_take_precedence() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/encoding-differences.pdf"))
+                .unwrap();
+        pdf.get_object_mut((6, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "Differences",
+                Object::Array(vec![
+                    65.into(),
+                    Object::Name(b"W".to_vec()),
+                    Object::Name(b"i".to_vec()),
+                ]),
+            );
+        for (explicit, expected) in [(true, 6.0), (false, 10.128)] {
+            if !explicit {
+                let font = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+                font.remove(b"Widths");
+                font.remove(b"FirstChar");
+                font.remove(b"LastChar");
+            }
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), ["Wi"]);
+            let objects = document.page_text_objects(0).unwrap();
+            let delta: f64 = objects[0].codes[0]
+                .delta_x
+                .as_ref()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((delta - expected * MM_PER_PT).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn pdf_graphics_stack_restores_text_font_size() {
         let bytes = text_pdf(
             b"BT /F1 10 Tf 10 20 Td (A) Tj ET q BT /F1 20 Tf 10 30 Td (B) Tj ET Q BT 10 40 Td (C) Tj ET",
@@ -25812,11 +25961,18 @@ mod tests {
             .unwrap();
         assert!((delta - 9.0 * MM_PER_PT).abs() < 1e-6);
         assert!((objects[1].boundary.unwrap()[0] - 26.0 * MM_PER_PT).abs() < 1e-6);
-        assert!(OfdDocument::from_pdf_bytes(&text_pdf(
+        let builtin = OfdDocument::from_pdf_bytes(&text_pdf(
             b"BT /F1 10 Tf 1 Tc 10 20 Td (AB) Tj ET",
-            b"Helvetica"
+            b"Helvetica",
         ))
-        .is_err());
+        .unwrap();
+        let delta: f64 = builtin.page_text_objects(0).unwrap()[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 7.67 * MM_PER_PT).abs() < 1e-6);
     }
 
     #[test]
@@ -26147,7 +26303,6 @@ mod tests {
     fn rejects_type1_text_when_position_or_encoding_is_unsupported() {
         for stream in [
             b"BT /F1 12 Tf (Hello) Tj ET".as_slice(),
-            b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET".as_slice(),
             b"BT /F1 12 Tf 0 0 0 1 10 20 Tm (A) Tj ET".as_slice(),
             b"BT /F1 12 Tf 1 0 1 0 10 20 Tm (A) Tj ET".as_slice(),
             b"BT /F1 0 Tf 10 20 Td (A) Tj ET".as_slice(),
@@ -26155,7 +26310,6 @@ mod tests {
             b"BT /F1 12 Tf 10 20 Td (A) Tj".as_slice(),
             b"ET".as_slice(),
             b"BT BT ET ET".as_slice(),
-            b"BT /F1 12 Tf 10 20 Td [(A) 100 (B)] TJ ET".as_slice(),
             b"BT /F1 12 Tf 10 20 Td 0 0 m (A) Tj ET".as_slice(),
             b"BT /F1 12 Tf 10 20 Td /Im1 Do (A) Tj ET".as_slice(),
             b"q 0 0 0 1 0 0 cm BT /F1 12 Tf 10 20 Td (A) Tj ET Q".as_slice(),
@@ -26164,7 +26318,7 @@ mod tests {
         }
         assert!(OfdDocument::from_pdf_bytes(&text_pdf(
             b"BT /F1 12 Tf 10 20 Td (A) Tj ET",
-            b"Symbol"
+            b"UnknownTypeface"
         ))
         .is_err());
         assert!(OfdDocument::from_pdf_bytes(&text_pdf_with_widths(

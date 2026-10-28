@@ -1,6 +1,10 @@
 //! Single-byte PDF encodings with Adobe glyph-name overrides.
 
-use super::{pdf_resolved_value, Object, OfdError, PdfDocument};
+use super::{
+    pdf_resolved_value,
+    standard_fonts::{self, StandardFont},
+    Object, OfdError, PdfDocument,
+};
 
 pub(super) struct SimpleEncoding {
     characters: [Option<char>; 256],
@@ -22,8 +26,26 @@ impl SimpleEncoding {
             .ok()
             .map(|value| pdf_resolved_value(Some(pdf), value, "font Encoding"))
             .transpose()?;
+        #[derive(Clone, Copy)]
+        enum Base<'a> {
+            Named(&'a [u8]),
+            Builtin(StandardFont),
+        }
+        let builtin = standard_builtin
+            .then(|| {
+                font.get(b"BaseFont")
+                    .ok()
+                    .and_then(|value| pdf_resolved_value(Some(pdf), value, "BaseFont").ok())
+                    .and_then(|value| value.as_name().ok())
+                    .and_then(StandardFont::from_name)
+            })
+            .flatten();
+        let dingbats = builtin.is_some_and(StandardFont::is_dingbats);
+        let default = builtin
+            .filter(|font| font.encoding_names().is_some())
+            .map_or(Base::Named(b"StandardEncoding"), Base::Builtin);
         let (base, differences) = match encoding {
-            Some(Object::Name(name)) => (name.as_slice(), None),
+            Some(Object::Name(name)) => (Base::Named(name.as_slice()), None),
             Some(Object::Dictionary(dictionary)) => {
                 if let Ok(kind) = dictionary.get(b"Type") {
                     if pdf_resolved_value(Some(pdf), kind, "Encoding Type")?
@@ -35,37 +57,56 @@ impl SimpleEncoding {
                     }
                 }
                 let base = match dictionary.get(b"BaseEncoding") {
-                    Ok(value) => pdf_resolved_value(Some(pdf), value, "BaseEncoding")?
-                        .as_name()
-                        .map_err(|_| invalid("BaseEncoding is not a name"))?,
-                    Err(_) if standard_builtin => b"StandardEncoding".as_slice(),
+                    Ok(value) => Base::Named(
+                        pdf_resolved_value(Some(pdf), value, "BaseEncoding")?
+                            .as_name()
+                            .map_err(|_| invalid("BaseEncoding is not a name"))?,
+                    ),
+                    Err(_) if standard_builtin => default,
                     Err(_) => return Err(invalid("requires an explicit BaseEncoding")),
                 };
                 (base, dictionary.get(b"Differences").ok())
             }
-            None => (b"StandardEncoding".as_slice(), None),
+            None => (default, None),
             _ => return Err(invalid("is not a name or dictionary")),
         };
-        if !matches!(
-            base,
-            b"StandardEncoding" | b"WinAnsiEncoding" | b"MacRomanEncoding"
-        ) {
-            return Err(invalid("BaseEncoding is unsupported"));
-        }
-        let mut base_font = lopdf::Dictionary::new();
-        base_font.set("Type", Object::Name(b"Font".to_vec()));
-        base_font.set("Encoding", Object::Name(base.to_vec()));
-        let lopdf::Encoding::OneByteEncoding(table) = base_font
-            .get_font_encoding(pdf)
-            .map_err(|error| invalid(&format!("cannot decode BaseEncoding: {error}")))?
-        else {
-            return Err(invalid("BaseEncoding is not single-byte"));
-        };
-        let mut result = Self {
-            characters: std::array::from_fn(|index| {
-                table[index].and_then(|value| char::from_u32(u32::from(value)))
-            }),
-            glyph_names: std::array::from_fn(|_| None),
+        let mut result = match base {
+            Base::Builtin(font) => {
+                let names = font
+                    .encoding_names()
+                    .ok_or_else(|| invalid("built-in encoding is unavailable"))?;
+                Self {
+                    characters: std::array::from_fn(|index| {
+                        names[index].and_then(|name| glyph_character(name.as_bytes(), dingbats))
+                    }),
+                    glyph_names: std::array::from_fn(|index| {
+                        names[index].map(|name| name.as_bytes().to_vec())
+                    }),
+                }
+            }
+            Base::Named(base) => {
+                if !matches!(
+                    base,
+                    b"StandardEncoding" | b"WinAnsiEncoding" | b"MacRomanEncoding"
+                ) {
+                    return Err(invalid("BaseEncoding is unsupported"));
+                }
+                let mut base_font = lopdf::Dictionary::new();
+                base_font.set("Type", Object::Name(b"Font".to_vec()));
+                base_font.set("Encoding", Object::Name(base.to_vec()));
+                let lopdf::Encoding::OneByteEncoding(table) = base_font
+                    .get_font_encoding(pdf)
+                    .map_err(|error| invalid(&format!("cannot decode BaseEncoding: {error}")))?
+                else {
+                    return Err(invalid("BaseEncoding is not single-byte"));
+                };
+                Self {
+                    characters: std::array::from_fn(|index| {
+                        table[index].and_then(|value| char::from_u32(u32::from(value)))
+                    }),
+                    glyph_names: std::array::from_fn(|_| None),
+                }
+            }
         };
         if let Some(differences) = differences {
             let differences = pdf_resolved_value(Some(pdf), differences, "Encoding Differences")?
@@ -91,7 +132,7 @@ impl SimpleEncoding {
                                 "PDF Encoding glyph name is too long".into(),
                             ));
                         }
-                        result.characters[code] = glyph_character(name);
+                        result.characters[code] = glyph_character(name, dingbats);
                         result.glyph_names[code] = Some(name.clone());
                         next = Some(code + 1);
                     }
@@ -110,6 +151,14 @@ impl SimpleEncoding {
                     .ok_or_else(|| invalid("character has no single Unicode mapping"))
             })
             .collect()
+    }
+
+    pub fn width(&self, font: StandardFont, code: u8) -> f64 {
+        match &self.glyph_names[usize::from(code)] {
+            Some(name) => font.glyph_width(name),
+            None => self.characters[usize::from(code)]
+                .map_or(0.0, |character| font.character_width(character)),
+        }
     }
 
     pub fn matches_face(&self, face: &ttf_parser::Face<'_>, codes: &[u8], text: &str) -> bool {
@@ -131,11 +180,20 @@ impl SimpleEncoding {
     }
 }
 
-fn glyph_character(name: &[u8]) -> Option<char> {
+fn glyph_character(name: &[u8], dingbats: bool) -> Option<char> {
     let name = std::str::from_utf8(name).ok()?;
     let base = name.split('.').next()?;
     let mut result = None;
     for component in base.split('_') {
+        if let Some(character) = dingbats
+            .then(|| standard_fonts::dingbat_character(component))
+            .flatten()
+        {
+            if result.replace(character).is_some() {
+                return None;
+            }
+            continue;
+        }
         let uppercase_hex = |digits: &str| {
             digits
                 .bytes()
@@ -195,7 +253,11 @@ mod tests {
             ("unknown_A", 'A'),
             ("uniD800_A", 'A'),
         ] {
-            assert_eq!(glyph_character(name.as_bytes()), Some(expected), "{name}");
+            assert_eq!(
+                glyph_character(name.as_bytes(), false),
+                Some(expected),
+                "{name}"
+            );
         }
     }
 
@@ -214,9 +276,9 @@ mod tests {
             "uniD83DDE00",
             "dalethatafpatah",
         ] {
-            assert_eq!(glyph_character(name.as_bytes()), None, "{name}");
+            assert_eq!(glyph_character(name.as_bytes(), false), None, "{name}");
         }
-        assert_eq!(glyph_character(&[255]), None);
+        assert_eq!(glyph_character(&[255], false), None);
     }
 
     #[test]
@@ -392,5 +454,19 @@ mod tests {
         )
         .unwrap();
         assert!(!variant.matches_face(&face, b"A", "A"));
+    }
+
+    #[test]
+    fn symbol_and_dingbats_differences_inherit_their_native_bases() {
+        let pdf = PdfDocument::new();
+        for (base, glyph, expected) in [("Symbol", "Beta", "ΒΒ"), ("ZapfDingbats", "a2", "✂✂")]
+        {
+            let definition = dictionary! {"BaseFont" => Object::Name(base.as_bytes().to_vec()),
+            "Encoding" => dictionary! {"Differences" => Object::Array(vec![
+                if base == "Symbol" {65.into()} else {33.into()}, Object::Name(glyph.as_bytes().to_vec())])}};
+            let encoding = SimpleEncoding::parse(&pdf, &definition, true).unwrap();
+            let codes = if base == "Symbol" { b"AB" } else { b"!\"" };
+            assert_eq!(encoding.decode(codes).unwrap(), expected);
+        }
     }
 }

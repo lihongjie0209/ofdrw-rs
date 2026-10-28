@@ -649,6 +649,24 @@ def test_imports_tounicode_pdf(tmp_path, name):
         assert reopened.page_text(0) == ["中文"]
 
 
+@pytest.mark.parametrize("name,text,advance", [
+    ("standard14-tounicode.pdf", "中文", 6.804),
+    ("standard14-symbol.pdf", "ΑΒ", 8.664),
+    ("standard14-dingbats.pdf", "✁✂", 11.688),
+])
+def test_imports_standard14_fonts_without_widths(tmp_path, name, text, advance):
+    source = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / name
+    with Document.from_pdf_bytes(source.read_bytes()) as document:
+        assert document.page_text(0) == [text]
+        delta = float(document.page_text_objects(0)[0]["codes"][0]["delta_x"])
+        assert abs(delta - advance * 25.4 / 72.0) < 1e-6
+        target = tmp_path / "standard.ofd"
+        document.save(target)
+    with Document.open(target) as reopened:
+        assert reopened.page_text(0) == [text]
+        assert reopened.validate_references() == []
+
+
 def test_imports_macroman_truetype_pdf_with_embedded_font(tmp_path):
     fixtures = Path(__file__).resolve().parents[3] / "crates" / "ofdrw" / "tests" / "fixtures"
     source = (fixtures / "truetype-macroman.pdf").read_bytes()
