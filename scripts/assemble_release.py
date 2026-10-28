@@ -18,7 +18,7 @@ for platform in platforms:
         raise SystemExit(f"Missing native distribution: {platform}")
 if len(list(output.glob(f"ofdrw_rs-{version}-*.whl"))) != 6:
     raise SystemExit("Expected six platform-specific Python wheels")
-for name in [f"ofdrw-rs-{version}.tgz", f"ofdrw-{version}.crate"]:
+for name in [f"lihongjie0209-ofdrw-rs-{version}.tgz", f"ofdrw-{version}.crate"]:
     if not (output / name).is_file():
         raise SystemExit(f"Missing distribution: {name}")
 with zipfile.ZipFile(output / f"ofdrw-go-{tag}.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:

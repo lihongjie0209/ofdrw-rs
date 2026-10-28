@@ -10,19 +10,23 @@
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
 
-## 下载
+## GitHub Packages
 
-所有语言的发布包统一放在 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases)。
-当前不发布到 PyPI、npm registry 或 crates.io；请按下面的 GitHub 安装方式使用。
+库发布到 [GitHub Packages](https://github.com/lihongjie0209?tab=packages&repo_name=ofdrw-rs)：
 
-| 发布资产 | 内容 |
-| --- | --- |
-| `ofdrw_rs-0.1.0-py3-none-<platform>.whl` | Python 包，内含对应平台的 Rust 共享库 |
-| `ofdrw-rs-0.1.0.tgz` | Node.js 包，内含全部六个平台的共享库和 TypeScript 类型 |
-| `ofdrw-0.1.0.crate` | Rust 核心源码包；也可直接使用 Git 依赖 |
-| `ofdrw-go-v0.1.0.zip` | Go 模块源码；也可使用 `go get` |
-| `ofdrw-native-<platform>-v0.1.0.zip` | C ABI 动态库、静态库、C 头文件和许可证；供 Go/C 使用 |
-| `SHA256SUMS` | 发布文件的 SHA-256 校验值 |
+| 语言 / 内容 | Package | 安装方式 |
+| --- | --- | --- |
+| Node.js / TypeScript | `@lihongjie0209/ofdrw-rs` | GitHub npm registry |
+| Python | `ghcr.io/lihongjie0209/ofdrw-rs-python:0.1.0` | ORAS 拉取 wheel，再用 pip 安装 |
+| Go 源码 | `ghcr.io/lihongjie0209/ofdrw-rs-go:0.1.0` | ORAS 拉取；也支持 Git 标签 `go get` |
+| Rust 核心 | `ghcr.io/lihongjie0209/ofdrw-rs-rust:0.1.0` | ORAS 拉取 `.crate` 源码包 |
+| C ABI / Go 原生库 | `ghcr.io/lihongjie0209/ofdrw-rs-native:0.1.0` | ORAS 拉取动态库、静态库和 C 头文件 |
+
+GitHub Packages 原生支持 npm，但没有 PyPI、Cargo 或 Go 模块 registry。
+因此 Python、Rust、Go 和 native 文件使用 GitHub Container Registry 的 OCI 包分发。
+使用 [ORAS CLI](https://oras.land/docs/installation/) 拉取文件，不需要运行容器。
+每个 OCI 包包含对应文件、许可证及 `SHA256SUMS`。
+同一批文件也保留在 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases)，供浏览器下载。
 
 `<platform>` 为 `linux-x64`、`linux-arm64`、`darwin-x64`、`darwin-arm64`、`win32-x64` 或 `win32-arm64`。
 Linux 预编译库在 Ubuntu 24.04 构建；较旧的 glibc 系统请从源码编译。
@@ -30,10 +34,11 @@ macOS 在 macOS 15 构建。Python wheels 的平台名遵循 Python 的 wheel �
 
 ## Python
 
-需要 Python 3.10+。从 Release 下载适合操作系统和 CPU 的 wheel，然后安装：
+需要 Python 3.10+。从 GitHub Packages 拉取 wheels，选择适合操作系统和 CPU 的文件安装：
 
 ```sh
-python -m pip install ./ofdrw_rs-0.1.0-py3-none-linux_x86_64.whl
+oras pull ghcr.io/lihongjie0209/ofdrw-rs-python:0.1.0 -o packages/python
+python -m pip install ./packages/python/ofdrw_rs-0.1.0-py3-none-linux_x86_64.whl
 ```
 
 wheel 已带 Rust 共享库，不需要安装 Rust。它会自动安装 CFFI 依赖。
@@ -57,14 +62,18 @@ with Document.open("hello.ofd") as document:
 
 ## Node.js / TypeScript
 
-需要 Node.js 20+。直接安装 GitHub Release 中的 npm tarball：
+需要 Node.js 20+。配置 GitHub npm registry 后安装：
 
 ```sh
-npm install https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.0/ofdrw-rs-0.1.0.tgz
+npm config set @lihongjie0209:registry https://npm.pkg.github.com
+npm login --scope=@lihongjie0209 --auth-type=legacy --registry=https://npm.pkg.github.com
+npm install @lihongjie0209/ofdrw-rs@0.1.0
 ```
 
+GitHub npm Packages 安装需要登录；使用带 `read:packages` 权限的 GitHub personal access token (classic) 作为密码。
+
 ```js
-const { Document } = require('ofdrw-rs');
+const { Document } = require('@lihongjie0209/ofdrw-rs');
 
 const document = Document.create();
 try {
@@ -76,16 +85,17 @@ try {
 }
 ```
 
-TypeScript 可使用 `import { Document } from 'ofdrw-rs'`，类型声明随包提供。
+TypeScript 可使用 `import { Document } from '@lihongjie0209/ofdrw-rs'`，类型声明随包提供。
 更多内容见 [Node.js 说明](bindings/node/README.md)。
 
 ## Go
 
 Go 包通过 purego 动态加载 C ABI，**不需要 cgo**。需要 Go 1.22+。
-先从 Release 下载对应平台的 native ZIP 并解压，设置动态库的绝对路径：
+先从 GitHub Packages 拉取 native ZIP 并解压对应平台文件，设置动态库的绝对路径：
 
 ```sh
-unzip ofdrw-native-linux-x64-v0.1.0.zip -d native
+oras pull ghcr.io/lihongjie0209/ofdrw-rs-native:0.1.0 -o packages/native
+unzip packages/native/ofdrw-native-linux-x64-v0.1.0.zip -d native
 export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.1.0/libofdrw_ffi.so"
 go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.0
 ```
@@ -114,11 +124,18 @@ Release 会同时创建 Go 子模块标签 `bindings/go/v0.1.0`。
 
 ## Rust
 
-在 `Cargo.toml` 中使用固定 Git tag：
+从 GitHub Packages 拉取并解压 Rust 核心源码：
+
+```sh
+oras pull ghcr.io/lihongjie0209/ofdrw-rs-rust:0.1.0 -o vendor
+tar -xzf vendor/ofdrw-0.1.0.crate -C vendor
+```
+
+在 `Cargo.toml` 中引用解压后的包：
 
 ```toml
 [dependencies]
-ofdrw = { git = "https://github.com/lihongjie0209/ofdrw-rs.git", tag = "v0.1.0" }
+ofdrw = { path = "vendor/ofdrw-0.1.0" }
 ```
 
 ```rust
@@ -135,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## C / 自行编译共享库
 
-Release 的 native ZIP 中提供 `include/ofdrw.h`、动态库和静态库。
+GitHub Packages 的 native ZIP 中提供 `include/ofdrw.h`、动态库和静态库。
 也可从源码构建：
 
 ```sh
@@ -165,8 +182,8 @@ bash scripts/check-rust-coverage.sh
 ```
 
 更新各包版本并推送 `vX.Y.Z` 标签会触发 Release 工作流。
-工作流等待同一提交的 CI 全部成功，再发布资产、校验值及 Go 子模块标签。
-发布流程只需要 GitHub 自带的 `GITHUB_TOKEN`，不需要包索引账号密钥。
+工作流等待同一提交的 CI 全部成功，再发布 GitHub npm / OCI Packages、Release 资产、校验值及 Go 子模块标签。
+发布流程授予 `packages: write`，使用 GitHub 自带的 `GITHUB_TOKEN`，不需要包索引账号密钥。
 
 ## 许可证
 

@@ -7,8 +7,14 @@ not require cgo. Install the module:
 go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.0
 ```
 
-Download and unzip the matching native library from
-[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases).
+Pull native ZIPs from GitHub Packages with [ORAS](https://oras.land/docs/installation/):
+
+```sh
+oras pull ghcr.io/lihongjie0209/ofdrw-rs-native:0.1.0 -o packages/native
+unzip packages/native/ofdrw-native-linux-x64-v0.1.0.zip -d native
+```
+
+Select the ZIP for your OS/CPU.
 Set `OFDRW_LIB_PATH` to its absolute path: `libofdrw_ffi.so` on Linux,
 `libofdrw_ffi.dylib` on macOS, or `ofdrw_ffi.dll` on Windows.
 

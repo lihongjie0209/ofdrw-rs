@@ -180,11 +180,11 @@ jobs:
           mkdir "$RUNNER_TEMP/ofdrw-node-smoke"
           cd "$RUNNER_TEMP/ofdrw-node-smoke"
           npm install "$RUNNER_TEMP/$package_file"
-          env -u OFDRW_LIB_PATH node -e "const {Document}=require('ofdrw-rs'); const d=Document.create(); d.addTextPage('packed'); if(d.pageText(0)[0]!=='packed') process.exitCode=1; d.close()"
+          env -u OFDRW_LIB_PATH node -e "const {Document}=require('@lihongjie0209/ofdrw-rs'); const d=Document.create(); d.addTextPage('packed'); if(d.pageText(0)[0]!=='packed') process.exitCode=1; d.close()"
       - uses: actions/upload-artifact@v7
         with:
           name: ofdrw-node-package
-          path: ${{ runner.temp }}/ofdrw-rs-*.tgz
+          path: ${{ runner.temp }}/lihongjie0209-ofdrw-rs-*.tgz
           if-no-files-found: error
 
   coverage:

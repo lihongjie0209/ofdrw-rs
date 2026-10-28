@@ -3,10 +3,12 @@
 Node.js wrapper for the Rust OFD core. It uses the versioned C ABI through
 [Koffi](https://koffi.dev/).
 
-Install the release package directly from GitHub:
+Install from GitHub npm Packages (authenticate with a classic token with `read:packages`):
 
 ```sh
-npm install https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.0/ofdrw-rs-0.1.0.tgz
+npm config set @lihongjie0209:registry https://npm.pkg.github.com
+npm login --scope=@lihongjie0209 --auth-type=legacy --registry=https://npm.pkg.github.com
+npm install @lihongjie0209/ofdrw-rs@0.1.0
 ```
 
 For development from this source tree, build the native library and install
@@ -29,7 +31,7 @@ staged package binary is also present under `native/`.
 The CI-built npm tarball includes the native library for Linux, macOS, and
 Windows on x64 and ARM64. Linux binaries are built on Ubuntu 24.04, so older
 glibc distributions may need a native build. Install the tarball with
-`npm install /path/to/ofdrw-rs-0.1.0.tgz`;
+`npm install /path/to/lihongjie0209-ofdrw-rs-0.1.0.tgz`;
 the library is loaded automatically. To use a custom native build, set
 `OFDRW_LIB_PATH` to its absolute path. Packing from a source checkout requires
 all six release libraries under `native/<platform>-<arch>/`. Stage each one
@@ -38,7 +40,7 @@ library against the current wrapper and writes its interface and file digests.
 `npm pack` checks every library against those digests.
 
 ```js
-const { Document } = require('ofdrw-rs');
+const { Document } = require('@lihongjie0209/ofdrw-rs');
 
 const document = Document.create();
 try {
@@ -84,7 +86,7 @@ Password and SM2 certificate encryption return a new `Document` and leave the
 source document open. Close each returned document after use:
 
 ```js
-const { Document } = require('ofdrw-rs');
+const { Document } = require('@lihongjie0209/ofdrw-rs');
 const document = Document.create();
 try {
   document.addTextPage('secret text');
