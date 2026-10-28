@@ -9,15 +9,16 @@
 当前版本是 **0.1.0 预发布版**，已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
+`main` 分支包含后续开发功能，与已发布版本的差异见 [未发布变更](docs/RELEASE_NOTES.md)。
 
 ## 安装渠道
 
-| 语言 | 原生仓库 | 安装 |
-| --- | --- | --- |
-| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `python -m pip install ofdrw-rs` |
-| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs` |
-| Rust | [crates.io](https://crates.io/crates/ofdrw) | `cargo add ofdrw` |
-| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw` |
+| 语言 | 原生仓库 | v0.1.0 状态 | 当前安装方式 |
+| --- | --- | --- | --- |
+| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | 待发布，Release wheel 已提供 | [下载并安装 wheel](#python) |
+| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | 已发布 | `npm install ofdrw-rs@0.1.0` |
+| Rust | [crates.io](https://crates.io/crates/ofdrw) | 待发布，Git 标签已提供 | [使用 Git 依赖](#rust) |
+| Go | GitHub Go module | 已发布 | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.0` |
 
 各语言使用原生包管理工具，无需 ORAS 或 GitHub Packages 登录。
 Go / C 所需动态库、静态库和 C 头文件保留在 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases)。
@@ -28,7 +29,14 @@ Linux wheels 通过 auditwheel 检查并标记为 manylinux；预编译 native �
 
 ## Python
 
-需要 Python 3.10+。直接从 PyPI 安装：
+需要 Python 3.10+。PyPI 发布尚未完成，先从 [v0.1.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.1.0)
+下载匹配系统和架构的一份 wheel，然后用 pip 安装该文件。Linux x64 可直接执行：
+
+```sh
+python -m pip install "https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.0/ofdrw_rs-0.1.0-py3-none-manylinux_2_35_x86_64.manylinux_2_39_x86_64.whl"
+```
+
+PyPI 发布完成后，可直接使用：
 
 ```sh
 python -m pip install ofdrw-rs==0.1.0
@@ -113,12 +121,14 @@ Release 会同时创建 Go 子模块标签 `bindings/go/v0.1.0`。
 
 ## Rust
 
-使用 crates.io 依赖：
+crates.io 发布尚未完成，当前使用已发布的 Git 标签：
 
 ```toml
 [dependencies]
-ofdrw = "0.1.0"
+ofdrw = { git = "https://github.com/lihongjie0209/ofdrw-rs.git", tag = "v0.1.0" }
 ```
+
+crates.io 发布完成后，可将依赖改为 `ofdrw = "0.1.0"`。
 
 ```rust
 use ofdrw::OfdDocument;
