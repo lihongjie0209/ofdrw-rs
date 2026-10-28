@@ -2911,15 +2911,20 @@ func TestTableCellsSelectFontResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer doc.Close()
-	fonts, err := doc.Fonts()
-	if err != nil || len(fonts) == 0 {
-		t.Fatalf("default fonts: %v, %v", fonts, err)
+	serif, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "dejavu-serif.ttf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultFont, err := doc.AddEmbeddedFont("DejaVu Serif", serif)
+	if err != nil {
+		t.Fatal(err)
 	}
 	selected, err := doc.AddEmbeddedFont("DejaVu Sans", font)
 	if err != nil {
 		t.Fatal(err)
 	}
 	style := DefaultTableStyle()
+	style.FontID = strconv.Itoa(defaultFont)
 	style.PageSize = [2]float64{50, 30}
 	style.Margins = [4]float64{2, 2, 2, 2}
 	style.ColumnWidths = []float64{20, 20}
@@ -2933,7 +2938,7 @@ func TestTableCellsSelectFontResources(t *testing.T) {
 	}
 	objects, err := doc.PageTextObjects(0)
 	if err != nil || len(objects) != 2 || objects[0].FontID == nil || objects[1].FontID == nil ||
-		*objects[0].FontID != fonts[0].ID || *objects[1].FontID != strconv.Itoa(selected) ||
+		*objects[0].FontID != strconv.Itoa(defaultFont) || *objects[1].FontID != strconv.Itoa(selected) ||
 		objects[0].Boundary[2] == objects[1].Boundary[2] {
 		t.Fatalf("selected table fonts: %v, %v", objects, err)
 	}

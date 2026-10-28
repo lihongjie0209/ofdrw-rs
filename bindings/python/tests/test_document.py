@@ -1113,12 +1113,15 @@ def test_table_cells_select_font_resources(tmp_path):
             "fixtures" / "dejavu-sans.ttf").read_bytes()
     path = tmp_path / "table-fonts.ofd"
     with Document.new() as document:
-        default_id = document.fonts()[0]["id"]
+        serif = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" / "tests" /
+                 "fixtures" / "dejavu-serif.ttf").read_bytes()
+        default_id = str(document.add_embedded_font("DejaVu Serif", serif))
         selected_id = document.add_embedded_font("DejaVu Sans", font)
         cells = [{"row": 0, "column": 0, "text": "WWWW", "font_id": None},
                  {"row": 0, "column": 1, "text": "WWWW", "font_id": selected_id}]
         options = dict(page_size=(50, 30), margins=(2, 2, 2, 2),
-                       row_height=0, font_size=3, line_height=4, padding=1)
+                       row_height=0, font_size=3, line_height=4, padding=1,
+                       font_id=default_id)
         assert document.add_table_cells(0, 1, cells, [20, 20], **options) == [0]
         objects = document.page_text_objects(0)
         assert [item["font_id"] for item in objects] == [default_id, str(selected_id)]
