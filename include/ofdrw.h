@@ -431,6 +431,8 @@ int32_t ofd_set_attachment_metadata_json(OfdDocument *handle, size_t index, cons
 int32_t ofd_save(const OfdDocument *handle, const char *path);
 int32_t ofd_to_bytes(const OfdDocument *handle, OfdBuffer *output);
 void ofd_buffer_free(OfdBuffer buffer);
+/* Equivalent release operation for callers that cannot pass structs by value. */
+void ofd_buffer_free_parts(uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

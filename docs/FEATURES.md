@@ -2477,6 +2477,11 @@ handle and `ofd_close()` are serialized; a call after close returns an error,
 and closing the same token twice is safe. This also applies to Python, Go, and
 Node.js bindings that use the shared library.
 
+`ofd_buffer_free_parts(data, len)` releases a returned buffer through scalar
+arguments. Go uses this entry point because purego does not support passing
+structs by value on Windows. The original `ofd_buffer_free(buffer)` remains
+available; release each returned buffer through exactly one of these methods.
+
 ## Go 绑定
 
 Go loads the same C ABI dynamically without cgo. Build the Rust library before

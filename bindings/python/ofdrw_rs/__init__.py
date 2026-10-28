@@ -333,6 +333,7 @@ _ffi.cdef(
     int ofd_save(const OfdDocument *handle, const char *path);
     int ofd_to_bytes(const OfdDocument *handle, OfdBuffer *output);
     void ofd_buffer_free(OfdBuffer buffer);
+    void ofd_buffer_free_parts(uint8_t *data, size_t len);
     """
 )
 

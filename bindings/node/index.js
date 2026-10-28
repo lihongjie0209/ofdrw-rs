@@ -349,6 +349,7 @@ const api = {
   duplicatePageObject: library.func('int ofd_duplicate_page_object(OfdDocument handle, size_t page, str id, _Out_ size_t *output)'),
   removePageObject: library.func('int ofd_remove_page_object(OfdDocument handle, size_t page, str id)'),
   freeBuffer: library.func('void ofd_buffer_free(OfdBuffer buffer)'),
+  freeBufferParts: library.func('void ofd_buffer_free_parts(uint8_t *data, size_t len)'),
 };
 
 if (api.abiVersion() !== 1) throw new OfdError('incompatible OFD C ABI version');

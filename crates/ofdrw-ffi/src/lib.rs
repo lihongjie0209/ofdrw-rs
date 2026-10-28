@@ -11268,12 +11268,39 @@ pub unsafe extern "C" fn ofd_buffer_free(buffer: OfdBuffer) {
     }
 }
 
+/// Release a returned buffer without passing a C struct by value.
+///
+/// # Safety
+/// `data` and `len` must be the unchanged fields of a buffer returned by this
+/// library, released only once. A null data pointer is accepted.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_buffer_free_parts(data: *mut u8, len: usize) {
+    ofd_buffer_free(OfdBuffer { data, len });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
+
+    #[test]
+    fn ffi_releases_buffers_through_scalar_arguments() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_eq!(unsafe { ofd_to_bytes(handle, &mut output) }, 0);
+        assert!(unsafe { std::slice::from_raw_parts(output.data, output.len) }.starts_with(b"PK"));
+        unsafe {
+            ofd_buffer_free_parts(output.data, output.len);
+            ofd_buffer_free_parts(ptr::null_mut(), 0);
+            ofd_close(handle);
+        }
+    }
 
     #[test]
     fn ffi_serializes_shared_handle_calls_and_rejects_closed_tokens() {

@@ -342,6 +342,7 @@ type nativeAPI struct {
 	save                            func(uintptr, *byte) int32
 	toBytes                         func(uintptr, *nativeBuffer) int32
 	bufferFree                      func(nativeBuffer)
+	bufferFreeParts                 func(*byte, uintptr)
 }
 
 var (
@@ -699,7 +700,7 @@ func loadAPI() error {
 			{"ofd_rename_attachment", &api.renameAttachment},
 			{"ofd_replace_attachment_data", &api.replaceAttachmentData},
 			{"ofd_set_attachment_metadata_json", &api.setAttachmentMetadata},
-			{"ofd_buffer_free", &api.bufferFree},
+			{"ofd_buffer_free_parts", &api.bufferFreeParts},
 		}
 		for _, binding := range bindings {
 			address, err := lookupSymbol(library, binding.name)
@@ -708,6 +709,10 @@ func loadAPI() error {
 				return
 			}
 			purego.RegisterFunc(binding.dest, address)
+		}
+		// purego cannot register by-value structs on Windows.
+		api.bufferFree = func(buffer nativeBuffer) {
+			api.bufferFreeParts(buffer.data, buffer.len)
 		}
 		if version := api.version(); version != 1 {
 			apiErr = fmt.Errorf("unsupported ofdrw C ABI version %d", version)

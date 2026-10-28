@@ -26,7 +26,10 @@ NODE_ALIASES = {
     "ofd_verify_signature_with_ordered_sm2_chain_json":
         "ofd_verify_signature_with_ordered_sm2_chain_and_distids_json",
 }
-GO_ALIASES = {"ofd_add_ses_signature": "ofd_add_ses_signature_with_distids"}
+GO_ALIASES = {
+    "ofd_add_ses_signature": "ofd_add_ses_signature_with_distids",
+    "ofd_buffer_free": "ofd_buffer_free_parts",
+}
 
 exports = set(re.findall(r'pub (?:unsafe )?extern "C" fn (ofd_\w+)', RUST))
 python_cdef = PYTHON.split("_ffi.cdef(", 1)[1].split('"""', 2)[1]
