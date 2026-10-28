@@ -1,6 +1,7 @@
 """Build the Rust C ABI into a platform-specific Python wheel."""
 
 import os
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,11 @@ from wheel.bdist_wheel import bdist_wheel
 
 
 ROOT = Path(__file__).resolve().parents[2]
+_platform_spec = importlib.util.spec_from_file_location(
+    "ofdrw_wheel_platform", Path(__file__).with_name("wheel_platform.py")
+)
+_wheel_platform = importlib.util.module_from_spec(_platform_spec)
+_platform_spec.loader.exec_module(_wheel_platform)
 LIBRARY = (
     "ofdrw_ffi.dll"
     if os.name == "nt"
@@ -42,6 +48,11 @@ class BinaryWheel(bdist_wheel):
 
     def get_tag(self):
         _, _, platform = super().get_tag()
+        if sys.platform == "darwin":
+            libraries = list(Path(self.bdist_dir).rglob(LIBRARY))
+            if len(libraries) != 1:
+                raise ValueError("Expected exactly one macOS native library in the wheel")
+            platform = _wheel_platform.macos_platform_tag(platform, libraries[0].read_bytes())
         return "py3", "none", platform
 
 

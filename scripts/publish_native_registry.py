@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 USER_AGENT = "ofdrw-rs release (https://github.com/lihongjie0209/ofdrw-rs)"
+VISIBILITY_CHECKS = 120
 
 
 def read_url(url):
@@ -73,7 +74,7 @@ def main():
         missing = verify_pypi(files, metadata(url))
         if missing:
             subprocess.run([sys.executable, "-m", "twine", "upload", "--non-interactive", *map(str, missing)], check=True)
-        for _ in range(12):
+        for _ in range(VISIBILITY_CHECKS):
             if not verify_pypi(files, metadata(url)):
                 print(f"Verified PyPI ofdrw-rs {version}")
                 return
@@ -83,7 +84,7 @@ def main():
         existing = cargo_checksum(version)
         if existing is None:
             subprocess.run(["cargo", "publish", "-p", "ofdrw", "--locked", "--no-verify"], cwd=ROOT, check=True)
-        for _ in range(12):
+        for _ in range(VISIBILITY_CHECKS):
             existing = cargo_checksum(version)
             if existing is not None:
                 require_digest(file, existing)
@@ -97,7 +98,7 @@ def main():
         if published is None:
             subprocess.run(["npm", "publish", str(file), "--access", "public", "--provenance",
                             "--registry=https://registry.npmjs.org"], check=True)
-        for _ in range(12):
+        for _ in range(VISIBILITY_CHECKS):
             published = metadata(url)
             if published is not None:
                 expected = "sha512-" + base64.b64encode(checksum(file, "sha512").digest()).decode()
@@ -108,7 +109,7 @@ def main():
             time.sleep(5)
     else:
         raise SystemExit(f"Unsupported registry: {registry}")
-    raise SystemExit(f"Published {registry} version is not visible after 60 seconds")
+    raise SystemExit(f"Registry visibility check timed out for {registry}; the accepted version may still be processing. Check its state before retrying publication.")
 
 
 if __name__ == "__main__":

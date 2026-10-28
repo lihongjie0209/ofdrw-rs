@@ -19,7 +19,8 @@ Go 标签和 GitHub Release 使用内置 `GITHUB_TOKEN`，不需要额外凭据�
 
 - [PyPI API token](https://pypi.org/manage/account/token/)：项目不存在时选择 Entire account；
   项目建立后可改用项目范围的 token 或 Trusted Publishing。
-- [crates.io token](https://crates.io/settings/tokens)：允许发布新 crate 和更新 `ofdrw`。
+- [crates.io token](https://crates.io/settings/tokens)：先在 [账号设置](https://crates.io/settings/profile) 验证邮箱，
+  再生成允许发布新 crate 和更新 `ofdrw` 的 token。
   发布流程不需要修改 owner 或 yank 版本的权限。
 - [npm Granular token](https://www.npmjs.com/settings/~/tokens)：选择包的
   Read and write (publish and stage)，CI 无交互发布需允许 Bypass 2FA。
@@ -63,3 +64,9 @@ Linux wheel 经过 auditwheel 修复，CI 会安装修复后的 manylinux wheel�
 若已有版本的文件字节不同，工作流失败，避免覆盖或误认不可变版本。
 发布中断时可用 Release 工作流的 Run workflow 按钮，输入原有标签继续；
 不要移动已对外发布的版本标签。
+
+注册表可能在接受上传后继续处理数分钟。可见性校验超时只表示验证尚未完成，
+请先检查原版本状态，避免把上传成功后的等待误判为上传失败。
+
+macOS wheel 的架构标记取自内含 Rust 动态库的 Mach-O 头；
+每个平台单独构建的动态库不得标为 `universal2`。发布工具也会校验或修复历史产物的标记。

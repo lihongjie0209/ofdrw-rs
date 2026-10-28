@@ -75,6 +75,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.verify.outputs.sha }}
+      - name: Check out release metadata tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: actions/setup-python@v7
         with:
@@ -96,6 +101,10 @@ jobs:
           github-token: ${{ github.token }}
           name: ofdrw-node-package
           path: dist
+      - name: Normalize and validate macOS wheel architecture labels
+        run: |
+          python -m pip install wheel
+          python target/release-tools/scripts/repair_mac_wheels.py dist
       - name: Package Rust and Go source and validate all distributions
         run: |
           cargo package -p ofdrw --locked --no-verify
