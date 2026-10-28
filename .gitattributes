@@ -1,0 +1,17 @@
+# Keep source reproducible and preserve offsets and digests in binary fixtures.
+* text=auto eol=lf
+*.pdf binary
+*.ofd binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.tif binary
+*.tiff binary
+*.ttf binary
+*.otf binary
+*.der binary
+*.bin binary
+*.jbig2 binary
+*.jp2 binary
+*.jpx binary
+*.icc binary
