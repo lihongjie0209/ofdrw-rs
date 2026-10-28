@@ -70,6 +70,10 @@ Linux wheel 经过 auditwheel 修复，CI 会安装修复后的 manylinux wheel�
 检查 Release 中六个平台 wheel 的版本及 `SHA256SUMS`，再仅补传 PyPI 缺失文件。
 此流程不依赖其他语言仓库的发布状态，完成后会在六个平台从公开 PyPI 安装并验证库。
 
+Rust 可通过 `Publish existing Rust release` 工作流（`publish-rust.yml`）单独重试。
+它从原标签打包，先与 Release 的 `.crate` 校验和及内含源码提交比对，再发布到
+crates.io，最后从原生仓库安装并运行 Rust、Go 的 README 示例。
+
 注册表可能在接受上传后继续处理数分钟。可见性校验超时只表示验证尚未完成，
 请先检查原版本状态，避免把上传成功后的等待误判为上传失败。
 

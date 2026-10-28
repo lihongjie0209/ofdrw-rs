@@ -15,7 +15,7 @@
 
 | 语言 | 原生仓库 | v0.1.0 状态 | 当前安装方式 |
 | --- | --- | --- | --- |
-| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | 待发布，Release wheel 已提供 | [下载并安装 wheel](#python) |
+| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | 已发布 | `pip install ofdrw-rs==0.1.0` |
 | Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | 已发布 | `npm install ofdrw-rs@0.1.0` |
 | Rust | [crates.io](https://crates.io/crates/ofdrw) | 待发布，Git 标签已提供 | [使用 Git 依赖](#rust) |
 | Go | GitHub Go module | 已发布 | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.0` |
@@ -29,20 +29,15 @@ Linux wheels 通过 auditwheel 检查并标记为 manylinux；预编译 native �
 
 ## Python
 
-需要 Python 3.10+。PyPI 发布尚未完成，先从 [v0.1.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.1.0)
-下载匹配系统和架构的一份 wheel，然后用 pip 安装该文件。Linux x64 可直接执行：
-
-```sh
-python -m pip install "https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.0/ofdrw_rs-0.1.0-py3-none-manylinux_2_35_x86_64.manylinux_2_39_x86_64.whl"
-```
-
-PyPI 发布完成后，可直接使用：
+需要 Python 3.10+，直接从 PyPI 安装：
 
 ```sh
 python -m pip install ofdrw-rs==0.1.0
 ```
 
 wheel 已带 Rust 共享库，不需要安装 Rust。它会自动安装 CFFI 依赖。
+也可从 [v0.1.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.1.0)
+下载匹配系统和架构的 wheel 后安装。
 
 ```python
 from ofdrw_rs import Document
