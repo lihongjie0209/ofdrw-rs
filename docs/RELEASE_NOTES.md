@@ -1,3 +1,14 @@
+Unreleased source changes after v0.1.0:
+
+- PDF sampled shading functions now support cubic (Order 3) interpolation,
+  including table edges, interior extrema, reversed mappings and output clipping.
+  Axial and radial import fixtures exercise the C ABI through Python, Go and
+  Node.js; the axial pixel regression uses an independent Ghostscript render.
+- macOS Python wheel tags identify the bundled library architecture. The v0.1.0
+  GitHub wheel assets have also been corrected without changing native code.
+
+These source changes do not alter the immutable v0.1.0 npm package or Git tags.
+
 Initial public preview of ofdrw-rs.
 
 - Rust OFD package/document core with shared C ABI.

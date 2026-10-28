@@ -2300,6 +2300,39 @@ fn pdf_shading_function_range(
     Ok(Some(values))
 }
 
+fn pdf_sample_cubic_coefficients(samples: [f64; 4]) -> [f64; 4] {
+    let [before, first, last, after] = samples;
+    // Catmull-Rom interpolation, with repeated endpoint samples at table edges.
+    [
+        first,
+        (last - before) / 2.0,
+        before - 2.5 * first + 2.0 * last - after / 2.0,
+        (after - before) / 2.0 + 1.5 * (first - last),
+    ]
+}
+
+fn pdf_sample_cubic_extrema([_, b, c, d]: [f64; 4]) -> Vec<f64> {
+    let mut roots = Vec::new();
+    if d == 0.0 {
+        if c != 0.0 {
+            roots.push(-b / (2.0 * c));
+        }
+    } else {
+        let discriminant = 4.0 * c * c - 12.0 * d * b;
+        if discriminant >= 0.0 {
+            // This form avoids subtracting almost equal numbers for one root.
+            let q = -c - (discriminant.sqrt() / 2.0).copysign(c);
+            if q != 0.0 {
+                roots.extend([q / (3.0 * d), b / q]);
+            } else {
+                roots.push(-c / (3.0 * d));
+            }
+        }
+    }
+    roots.retain(|root| *root > 0.0 && *root < 1.0);
+    roots
+}
+
 fn pdf_sampled_function_points(
     pdf: &PdfDocument,
     stream: &lopdf::Stream,
@@ -2370,20 +2403,15 @@ fn pdf_sampled_function_points(
             "invalid PDF sampled Function BitsPerSample".into(),
         ));
     }
-    match integer(b"Order", Some(1))? {
-        1 => {}
-        3 if size < 4 => {}
-        3 => {
-            return Err(OfdError::Invalid(
-                "PDF sampled Function cubic interpolation is unsupported".into(),
-            ))
-        }
+    let cubic = match integer(b"Order", Some(1))? {
+        1 => false,
+        3 => size >= 4,
         _ => {
             return Err(OfdError::Invalid(
                 "invalid PDF sampled Function Order".into(),
             ))
         }
-    }
+    };
     let range = pdf_shading_function_range(pdf, dictionary, color_space.channels())?
         .ok_or_else(|| OfdError::Invalid("PDF sampled Function has no Range".into()))?;
     let decode = array(b"Decode", color_space.channels() * 2)?.unwrap_or_else(|| range.clone());
@@ -2400,6 +2428,14 @@ fn pdf_sampled_function_points(
     let samples = (0..sample_count)
         .map(|index| f64::from(read_pdf_sample(&bytes, index, bits as usize)) / maximum)
         .collect::<Vec<_>>();
+    let coefficients = |index: usize, channel: usize| {
+        pdf_sample_cubic_coefficients([
+            samples[index.saturating_sub(1) * color_space.channels() + channel],
+            samples[index * color_space.channels() + channel],
+            samples[(index + 1).min(size - 1) * color_space.channels() + channel],
+            samples[(index + 2).min(size - 1) * color_space.channels() + channel],
+        ])
+    };
     let raw_at = |position: f64| {
         let x = (input[0] + position * (input[1] - input[0])).clamp(domain[0], domain[1]);
         let x = (encode[0] + (x - domain[0]) / (domain[1] - domain[0]) * (encode[1] - encode[0]))
@@ -2409,8 +2445,13 @@ fn pdf_sampled_function_points(
         let fraction = x - first as f64;
         (0..color_space.channels())
             .map(|channel| {
-                let sample = samples[first * color_space.channels() + channel] * (1.0 - fraction)
-                    + samples[last * color_space.channels() + channel] * fraction;
+                let sample = if cubic {
+                    let [a, b, c, d] = coefficients(first, channel);
+                    ((d * fraction + c) * fraction + b) * fraction + a
+                } else {
+                    samples[first * color_space.channels() + channel] * (1.0 - fraction)
+                        + samples[last * color_space.channels() + channel] * fraction
+                };
                 decode[2 * channel] + sample * (decode[2 * channel + 1] - decode[2 * channel])
             })
             .collect::<Vec<_>>()
@@ -2419,9 +2460,22 @@ fn pdf_sampled_function_points(
     if input[0] != input[1] {
         let mut inputs = vec![domain[0], domain[1]];
         if encode[0] != encode[1] {
-            inputs.extend((0..size).map(|index| {
-                domain[0]
-                    + (index as f64 - encode[0]) / (encode[1] - encode[0]) * (domain[1] - domain[0])
+            let mut knots = (0..size).map(|index| index as f64).collect::<Vec<_>>();
+            if cubic {
+                // Split at turning points before clipping or adaptive sampling, so a
+                // short overshoot cannot disappear between the quarter-point probes.
+                for index in 0..size - 1 {
+                    for channel in 0..color_space.channels() {
+                        knots.extend(
+                            pdf_sample_cubic_extrema(coefficients(index, channel))
+                                .into_iter()
+                                .map(|fraction| index as f64 + fraction),
+                        );
+                    }
+                }
+            }
+            inputs.extend(knots.into_iter().map(|knot| {
+                domain[0] + (knot - encode[0]) / (encode[1] - encode[0]) * (domain[1] - domain[0])
             }));
         }
         for x in inputs {
@@ -2456,7 +2510,23 @@ fn pdf_sampled_function_points(
             for value in thresholds {
                 let fraction = (value - start[channel]) / (end[channel] - start[channel]);
                 if fraction > 0.0 && fraction < 1.0 {
-                    clipping.push(pair[0] + fraction * (pair[1] - pair[0]));
+                    let position = if cubic {
+                        // Each interval is monotone after splitting at its extrema.
+                        let (mut low, mut high) = (pair[0], pair[1]);
+                        for _ in 0..48 {
+                            let middle = (low + high) / 2.0;
+                            if (raw_at(middle)[channel] < value) == (start[channel] < end[channel])
+                            {
+                                low = middle;
+                            } else {
+                                high = middle;
+                            }
+                        }
+                        (low + high) / 2.0
+                    } else {
+                        pair[0] + fraction * (pair[1] - pair[0])
+                    };
+                    clipping.push(position);
                 }
             }
         }
@@ -10713,31 +10783,34 @@ mod tests {
 
     #[test]
     fn sampled_shading_works_inside_stitching_function() {
-        let mut pdf = PdfDocument::new();
-        let sample = pdf.add_object(sampled_function(8, &[0, 255]));
-        let function = Object::Dictionary(dictionary! {
-            "FunctionType" => 3,
-            "Domain" => Object::Array(vec![0.into(), 1.into()]),
-            "Range" => Object::Array(vec![Object::Real(0.25), Object::Real(0.75)]),
-            "Bounds" => Object::Array(vec![Object::Real(0.5)]),
-            "Encode" => Object::Array(vec![0.into(), 1.into(), 1.into(), 0.into()]),
-            "Functions" => Object::Array(vec![Object::Reference(sample), Object::Reference(sample)]),
-        });
-        let segments = pdf_shading_segments(
-            &pdf,
-            &function,
-            &PdfColorSpace::Gray,
-            RenderingIntent::RelativeColorimetric,
-            [0.0, 1.0],
-        )
-        .unwrap();
-        assert_eq!(segments.first().unwrap().color, [64; 3]);
-        assert_eq!(segments.last().unwrap().color, [64; 3]);
-        assert!(segments
-            .iter()
-            .any(|segment| segment.position == Some(0.5) && segment.color == [191; 3]));
+        for (order, values) in [(1, vec![0, 255]), (3, vec![0, 64, 128, 255])] {
+            let mut pdf = PdfDocument::new();
+            let mut sampled = sampled_function(8, &values);
+            sampled.dict.set("Order", order);
+            let sample = pdf.add_object(sampled);
+            let function = Object::Dictionary(dictionary! {
+                "FunctionType" => 3,
+                "Domain" => Object::Array(vec![0.into(), 1.into()]),
+                "Range" => Object::Array(vec![Object::Real(0.25), Object::Real(0.75)]),
+                "Bounds" => Object::Array(vec![Object::Real(0.5)]),
+                "Encode" => Object::Array(vec![0.into(), 1.into(), 1.into(), 0.into()]),
+                "Functions" => Object::Array(vec![Object::Reference(sample), Object::Reference(sample)]),
+            });
+            let segments = pdf_shading_segments(
+                &pdf,
+                &function,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+            )
+            .unwrap();
+            assert_eq!(segments.first().unwrap().color, [64; 3]);
+            assert_eq!(segments.last().unwrap().color, [64; 3]);
+            assert!(segments
+                .iter()
+                .any(|segment| segment.position == Some(0.5) && segment.color == [191; 3]));
+        }
     }
-
     #[test]
     fn sampled_shading_imports_axial_and_radial_fixtures_and_matches_reference() {
         for (source, radial) in [
@@ -10809,6 +10882,154 @@ mod tests {
     }
 
     #[test]
+    fn sampled_shading_cubic_interpolates_table_interior_and_edges() {
+        let mut pdf = PdfDocument::new();
+        let mut function = sampled_function(8, &[0, 64, 128, 255]);
+        function.dict.set("Order", 3);
+        let id = pdf.add_object(function);
+        for (input, expected) in [
+            (-1.0, 0),
+            (1.0 / 6.0, 28),
+            (0.5, 92),
+            (8.0 / 9.0, 220),
+            (2.0, 255),
+        ] {
+            let points = pdf_sampled_function_points(
+                &pdf,
+                pdf.get_object(id).unwrap().as_stream().unwrap(),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [input, input],
+                None,
+            )
+            .unwrap();
+            assert!(
+                points.iter().all(|(_, color)| *color == [expected; 3]),
+                "{input}: {points:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampled_shading_cubic_retains_extrema_between_equal_samples() {
+        let mut pdf = PdfDocument::new();
+        let mut function = sampled_function(8, &[128, 128, 255, 255]);
+        function.dict.set("Order", 3);
+        let id = pdf.add_object(function);
+        let segments = pdf_shading_segments(
+            &pdf,
+            &Object::Reference(id),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        assert!(
+            segments.iter().any(|segment| {
+                (segment.position.unwrap() - 2.0 / 9.0).abs() < 1e-12 && segment.color == [119; 3]
+            }),
+            "{segments:?}"
+        );
+    }
+
+    #[test]
+    fn sampled_shading_cubic_reverses_encode_and_decode() {
+        let mut pdf = PdfDocument::new();
+        let mut function = sampled_function(8, &[0, 64, 128, 255]);
+        function.dict.set("Order", 3);
+        function
+            .dict
+            .set("Encode", Object::Array(vec![3.into(), 0.into()]));
+        function
+            .dict
+            .set("Decode", Object::Array(vec![1.into(), 0.into()]));
+        let id = pdf.add_object(function);
+        let segments = pdf_shading_segments(
+            &pdf,
+            &Object::Reference(id),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.5, 0.5],
+        )
+        .unwrap();
+        assert!(segments.iter().all(|segment| segment.color == [163; 3]));
+    }
+
+    #[test]
+    fn sampled_shading_cubic_inserts_range_clipping_stops() {
+        let mut pdf = PdfDocument::new();
+        let mut function = sampled_function(8, &[0, 255, 255, 0]);
+        function.dict.set("Order", 3);
+        let id = pdf.add_object(function);
+        let points = pdf_sampled_function_points(
+            &pdf,
+            pdf.get_object(id).unwrap().as_stream().unwrap(),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+            Some(&[0.2, 0.8]),
+        )
+        .unwrap();
+        assert_eq!(points.first().unwrap().1, [51; 3]);
+        assert_eq!(points.last().unwrap().1, [51; 3]);
+        let plateau = points
+            .iter()
+            .filter(|(_, color)| *color == [204; 3])
+            .collect::<Vec<_>>();
+        assert!(plateau.len() >= 2);
+        assert!(plateau.first().unwrap().0 < 1.0 / 3.0);
+        assert!(plateau.last().unwrap().0 > 2.0 / 3.0);
+    }
+
+    #[test]
+    fn sampled_shading_cubic_imports_and_matches_ghostscript() {
+        for (source, radial) in [
+            (
+                include_bytes!("../tests/fixtures/shading-sampled-cubic-axial.pdf").as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/shading-sampled-cubic-radial.pdf").as_slice(),
+                true,
+            ),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains(if radial {
+                "radialGradient"
+            } else {
+                "linearGradient"
+            }));
+            assert!(document.validate_references().unwrap().is_empty());
+            if !radial {
+                let rendered = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                    .unwrap()
+                    .to_rgb8();
+                let reference = image::load_from_memory(include_bytes!(
+                    "../tests/fixtures/shading-sampled-cubic-reference.png"
+                ))
+                .unwrap()
+                .to_rgb8();
+                assert_eq!(rendered.dimensions(), reference.dimensions());
+                let maximum_error = rendered
+                    .as_raw()
+                    .iter()
+                    .zip(reference.as_raw())
+                    .map(|(actual, expected)| actual.abs_diff(*expected))
+                    .max()
+                    .unwrap();
+                assert!(
+                    maximum_error <= 6,
+                    "cubic shading differs from Ghostscript by {maximum_error}"
+                );
+            }
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+            assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        }
+    }
+
+    #[test]
     fn sampled_shading_rejects_malformed_parameters_and_data() {
         let original = sampled_function(8, &[0, 128, 200, 255]);
         for (key, value) in [
@@ -10817,7 +11038,6 @@ mod tests {
             ("Size", Object::Array(vec![10001.into()])),
             ("BitsPerSample", 3.into()),
             ("Order", 2.into()),
-            ("Order", 3.into()),
             ("Range", Object::Array(vec![1.into(), 0.into()])),
             ("Encode", Object::Array(vec![0.into()])),
             ("Domain", Object::Array(vec![1.into(), 1.into()])),

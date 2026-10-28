@@ -1690,12 +1690,15 @@ PDF axial (type 2) and radial (type 3) `sh` shading import as OFD gradients
 for type 2 exponential functions and one-input type 0 sampled functions,
 including type 3 stitching functions composed of these subfunctions.
 
-Sampled functions support linear interpolation, 1/2/4/8/12/16/24/32-bit
+Sampled functions support linear and cubic (Order 3) interpolation, 1/2/4/8/12/16/24/32-bit
 samples, bounded byte-filter chains, reversed `Encode` and `Decode` mappings,
 and input/output clipping. Every sample-table knot is retained before adaptive
-color conversion so narrow color transitions are not skipped. Multi-input
-sampled functions and cubic interpolation for tables with four or more samples
-remain unsupported. Nonlinear color conversions use bounded adaptive color stops.
+color conversion so narrow color transitions are not skipped. Cubic functions
+retain interior turning points and clipping thresholds before adaptive sampling;
+table endpoints repeat their nearest sample. Tables with fewer than four samples
+use linear interpolation as required by PDF. An independent Ghostscript render
+checks cubic axial shading. Multi-input sampled functions remain unsupported.
+Nonlinear color conversions use bounded adaptive color stops.
 
 Stitching bounds, reversed `Encode` intervals, and the stitching function's
 output `Range` become explicit OFD color stops. Nondefault shading domains are normalized to
@@ -2495,7 +2498,7 @@ CGO_ENABLED=0 go test -count=1 -tags=integration ./...
 
 Set `OFDRW_LIB_PATH` to an absolute library path when using the Go package
 outside this repository. The Go wrapper is compiled for Linux, macOS, and
-Windows on x86_64 and ARM64; native execution tests currently run on Linux.
+Windows on x86_64 and ARM64; CI executes native tests on all six targets.
 An explicit path never falls back to a different installed or build library.
 
 ## Node.js 绑定
@@ -2603,7 +2606,7 @@ composite resource thumbnail and substitution IDs can be edited through Node.js.
 Root integrity manifest reading, SM2 signing, and verification are available.
 Python, Go, and Node.js declare the current C ABI operations. Go uses scalar buffer release, JSON positioned SES stamping, and a newer
 SES signing entry point in place of older aliases; Node.js uses newer JSON or
-configurable entry points for 13 older aliases. CI checks these bindings with
+configurable entry points for 10 older aliases. CI checks these bindings with
 `scripts/check_binding_ffi_parity.py`.
 
 ## 持续集成

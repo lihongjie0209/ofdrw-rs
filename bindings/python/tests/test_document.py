@@ -285,7 +285,7 @@ def test_imports_jbig2_pdf_image_across_binding(name):
             assert reopened.page_image_data(0, 0) == document.page_image_data(0, 0)
 
 
-@pytest.mark.parametrize("kind", ["axial", "radial"])
+@pytest.mark.parametrize("kind", ["axial", "radial", "cubic-axial", "cubic-radial"])
 def test_imports_sampled_shading_pdf_across_binding(kind):
     fixture = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" /
                "tests" / "fixtures" / f"shading-sampled-{kind}.pdf")

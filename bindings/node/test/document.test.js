@@ -1700,7 +1700,7 @@ test('import JBIG2 PDF images with and without global dictionaries through the C
 });
 
 test('import PDF axial and radial sampled shading functions through the C ABI', () => {
-  for (const kind of ['axial', 'radial']) {
+  for (const kind of ['axial', 'radial', 'cubic-axial', 'cubic-radial']) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture(`shading-sampled-${kind}.pdf`)));
     try {
       const svg = document.pageSvg(0);
