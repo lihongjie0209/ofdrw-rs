@@ -1,182 +1,54 @@
-name: Verify native npm publication
-
+name: Repair published Python wheel architecture labels
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Version to publish from the verified source snapshot
-        required: true
-        default: v0.1.0
-        type: string
-
 permissions:
-  contents: read
-  actions: read
-
-concurrency:
-  group: native-npm-bootstrap
-  cancel-in-progress: false
-
+  contents: write
 jobs:
-  publish-npm:
+  repair:
     runs-on: ubuntu-24.04
     env:
-      SOURCE_SHA: e881664ff02ab235fefeaaee8849d14009cd105b
-      SOURCE_RUN: '40628799821'
-      RELEASE_TAG: ${{ inputs.tag }}
-    steps:
-      - name: Require the successful full CI run for the source snapshot
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const {data: run} = await github.rest.actions.getWorkflowRun({
-              ...context.repo, run_id: Number(process.env.SOURCE_RUN)
-            });
-            if (run.head_sha !== process.env.SOURCE_SHA || run.conclusion !== 'success' ||
-                run.event !== 'push' || run.head_branch !== 'main' || run.name !== 'CI') {
-              throw new Error('The source does not have the required successful full CI run');
-            }
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.SOURCE_SHA }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          registry-url: https://registry.npmjs.org
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - uses: actions/download-artifact@v8
-        with:
-          run-id: ${{ env.SOURCE_RUN }}
-          github-token: ${{ github.token }}
-          name: ofdrw-node-package
-          path: dist
-      - name: Verify the existing npm version against the original CI tarball
-        run: |
-          python - <<'PYVERIFY'
-          import base64
-          from pathlib import Path
-          import os
-          import time
-          from scripts.publish_native_registry import checksum, metadata
-          version = os.environ['RELEASE_TAG'][1:]
-          tarball = Path('dist') / f'ofdrw-rs-{version}.tgz'
-          expected = 'sha512-' + base64.b64encode(checksum(tarball, 'sha512').digest()).decode()
-          for attempt in range(120):
-              published = metadata(f'https://registry.npmjs.org/ofdrw-rs/{version}')
-              if published is not None:
-                  if published['dist']['integrity'] != expected:
-                      raise SystemExit('Registry tarball differs from the verified CI artifact')
-                  print(f'Verified npm ofdrw-rs {version} against the original CI artifact')
-                  break
-              time.sleep(5)
-          else:
-              raise SystemExit('npm metadata is still processing after ten minutes')
-          PYVERIFY
-      - name: Install from the public npm registry and run the library
-        run: |
-          mkdir "$RUNNER_TEMP/ofdrw-npm-registry-consumer"
-          cd "$RUNNER_TEMP/ofdrw-npm-registry-consumer"
-          npm --userconfig /dev/null --registry=https://registry.npmjs.org install "ofdrw-rs@${RELEASE_TAG#v}"
-          node -e "const {Document}=require('ofdrw-rs'); const d=Document.create(); try { d.addTextPage('npm native library'); if(d.pageText(0)[0]!=='npm native library') throw new Error('Registry smoke failed'); } finally { d.close(); }"
-
-  publish-go-and-native:
-    needs: publish-npm
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      actions: read
-    env:
-      SOURCE_SHA: e881664ff02ab235fefeaaee8849d14009cd105b
-      SOURCE_RUN: '40628799821'
-      RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.SOURCE_SHA }}
-      - uses: dtolnay/rust-toolchain@1.96.0
+          ref: 712b4ad
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.25'
-      - uses: actions/download-artifact@v8
-        with:
-          run-id: ${{ env.SOURCE_RUN }}
-          github-token: ${{ github.token }}
-          pattern: ofdrw-release-*
-          merge-multiple: true
-          path: dist
-      - uses: actions/download-artifact@v8
-        with:
-          run-id: ${{ env.SOURCE_RUN }}
-          github-token: ${{ github.token }}
-          name: ofdrw-node-package
-          path: dist
-      - name: Assemble the verified preview distributions
+      - name: Download and verify the published wheel files
         run: |
-          cargo package -p ofdrw --locked --no-verify
-          cp target/package/ofdrw-*.crate dist/
-          python scripts/assemble_release.py "$RELEASE_TAG" dist
-      - name: Create immutable source and Go module tags
-        uses: actions/github-script@v9
-        with:
-          script: |
-            for (const name of [process.env.RELEASE_TAG, `bindings/go/${process.env.RELEASE_TAG}`]) {
-              try {
-                const {data} = await github.rest.git.getRef({...context.repo, ref: `tags/${name}`});
-                if (data.object.sha !== process.env.SOURCE_SHA) throw new Error(`Tag ${name} points to another source`);
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                await github.rest.git.createRef({...context.repo, ref: `refs/tags/${name}`, sha: process.env.SOURCE_SHA});
-              }
-            }
-      - name: Publish native libraries and source backups on GitHub Releases
+          python -m pip install wheel twine
+          gh release download v0.1.0 --pattern '*.whl' --pattern SHA256SUMS --dir dist
+          cd dist
+          sha256sum --ignore-missing --check SHA256SUMS
+      - name: Repair labels and preserve native library bytes
         run: |
-          python - <<'PYNOTES'
+          python scripts/repair_mac_wheels.py dist --report repairs.json
+          python scripts/repair_mac_wheels.py dist --check-only
+          python -m twine check --strict dist/*.whl
+          python - <<'PYREPAIR'
+          import hashlib, json
           from pathlib import Path
-          import os
-          (Path(os.environ['RUNNER_TEMP']) / 'ofdrw-preview-notes.md').write_text('''Initial public preview of ofdrw-rs.
-
-          - Node.js is available from npm: `npm install ofdrw-rs@0.1.0`.
-          - Go is available as the GitHub module tagged `bindings/go/v0.1.0`.
-          - Native libraries are included for Linux, macOS and Windows on x64 and ARM64.
-          - Python wheels and Rust source are included below. Publication on PyPI and crates.io will follow.
-          - SHA256SUMS covers all release files.
-
-          The source and all distributions were validated by the full six-platform CI run for commit e881664ff02ab235fefeaaee8849d14009cd105b.
-          This preview has incomplete Java OFDRW and standards coverage; see docs/FEATURES.md for supported behavior and limitations.
-          ''')
-          PYNOTES
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* --clobber
-          else
-            gh release create "$RELEASE_TAG" dist/* --draft --verify-tag --prerelease \
-              --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/ofdrw-preview-notes.md"
-          fi
-          gh release edit "$RELEASE_TAG" --draft=false
-      - name: Install and run the public Go module with the release native library
+          repairs = json.loads(Path('repairs.json').read_text())
+          assert len(repairs) == 2, repairs
+          sums = Path('dist/SHA256SUMS')
+          rows = dict(line.split('  ', 1)[::-1] for line in sums.read_text().splitlines())
+          for item in repairs:
+              del rows[item['old']]
+              rows[item['new']] = hashlib.sha256((Path('dist') / item['new']).read_bytes()).hexdigest()
+          sums.write_text(''.join(f'{digest}  {name}\n' for name, digest in sorted(rows.items())))
+          PYREPAIR
+      - name: Replace only the corrected wheel metadata assets
         run: |
-          python - <<'PYGO'
+          python - <<'PYUPLOAD'
+          import json, subprocess
           from pathlib import Path
-          import os
-          import re
-          import zipfile
-          tag = os.environ['RELEASE_TAG']
-          prefix = f'ofdrw-native-linux-x64-{tag}'
-          temporary = Path(os.environ['RUNNER_TEMP'])
-          with zipfile.ZipFile(Path('dist') / f'{prefix}.zip') as archive:
-              (temporary / 'libofdrw-preview.so').write_bytes(archive.read(f'{prefix}/libofdrw_ffi.so'))
-          consumer = temporary / 'ofdrw-go-preview-consumer'
-          consumer.mkdir()
-          readme = Path('README.md').read_text()
-          (consumer / 'main.go').write_text(re.search(r'```go\n(.*?)\n```', readme, re.S).group(1))
-          PYGO
-          cd "$RUNNER_TEMP/ofdrw-go-preview-consumer"
-          go mod init example.com/ofdrw-preview-consumer
-          GOPROXY=direct go get "github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@$RELEASE_TAG"
-          OFDRW_LIB_PATH="$RUNNER_TEMP/libofdrw-preview.so" CGO_ENABLED=0 go run .
-          test -s hello.ofd
+          repairs = json.loads(Path('repairs.json').read_text())
+          for item in repairs:
+              subprocess.run(['gh', 'release', 'upload', 'v0.1.0', 'dist/' + item['new'], '--clobber'], check=True)
+          subprocess.run(['gh', 'release', 'upload', 'v0.1.0', 'dist/SHA256SUMS', '--clobber'], check=True)
+          for item in repairs:
+              subprocess.run(['gh', 'release', 'delete-asset', 'v0.1.0', item['old'], '--yes'], check=True)
+          PYUPLOAD
+          cd dist
+          sha256sum --ignore-missing --check SHA256SUMS
