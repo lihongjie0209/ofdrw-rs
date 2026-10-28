@@ -7,6 +7,7 @@
 mod archive;
 mod bilevel;
 mod encryption;
+mod pdf_calculator;
 mod pdf_import;
 
 pub use encryption::{

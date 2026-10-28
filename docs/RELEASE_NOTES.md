@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- PDF Type 4 calculator functions support the 42 standard operators, bounded
+  typed evaluation, and adaptive axial/radial gradient import. Conditional and
+  integer-step jumps are retained as separate color stops; finite sampling
+  does not exhaustively resolve oscillations between samples. Numerical, malformed
+  input, resource-limit, independent-render and language-binding tests cover
+  the supported behavior.
+
 - PDF sampled, exponential and stitching functions resolve indirect parameters
   and numeric array members. Reference validation retains type, array-length,
   range and size checks, and rejects dangling or cyclic references. New axial

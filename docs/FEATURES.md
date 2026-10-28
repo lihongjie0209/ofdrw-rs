@@ -1687,7 +1687,8 @@ RunLength, ASCIIHex, and ASCII85 decoding; filter abbreviations are expanded.
 Flate and LZW predictor parameters are applied to filtered inline images.
 The importer also handles filtered inline images in Form XObjects.
 PDF axial (type 2) and radial (type 3) `sh` shading import as OFD gradients
-for type 2 exponential functions and one-input type 0 sampled functions,
+for type 2 exponential functions, one-input type 0 sampled functions,
+and type 4 calculator functions,
 including nested type 3 stitching functions composed of these subfunctions.
 Stitching supports up to 16 nesting levels, preserves discontinuities under
 reversed encoding, and applies every enclosing output `Range` in component
@@ -1700,6 +1701,25 @@ including exponential `N/C0/C1/Domain`, sampled parameters, and stitching
 array dimensions return errors; explicit malformed endpoints do not fall back
 to default colors. Axial and radial indirect-reference fixtures produce the
 same OFD SVG and PNG output as their direct-value counterparts.
+
+Calculator functions implement the 42 PDF arithmetic, relational, boolean,
+bitwise, conditional and stack operators with signed 32-bit integers and
+finite real arithmetic. Integer arithmetic overflow promotes to real where
+appropriate; invalid conversions, type errors, stack errors and undefined
+arithmetic return errors. Conditional blocks short-circuit. Input Domain,
+output Range, enclosing stitching ranges, and color-space component bounds
+apply before color conversion. The same bounded byte-filter chain decodes
+calculator streams, including Flate compression.
+
+Calculator gradients use 64 initial intervals followed by bounded adaptive
+color-stop sampling. Changes in conditional branches, rounding, integer
+conversion and the atan angle region guide subdivision; located discontinuities
+retain separate left/right stops. This finite sampling does not exhaustively resolve oscillations
+between samples. Limits are 64 KiB of code, 4,096 instructions, 32 nested
+conditional levels, 256 stack operands, 65,536 evaluations per calculator
+interval, and 10,000 color stops. Complex expressions exceeding these limits return an
+error. Axial and radial fixtures exercise the feature through all language
+bindings; the axial pixel regression uses an independent Ghostscript render.
 
 Sampled functions support linear and cubic (Order 3) interpolation, 1/2/4/8/12/16/24/32-bit
 samples, bounded byte-filter chains, reversed `Encode` and `Decode` mappings,

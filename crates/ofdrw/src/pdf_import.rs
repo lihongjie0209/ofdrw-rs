@@ -2572,6 +2572,131 @@ fn pdf_sampled_function_points(
     Ok(points)
 }
 
+struct CalculatorSample {
+    position: f64,
+    color: [u8; 3],
+    regions: Vec<(usize, u64)>,
+}
+
+fn subdivide_pdf_calculator<F>(
+    evaluate: &F,
+    start: &CalculatorSample,
+    end: &CalculatorSample,
+    depth: usize,
+    output: &mut Vec<(f64, [u8; 3])>,
+) -> Result<(), OfdError>
+where
+    F: Fn(f64) -> Result<CalculatorSample, OfdError>,
+{
+    let interval = end.position - start.position;
+    let quarter = evaluate(start.position + interval * 0.25)?;
+    let middle = evaluate(start.position + interval * 0.5)?;
+    let three_quarters = evaluate(start.position + interval * 0.75)?;
+    let same_region = [&quarter, &middle, &three_quarters, end]
+        .iter()
+        .all(|sample| sample.regions == start.regions);
+    let accurate = [(0.25, &quarter), (0.5, &middle), (0.75, &three_quarters)]
+        .iter()
+        .all(|(fraction, sample)| {
+            (0..3).all(|channel| {
+                let linear = f64::from(start.color[channel]) * (1.0 - fraction)
+                    + f64::from(end.color[channel]) * fraction;
+                (f64::from(sample.color[channel]) - linear).abs() <= 2.0
+            })
+        });
+    if !same_region && interval <= 1e-10 {
+        // Keep distinct left/right colors at a jump, as for a stitching bound.
+        let boundary = (start.position + end.position) / 2.0;
+        output.extend([
+            (boundary, start.color),
+            (boundary, end.color),
+            (end.position, end.color),
+        ]);
+    } else if same_region && accurate {
+        output.push((end.position, end.color));
+    } else {
+        if depth >= 40 || (same_region && depth >= 16) {
+            return Err(OfdError::Limit(
+                "PDF calculator gradient needs too many subdivisions".into(),
+            ));
+        }
+        subdivide_pdf_calculator(evaluate, start, &middle, depth + 1, output)?;
+        subdivide_pdf_calculator(evaluate, &middle, end, depth + 1, output)?;
+    }
+    if output.len() > 10_000 {
+        return Err(OfdError::Limit(
+            "PDF shading has too many color stops".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn pdf_calculator_function_points(
+    pdf: &PdfDocument,
+    stream: &lopdf::Stream,
+    color_space: &PdfColorSpace,
+    rendering_intent: RenderingIntent,
+    input: [f64; 2],
+    output_range: Option<&[f64]>,
+) -> Result<Vec<(f64, [u8; 3])>, OfdError> {
+    if !stream.dict.has(b"Domain") {
+        return Err(OfdError::Invalid(
+            "PDF calculator Function has no Domain".into(),
+        ));
+    }
+    let domain = pdf_function_domain(pdf, &stream.dict)?;
+    let range = pdf_shading_function_range(pdf, &stream.dict, color_space.channels())?
+        .ok_or_else(|| OfdError::Invalid("PDF calculator Function has no Range".into()))?;
+    let code = pdf_byte_stream_data(stream, Some(pdf), "calculator Function")?;
+    let program = crate::pdf_calculator::Calculator::parse(&code)?;
+    let remaining = std::cell::Cell::new(65_536usize);
+    let argument =
+        |position: f64| (input[0] + position * (input[1] - input[0])).clamp(domain[0], domain[1]);
+    let evaluate = |position| -> Result<CalculatorSample, OfdError> {
+        remaining.set(remaining.get().checked_sub(1).ok_or_else(|| {
+            OfdError::Limit("PDF calculator gradient exceeds its evaluation budget".into())
+        })?);
+        let mut result = program.evaluate(&[argument(position)], color_space.channels())?;
+        for (channel, value) in result.values.iter_mut().enumerate() {
+            *value = value.clamp(range[2 * channel], range[2 * channel + 1]);
+            if let Some(outer) = output_range {
+                *value = value.clamp(outer[2 * channel], outer[2 * channel + 1]);
+            }
+            let bounds = color_space.component_bounds(channel);
+            *value = value.clamp(bounds[0], bounds[1]);
+        }
+        Ok(CalculatorSample {
+            position,
+            color: color_space.color_with_intent(&result.values, rendering_intent)?,
+            regions: result.regions,
+        })
+    };
+    let first = evaluate(0.0)?;
+    if argument(0.0) == argument(1.0) {
+        return Ok(vec![(0.0, first.color), (1.0, first.color)]);
+    }
+    let mut positions = (0..=64).map(|i| f64::from(i) / 64.0).collect::<Vec<_>>();
+    for bound in domain {
+        let position = (bound - input[0]) / (input[1] - input[0]);
+        if position > 0.0 && position < 1.0 {
+            positions.push(position);
+        }
+    }
+    positions.sort_by(f64::total_cmp);
+    positions.dedup();
+    let mut output = vec![(0.0, first.color)];
+    for pair in positions.windows(2) {
+        subdivide_pdf_calculator(
+            &evaluate,
+            &evaluate(pair[0])?,
+            &evaluate(pair[1])?,
+            0,
+            &mut output,
+        )?;
+    }
+    Ok(output)
+}
+
 fn pdf_linear_function_points(
     pdf: &PdfDocument,
     object: &Object,
@@ -2584,15 +2709,28 @@ fn pdf_linear_function_points(
         .dereference(object)
         .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function: {error}")))?;
     if let Object::Stream(stream) = function {
-        if pdf_function_type(pdf, &stream.dict)? == 0 {
-            return pdf_sampled_function_points(
-                pdf,
-                stream,
-                color_space,
-                rendering_intent,
-                encode,
-                output_range,
-            );
+        match pdf_function_type(pdf, &stream.dict)? {
+            0 => {
+                return pdf_sampled_function_points(
+                    pdf,
+                    stream,
+                    color_space,
+                    rendering_intent,
+                    encode,
+                    output_range,
+                )
+            }
+            4 => {
+                return pdf_calculator_function_points(
+                    pdf,
+                    stream,
+                    color_space,
+                    rendering_intent,
+                    encode,
+                    output_range,
+                )
+            }
+            _ => {}
         }
     }
     let function = function
@@ -2785,7 +2923,7 @@ fn pdf_shading_segments_inner(
             .map_err(|_| OfdError::Invalid("PDF shading Function is not a dictionary".into()))?,
     };
     let function_type = pdf_function_type(pdf, dictionary)?;
-    if matches!(function_type, 0 | 2) {
+    if matches!(function_type, 0 | 2 | 4) {
         let points = pdf_linear_function_points(
             pdf,
             function,
@@ -11154,6 +11292,294 @@ mod tests {
         assert!(
             matches!(pdf_shading_segments(&pdf, &Object::Reference(id), &PdfColorSpace::Gray, RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Invalid(message)) if message.contains("truncated PDF sampled"))
         );
+    }
+
+    fn calculator_function(code: &[u8], channels: usize) -> lopdf::Stream {
+        lopdf::Stream::new(
+            dictionary! {
+                "FunctionType" => 4,
+                "Domain" => Object::Array(vec![0.into(), 1.into()]),
+                "Range" => Object::Array((0..channels).flat_map(|_| [0.into(), 1.into()]).collect()),
+            },
+            code.to_vec(),
+        )
+    }
+
+    #[test]
+    fn calculator_shading_preserves_branch_jumps_in_both_directions() {
+        let pdf = PdfDocument::load_mem(include_bytes!(
+            "../tests/fixtures/shading-calculator-axial.pdf"
+        ))
+        .unwrap();
+        for (domain, first, last, jump) in [
+            (
+                [0.0, 1.0],
+                [255, 0, 0],
+                [255; 3],
+                [[0, 255, 0], [0, 0, 255]],
+            ),
+            (
+                [1.0, 0.0],
+                [255; 3],
+                [255, 0, 0],
+                [[0, 0, 255], [0, 255, 0]],
+            ),
+        ] {
+            let segments = pdf_shading_segments(
+                &pdf,
+                &Object::Reference((6, 0)),
+                &PdfColorSpace::Rgb,
+                RenderingIntent::RelativeColorimetric,
+                domain,
+            )
+            .unwrap();
+            assert_eq!(segments.first().unwrap().color, first);
+            assert_eq!(segments.last().unwrap().color, last);
+            let jumps = segments
+                .windows(2)
+                .filter(|pair| {
+                    pair[0].position == pair[1].position && pair[0].color != pair[1].color
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(jumps.len(), 1);
+            assert!((jumps[0][0].position.unwrap() - 0.5).abs() < 1e-9);
+            assert_eq!([jumps[0][0].color, jumps[0][1].color], jump);
+            assert!(segments
+                .windows(2)
+                .all(|pair| pair[0].position <= pair[1].position));
+        }
+    }
+
+    #[test]
+    fn calculator_shading_retains_integer_step_boundaries() {
+        let mut pdf = PdfDocument::new();
+        let function = pdf.add_object(calculator_function(b"{16 mul floor 16 div}", 1));
+        let segments = pdf_shading_segments(
+            &pdf,
+            &Object::Reference(function),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        let jumps = segments
+            .windows(2)
+            .filter(|pair| pair[0].position == pair[1].position && pair[0].color != pair[1].color)
+            .collect::<Vec<_>>();
+        assert_eq!(jumps.len(), 16);
+        for (index, jump) in jumps.iter().enumerate() {
+            let value = (index + 1) as f64 / 16.0;
+            assert!((jump[0].position.unwrap() - value).abs() < 1e-9);
+            assert_eq!(
+                jump[0].color,
+                [(index as f64 / 16.0 * 255.0).round() as u8; 3]
+            );
+            assert_eq!(jump[1].color, [(value * 255.0).round() as u8; 3]);
+        }
+    }
+
+    #[test]
+    fn calculator_shading_clips_inputs_and_nested_output_ranges() {
+        let pdf = PdfDocument::new();
+        let mut stream = calculator_function(b"{.25 sub sqrt}", 1);
+        stream
+            .dict
+            .set("Domain", Object::Array(vec![0.25.into(), 1.into()]));
+        let points = pdf_calculator_function_points(
+            &pdf,
+            &stream,
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [-1.0, 2.0],
+            None,
+        )
+        .unwrap();
+        assert_eq!(points.first().unwrap().1, [0; 3]);
+        assert_eq!(points.last().unwrap().1, [221; 3]);
+        let leaf = Object::Stream(calculator_function(b"{dup mul}", 1));
+        for (encode, ends) in [([1.0, 0.0], [204, 51]), ([0.5, 0.5], [64, 64])] {
+            let function = single_stitching_function(leaf.clone(), &[0.2, 0.8], encode);
+            let segments = pdf_shading_segments(
+                &pdf,
+                &function,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+            )
+            .unwrap();
+            assert_eq!(segments.first().unwrap().color, [ends[0]; 3]);
+            assert_eq!(segments.last().unwrap().color, [ends[1]; 3]);
+        }
+    }
+
+    #[test]
+    fn calculator_shading_keeps_lab_component_ranges_before_conversion() {
+        let pdf = PdfDocument::new();
+        let mut stream = calculator_function(b"{200 mul 100 sub 50 exch 0}", 3);
+        stream.dict.set(
+            "Range",
+            Object::Array(vec![
+                0.into(),
+                100.into(),
+                (-100).into(),
+                100.into(),
+                (-128).into(),
+                127.into(),
+            ]),
+        );
+        let lab = parse_color_space(None, None, &lab_space(), 0).unwrap();
+        let points = pdf_calculator_function_points(
+            &pdf,
+            &stream,
+            &lab,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+            Some(&[40.0, 60.0, -20.0, 20.0, -10.0, 10.0]),
+        )
+        .unwrap();
+        assert_eq!(
+            points.first().unwrap().1,
+            lab.color(&[50.0, -20.0, 0.0]).unwrap()
+        );
+        assert_eq!(
+            points.last().unwrap().1,
+            lab.color(&[50.0, 20.0, 0.0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn calculator_shading_rejects_invalid_metadata_and_code() {
+        for code in [
+            b"{pop}".as_slice(),
+            b"{true}",
+            b"{1 0 div}",
+            b"{exec}",
+            b"{dup",
+        ] {
+            let stream = Object::Stream(calculator_function(code, 1));
+            assert!(pdf_shading_segments(
+                &PdfDocument::new(),
+                &stream,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            )
+            .is_err());
+        }
+        for (key, value) in [
+            ("Domain", Object::Array(vec![0.into(), 0.into()])),
+            (
+                "Domain",
+                Object::Array(vec![0.into(), 1.into(), 0.into(), 1.into()]),
+            ),
+            ("Range", Object::Array(vec![0.into()])),
+            ("Range", Object::Array(vec![1.into(), 0.into()])),
+        ] {
+            let mut stream = calculator_function(b"{dup mul}", 1);
+            stream.dict.set(key, value);
+            assert!(
+                pdf_shading_segments(
+                    &PdfDocument::new(),
+                    &Object::Stream(stream),
+                    &PdfColorSpace::Gray,
+                    RenderingIntent::RelativeColorimetric,
+                    [0.0, 1.0]
+                )
+                .is_err(),
+                "{key}"
+            );
+        }
+        for key in [b"Domain".as_slice(), b"Range"] {
+            let mut stream = calculator_function(b"{dup mul}", 1);
+            stream.dict.remove(key);
+            assert!(pdf_shading_segments(
+                &PdfDocument::new(),
+                &Object::Stream(stream),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            )
+            .is_err());
+        }
+        let stream = calculator_function(b"{dup mul}", 1);
+        assert!(pdf_shading_segments(
+            &PdfDocument::new(),
+            &Object::Dictionary(stream.dict),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn calculator_shading_enforces_evaluation_complexity_limits() {
+        let stream = Object::Stream(calculator_function(b"{1000000 mul floor}", 1));
+        assert!(matches!(
+            pdf_shading_segments(
+                &PdfDocument::new(),
+                &stream,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            ),
+            Err(OfdError::Limit(_))
+        ));
+    }
+
+    #[test]
+    fn calculator_shading_accepts_indirect_metadata_and_matches_reference() {
+        let source = include_bytes!("../tests/fixtures/shading-calculator-axial.pdf");
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        for key in ["Domain", "Range", "FunctionType"] {
+            let mut value = shading_function_dictionary_mut(&mut pdf, 6)
+                .get(key.as_bytes())
+                .unwrap()
+                .clone();
+            if let Object::Array(values) = &mut value {
+                for value in values {
+                    *value = Object::Reference(pdf.add_object(value.clone()));
+                }
+            }
+            let reference = pdf.add_object(value);
+            shading_function_dictionary_mut(&mut pdf, 6).set(key, Object::Reference(reference));
+        }
+        let mut indirect = Vec::new();
+        pdf.save_to(&mut indirect).unwrap();
+        let baseline = OfdDocument::from_pdf_bytes(source).unwrap();
+        let imported = OfdDocument::from_pdf_bytes(&indirect).unwrap();
+        assert_eq!(imported.page_svg(0).unwrap(), baseline.page_svg(0).unwrap());
+        let actual = image::load_from_memory(&imported.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let expected = image::load_from_memory(include_bytes!(
+            "../tests/fixtures/shading-calculator-reference.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        assert_eq!(actual.dimensions(), expected.dimensions());
+        let maximum = actual
+            .as_raw()
+            .iter()
+            .zip(expected.as_raw())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(
+            maximum <= 6,
+            "Calculator shading differs from Ghostscript by {maximum}"
+        );
+        assert!(imported.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_svg(0).unwrap(), imported.page_svg(0).unwrap());
+        assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        let radial = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/shading-calculator-radial.pdf"
+        ))
+        .unwrap();
+        assert!(radial.page_svg(0).unwrap().contains("radialGradient"));
+        assert!(radial.validate_references().unwrap().is_empty());
+        radial.page_png(0, 72.0).unwrap();
     }
 
     fn shading_function_dictionary_mut(pdf: &mut PdfDocument, id: u32) -> &mut lopdf::Dictionary {
