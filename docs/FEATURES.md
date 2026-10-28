@@ -1696,6 +1696,17 @@ advances. These tables provide metrics, not font outlines; preview font fallback
 still applies. Data provenance and permissions are retained in the
 [font metric notice](../crates/ofdrw/assets/core14/NOTICE) and distributed packages.
 
+Imported text retains the bold/italic classification of standard font names,
+including valid subset prefixes. FontDescriptor `FontWeight` (100–900 in steps
+of 100), `ItalicAngle` and the italic `Flags` bit also apply to substitute
+fonts; descriptors and their fields may be indirect, including on CID descendants.
+Malformed declared fields and broken references return errors. `ForceBold`
+is a rasterization hint and does not change font weight. When the embedded
+TrueType/OpenType program can be reused safely, its intrinsic style takes
+precedence over contradictory descriptor metadata. Intrinsic weights map to
+the nearest OFD weight; italic classification does not reproduce an arbitrary
+declared slant angle in a substitute font. Styles survive OFD save/reopen.
+
 Simple-font `FirstChar`, `LastChar`, `Widths` arrays and numeric width entries
 may be indirect objects. A declared table must contain exactly one finite
 width per code in its 0–255 range, with at most 256 entries. Invalid numeric

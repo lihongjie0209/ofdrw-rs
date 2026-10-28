@@ -1,5 +1,6 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
+mod font_style;
 mod scalar_function;
 mod simple_encoding;
 mod simple_widths;
@@ -6450,14 +6451,19 @@ struct ImportedTextRun<'a> {
     has_widths: bool,
 }
 
-fn embedded_pdf_font_id(
+struct EmbeddedPdfFont {
+    id: String,
+    style: font_style::FontStyle,
+}
+
+fn embedded_pdf_font(
     output: &mut OfdDocument,
     pdf: &PdfDocument,
     font: &lopdf::Dictionary,
     text: &str,
     cids: Option<&[u16]>,
     simple_codes: Option<&[u8]>,
-) -> Result<Option<String>, OfdError> {
+) -> Result<Option<EmbeddedPdfFont>, OfdError> {
     let true_type =
         font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"TrueType".as_slice());
     if cids.is_none() && (!true_type || simple_codes.is_none()) {
@@ -6574,7 +6580,10 @@ fn embedded_pdf_font_id(
     }
     for (index, existing) in output.fonts()?.iter().enumerate() {
         if existing.embedded_path.is_some() && output.font_data(index)? == bytes {
-            return Ok(Some(existing.id.clone()));
+            return Ok(Some(EmbeddedPdfFont {
+                id: existing.id.clone(),
+                style: font_style::FontStyle::from_face(&face),
+            }));
         }
     }
     let name = face
@@ -6595,7 +6604,10 @@ fn embedded_pdf_font_id(
         })
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "PDF embedded font".into());
-    Ok(Some(output.add_embedded_font(&name, &bytes)?.to_string()))
+    Ok(Some(EmbeddedPdfFont {
+        id: output.add_embedded_font(&name, &bytes)?.to_string(),
+        style: font_style::FontStyle::from_face(&face),
+    }))
 }
 
 fn finish_import_text(
@@ -6659,7 +6671,9 @@ fn finish_import_text(
         ));
     }
     if visible && !text.is_empty() {
-        let font_id = embedded_pdf_font_id(output, page.pdf, font, text, cids, simple_codes)?;
+        let declared_style = font_style::FontStyle::read(page.pdf, font)?;
+        let embedded = embedded_pdf_font(output, page.pdf, font, text, cids, simple_codes)?;
+        let style = embedded.as_ref().map_or(declared_style, |font| font.style);
         let delta_x = has_widths.then(|| {
             positions
                 .windows(2)
@@ -6715,7 +6729,7 @@ fn finish_import_text(
             text,
             boundary,
             size,
-            font_id.as_deref(),
+            embedded.as_ref().map(|font| font.id.as_str()),
             delta_x.as_deref(),
         )?;
         let ctm = [ma, mb, mc, md, top_x - min_x, top_y - min_y];
@@ -6728,12 +6742,18 @@ fn finish_import_text(
         {
             output.set_page_object_ctm(page.index, &id, Some(ctm))?;
         }
-        if horizontal_scale != 1.0 {
-            output.set_page_object_attribute(
+        if horizontal_scale != 1.0 || style != font_style::FontStyle::default() {
+            output.set_page_text_typography(
                 page.index,
                 &id,
-                "HScale",
-                Some(&horizontal_scale.to_string()),
+                crate::TextTypographyStyle {
+                    size,
+                    h_scale: (horizontal_scale != 1.0).then_some(horizontal_scale),
+                    read_direction: None,
+                    char_direction: None,
+                    weight: (style.weight != 400).then_some(style.weight),
+                    italic: style.italic.then_some(true),
+                },
             )?;
         }
         attach_text_paint(output, page.index, &id, graphics, state.render_mode)?;
@@ -25702,6 +25722,95 @@ mod tests {
         assert!((objects[1].boundary.unwrap()[0] - 30.12 * MM_PER_PT).abs() < 1e-6);
         let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.page_text(0).unwrap(), ["A B", "C"]);
+    }
+
+    #[test]
+    fn standard_font_faces_preserve_weight_and_italic_after_import() {
+        for (name, weight, italic) in [
+            (b"Helvetica-Bold".as_slice(), 700, false),
+            (b"Times-Italic".as_slice(), 400, true),
+            (b"Courier-BoldOblique".as_slice(), 700, true),
+            (b"ABCDEF+Helvetica-BoldOblique".as_slice(), 700, true),
+        ] {
+            let document =
+                OfdDocument::from_pdf_bytes(&text_pdf(b"BT /F1 12 Tf 10 20 Td (AB) Tj ET", name))
+                    .unwrap();
+            let objects = document.page_text_objects(0).unwrap();
+            assert_eq!(objects[0].weight, weight);
+            assert_eq!(objects[0].italic, italic);
+        }
+    }
+
+    #[test]
+    fn descriptor_and_embedded_font_styles_survive_package_round_trip() {
+        for (program, expected_weight, expected_italic) in [
+            (None, 600, true),
+            (
+                Some(include_bytes!("../tests/fixtures/dejavu-sans.ttf").as_slice()),
+                400,
+                false,
+            ),
+            (
+                Some(include_bytes!("../tests/fixtures/dejavu-sans-bold-oblique.ttf").as_slice()),
+                700,
+                true,
+            ),
+        ] {
+            let mut pdf = differences_truetype_pdf();
+            let descriptor_id = pdf
+                .get_object((5, 0))
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"FontDescriptor")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let file = program.map(|bytes| {
+                pdf.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), bytes.to_vec()))
+            });
+            let descriptor = pdf
+                .get_object_mut(descriptor_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            // Deliberately differs from each embedded program: the usable program wins.
+            descriptor.set("FontWeight", 600);
+            descriptor.set("ItalicAngle", -13);
+            descriptor.set("Flags", 64);
+            if let Some(file) = file {
+                descriptor.set("FontFile2", Object::Reference(file));
+            } else {
+                descriptor.remove(b"FontFile2");
+            }
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let objects = document.page_text_objects(0).unwrap();
+            assert_eq!(objects.len(), 2);
+            for object in &objects {
+                assert_eq!(object.weight, expected_weight);
+                assert_eq!(object.italic, expected_italic);
+            }
+            let embedded: Vec<_> = document
+                .fonts()
+                .unwrap()
+                .into_iter()
+                .enumerate()
+                .filter(|(_, font)| font.embedded_path.is_some())
+                .collect();
+            assert_eq!(embedded.len(), usize::from(program.is_some()));
+            if let Some(program) = program {
+                assert_eq!(document.font_data(embedded[0].0).unwrap(), program);
+            }
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(objects, reopened.page_text_objects(0).unwrap());
+            assert_eq!(
+                document.page_png(0, 72.0).unwrap(),
+                reopened.page_png(0, 72.0).unwrap()
+            );
+            assert!(reopened.validate_references().unwrap().is_empty());
+        }
     }
 
     #[test]

@@ -6,6 +6,14 @@ use super::standard_font_data as data;
 pub(super) struct StandardFont(usize);
 
 impl StandardFont {
+    pub fn style(self) -> super::font_style::FontStyle {
+        let name = data::FONTS[self.0].0;
+        super::font_style::FontStyle {
+            weight: if name.contains("Bold") { 700 } else { 400 },
+            italic: name.ends_with("Oblique") || name.ends_with("Italic"),
+        }
+    }
+
     pub fn from_name(name: &[u8]) -> Option<Self> {
         let name =
             if name.len() > 7 && name[..6].iter().all(u8::is_ascii_uppercase) && name[6] == b'+' {

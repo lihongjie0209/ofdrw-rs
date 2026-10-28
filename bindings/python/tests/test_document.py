@@ -669,6 +669,26 @@ def test_imports_standard14_fonts_without_widths(tmp_path, name, text, advance):
         assert reopened.validate_references() == []
 
 
+@pytest.mark.parametrize("name,weight", [
+    ("font-style-standard.pdf", 700),
+    ("font-style-descriptor.pdf", 600),
+])
+def test_imports_pdf_font_styles_and_preserves_them_after_save(tmp_path, name, weight):
+    source = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / name
+    with Document.from_pdf_bytes(source.read_bytes()) as document:
+        assert document.page_text(0) == ["中文"]
+        objects = document.page_text_objects(0)
+        assert objects[0]["weight"] == weight
+        assert objects[0]["italic"] is True
+        expected_png = document.page_png(0, 72)
+        target = tmp_path / "styled.ofd"
+        document.save(target)
+    with Document.open(target) as reopened:
+        assert reopened.page_text_objects(0) == objects
+        assert reopened.page_png(0, 72) == expected_png
+        assert reopened.validate_references() == []
+
+
 def test_imports_macroman_truetype_pdf_with_embedded_font(tmp_path):
     fixtures = Path(__file__).resolve().parents[3] / "crates" / "ofdrw" / "tests" / "fixtures"
     source = (fixtures / "truetype-macroman.pdf").read_bytes()

@@ -1,0 +1,72 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 41 >>
+stream
+BT /F1 12 Tf 10 20 Td [(A) 100 (B)] TJ ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /DemoText /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 66 /Widths [600 500] /ToUnicode 6 0 R /FontDescriptor 7 0 R >>
+endobj
+6 0 obj
+<< /Length 344 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+2 beginbfchar
+<41> <4E2D>
+<42> <6587>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+endstream
+endobj
+7 0 obj
+<< /Type /FontDescriptor /FontWeight 8 0 R /ItalicAngle 9 0 R /Flags 10 0 R >>
+endobj
+8 0 obj
+600
+endobj
+9 0 obj
+-13
+endobj
+10 0 obj
+64
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000245 00000 n 
+0000000336 00000 n 
+0000000516 00000 n 
+0000000910 00000 n 
+0000001004 00000 n 
+0000001023 00000 n 
+0000001042 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R >>
+startxref
+1061
+%%EOF

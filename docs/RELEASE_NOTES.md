@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- PDF text preserves standard-font and FontDescriptor weight/italic styles,
+  including indirect descriptor fields and CID descendants. Safely reused
+  embedded TrueType/OpenType programs supply their intrinsic style. Tests
+  cover conflicting metadata, font reuse, invalid references and values,
+  package/render round trips, and Python/Node.js consumers.
+
 - Simple-font FirstChar/LastChar and width entries accept indirect objects,
   with bounded numeric validation before layout. BT now permits its default
   text origin and resets positioning for each text object while preserving
