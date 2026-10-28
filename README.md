@@ -17,7 +17,7 @@
 | --- | --- | --- | --- |
 | Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | 已发布 | `pip install ofdrw-rs==0.1.0` |
 | Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | 已发布 | `npm install ofdrw-rs@0.1.0` |
-| Rust | [crates.io](https://crates.io/crates/ofdrw) | 待发布，Git 标签已提供 | [使用 Git 依赖](#rust) |
+| Rust | [crates.io](https://crates.io/crates/ofdrw) | 已发布 | `ofdrw = "0.1.0"` |
 | Go | GitHub Go module | 已发布 | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.0` |
 
 各语言使用原生包管理工具，无需 ORAS 或 GitHub Packages 登录。
@@ -116,14 +116,12 @@ Release 会同时创建 Go 子模块标签 `bindings/go/v0.1.0`。
 
 ## Rust
 
-crates.io 发布尚未完成，当前使用已发布的 Git 标签：
+在 Cargo.toml 中添加 crates.io 依赖：
 
 ```toml
 [dependencies]
-ofdrw = { git = "https://github.com/lihongjie0209/ofdrw-rs.git", tag = "v0.1.0" }
+ofdrw = "0.1.0"
 ```
-
-crates.io 发布完成后，可将依赖改为 `ofdrw = "0.1.0"`。
 
 ```rust
 use ofdrw::OfdDocument;
