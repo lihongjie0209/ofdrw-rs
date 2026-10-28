@@ -1,4 +1,4 @@
-name: Native npm bootstrap
+name: Verify native npm publication
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ on:
 permissions:
   contents: read
   actions: read
-  id-token: write
 
 concurrency:
   group: native-npm-bootstrap
@@ -53,12 +52,28 @@ jobs:
           github-token: ${{ github.token }}
           name: ofdrw-node-package
           path: dist
-      - name: Publish the verified tarball to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify the existing npm version against the original CI tarball
         run: |
-          test -n "$NODE_AUTH_TOKEN" || { echo '::error::Missing NPM_TOKEN'; exit 1; }
-          python scripts/publish_native_registry.py npm "$RELEASE_TAG" dist
+          python - <<'PYVERIFY'
+          import base64
+          from pathlib import Path
+          import os
+          import time
+          from scripts.publish_native_registry import checksum, metadata
+          version = os.environ['RELEASE_TAG'][1:]
+          tarball = Path('dist') / f'ofdrw-rs-{version}.tgz'
+          expected = 'sha512-' + base64.b64encode(checksum(tarball, 'sha512').digest()).decode()
+          for attempt in range(120):
+              published = metadata(f'https://registry.npmjs.org/ofdrw-rs/{version}')
+              if published is not None:
+                  if published['dist']['integrity'] != expected:
+                      raise SystemExit('Registry tarball differs from the verified CI artifact')
+                  print(f'Verified npm ofdrw-rs {version} against the original CI artifact')
+                  break
+              time.sleep(5)
+          else:
+              raise SystemExit('npm metadata is still processing after ten minutes')
+          PYVERIFY
       - name: Install from the public npm registry and run the library
         run: |
           mkdir "$RUNNER_TEMP/ofdrw-npm-registry-consumer"
