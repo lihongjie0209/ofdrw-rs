@@ -26,321 +26,321 @@ type nativeBuffer struct {
 type nativeAPI struct {
 	version                         func() uint32
 	lastError                       func() *byte
-	open                            func(*byte, *unsafe.Pointer) int32
-	fromBytes                       func(*byte, uintptr, *unsafe.Pointer) int32
-	newDocument                     func(*unsafe.Pointer) int32
-	isEncrypted                     func(unsafe.Pointer, *int32) int32
-	encryptionInfo                  func(unsafe.Pointer, *nativeBuffer) int32
-	decryptWithPassword             func(unsafe.Pointer, *byte, *byte, *unsafe.Pointer) int32
-	decryptWithSM2PrivateKey        func(unsafe.Pointer, *byte, uintptr, *byte, *unsafe.Pointer) int32
-	encryptWithPasswords            func(unsafe.Pointer, *byte, *unsafe.Pointer) int32
-	encryptWithCertificates         func(unsafe.Pointer, *byte, *unsafe.Pointer) int32
-	encryptWithRecipients           func(unsafe.Pointer, *byte, *unsafe.Pointer) int32
-	fromPDF                         func(*byte, uintptr, *unsafe.Pointer) int32
-	close                           func(unsafe.Pointer)
-	pageCount                       func(unsafe.Pointer, *uintptr) int32
-	appendDocumentBody              func(unsafe.Pointer, *uintptr) int32
-	moveDocumentBody                func(unsafe.Pointer, uintptr, uintptr) int32
-	removeDocumentBody              func(unsafe.Pointer, uintptr) int32
-	extractDocumentBody             func(unsafe.Pointer, uintptr, *unsafe.Pointer) int32
-	appendDocumentBodiesFrom        func(unsafe.Pointer, unsafe.Pointer, *nativeBuffer) int32
-	appendDocumentBodyFrom          func(unsafe.Pointer, unsafe.Pointer, uintptr, *uintptr) int32
-	movePage                        func(unsafe.Pointer, uintptr, uintptr) int32
-	reorderDocumentPages            func(unsafe.Pointer, uintptr, *byte) int32
-	duplicatePage                   func(unsafe.Pointer, uintptr, *uintptr) int32
-	duplicatePageAt                 func(unsafe.Pointer, uintptr, uintptr, *uintptr) int32
-	removePage                      func(unsafe.Pointer, uintptr) int32
-	pages                           func(unsafe.Pointer, *nativeBuffer) int32
-	setPageArea                     func(unsafe.Pointer, uintptr, *byte) int32
-	documentPageArea                func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	setDocumentPageArea             func(unsafe.Pointer, uintptr, *byte) int32
-	validateReferences              func(unsafe.Pointer, *nativeBuffer) int32
-	archiveViolations               func(unsafe.Pointer, *nativeBuffer) int32
-	prepareArchive                  func(unsafe.Pointer, *unsafe.Pointer) int32
-	entries                         func(unsafe.Pointer, *nativeBuffer) int32
-	documents                       func(unsafe.Pointer, *nativeBuffer) int32
-	packageInfo                     func(unsafe.Pointer, *nativeBuffer) int32
-	setPackageHeader                func(unsafe.Pointer, *byte, *byte) int32
-	documentPermissions             func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	setDocumentPermissions          func(unsafe.Pointer, uintptr, *byte) int32
-	viewPreferences                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	setViewPreferences              func(unsafe.Pointer, uintptr, *byte) int32
-	documentActions                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	addDocumentAction               func(unsafe.Pointer, uintptr, *byte) int32
-	removeDocumentAction            func(unsafe.Pointer, uintptr, uintptr) int32
-	pageActions                     func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	addPageAction                   func(unsafe.Pointer, uintptr, *byte) int32
-	removePageAction                func(unsafe.Pointer, uintptr, uintptr) int32
-	integrityManifest               func(unsafe.Pointer, *nativeBuffer) int32
-	checkIntegrityManifest          func(unsafe.Pointer, *nativeBuffer) int32
-	verifyIntegrityManifestSM2      func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	protectIntegritySM2             func(unsafe.Pointer, *byte, uintptr, *byte, uintptr, *byte) int32
-	verifyIntegrityOrderedChain     func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	verifyIntegrityPool             func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	versions                        func(unsafe.Pointer, *nativeBuffer) int32
-	extractVersionSnapshot          func(unsafe.Pointer, uintptr, *unsafe.Pointer) int32
-	addVersionSnapshot              func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	bookmarks                       func(unsafe.Pointer, *nativeBuffer) int32
-	addBookmark                     func(unsafe.Pointer, uintptr, *byte) int32
-	removeBookmark                  func(unsafe.Pointer, uintptr, *byte) int32
-	addOutline                      func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	removeOutline                   func(unsafe.Pointer, uintptr) int32
-	setOutlineTitle                 func(unsafe.Pointer, uintptr, *byte) int32
-	setOutlineExpanded              func(unsafe.Pointer, uintptr, int32) int32
-	setOutlineDestination           func(unsafe.Pointer, uintptr, *byte) int32
-	setOutlineBookmark              func(unsafe.Pointer, uintptr, *byte) int32
-	outlines                        func(unsafe.Pointer, *nativeBuffer) int32
-	setInfoField                    func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removeInfoField                 func(unsafe.Pointer, uintptr, *byte) int32
-	addKeyword                      func(unsafe.Pointer, uintptr, *byte) int32
-	removeKeyword                   func(unsafe.Pointer, uintptr, uintptr) int32
-	setCustomData                   func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removeCustomData                func(unsafe.Pointer, uintptr, *byte) int32
-	pageText                        func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	allText                         func(unsafe.Pointer, *nativeBuffer) int32
-	regionText                      func(unsafe.Pointer, uintptr, float64, float64, float64, float64, *nativeBuffer) int32
-	keywordPositions                func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	pageSources                     func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageLayers                      func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	promotePageToTemplate           func(unsafe.Pointer, uintptr, *byte, *byte, *uintptr) int32
-	applyPageTemplate               func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removePageTemplate              func(unsafe.Pointer, uintptr, *byte) int32
-	removeDocumentTemplate          func(unsafe.Pointer, uintptr, *byte) int32
-	pageObjects                     func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageObjectClips                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageObjectPaints                func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageObjectStrokeStyles          func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageObjectActions               func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	pageSourceObjectActions         func(unsafe.Pointer, uintptr, *byte, *byte, *nativeBuffer) int32
-	addPageObjectURIAction          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	addPageObjectGotoAction         func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	addPageObjectBookmarkAction     func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	addPageObjectAttachmentAction   func(unsafe.Pointer, uintptr, *byte, *byte, int32) int32
-	addPageObjectMediaAction        func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removePageObjectAction          func(unsafe.Pointer, uintptr, *byte, uintptr) int32
-	setPageObjectActionRegions      func(unsafe.Pointer, uintptr, *byte, uintptr, *byte) int32
-	templateText                    func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	textObjects                     func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pagePaths                       func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageImages                      func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageMultimediaResources         func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageMultimediaData              func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	documentMultimediaResources     func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	documentMultimediaData          func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	compositeImages                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	compositeObjects                func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	compositeUnits                  func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	setPageCompositeUnitImages      func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	imageData                       func(unsafe.Pointer, uintptr, uintptr, *nativeBuffer) int32
-	compositeImageData              func(unsafe.Pointer, uintptr, uintptr, *nativeBuffer) int32
-	pageSVG                         func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageSVGWithOptions              func(unsafe.Pointer, uintptr, int32, *nativeBuffer) int32
-	pagePNG                         func(unsafe.Pointer, uintptr, float64, *nativeBuffer) int32
-	pagePNGWithOptions              func(unsafe.Pointer, uintptr, float64, int32, *nativeBuffer) int32
-	toPDF                           func(unsafe.Pointer, *nativeBuffer) int32
-	toPDFWithOptions                func(unsafe.Pointer, int32, *nativeBuffer) int32
-	attachments                     func(unsafe.Pointer, *nativeBuffer) int32
-	customTags                      func(unsafe.Pointer, *nativeBuffer) int32
-	customTagData                   func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	replaceCustomTagData            func(unsafe.Pointer, uintptr, *byte, uintptr, *nativeBuffer) int32
-	addCustomTag                    func(unsafe.Pointer, uintptr, *byte, *byte, uintptr, *nativeBuffer) int32
-	updateCustomTag                 func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	removeCustomTag                 func(unsafe.Pointer, uintptr) int32
-	extensions                      func(unsafe.Pointer, *nativeBuffer) int32
-	addExtension                    func(unsafe.Pointer, *byte) int32
-	updateExtension                 func(unsafe.Pointer, uintptr, *byte) int32
-	removeExtension                 func(unsafe.Pointer, uintptr) int32
-	annotations                     func(unsafe.Pointer, *nativeBuffer) int32
-	annotationObjects               func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	appendAnnotationObjects         func(unsafe.Pointer, uintptr, *byte, *byte, *nativeBuffer) int32
-	updateAnnotationObject          func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationObjectName         func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationObjectBlendMode    func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationObjectDrawParam    func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	removeAnnotationObject          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setAnnotationPathData           func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationPathStrokeStyle    func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationTextCode           func(unsafe.Pointer, uintptr, *byte, *byte, uintptr, *byte) int32
-	editAnnotationTextCode          func(unsafe.Pointer, *byte) int32
-	setAnnotationTextCodeLayout     func(unsafe.Pointer, uintptr, *byte, *byte, uintptr, *byte) int32
-	setAnnotationTextTypography     func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationTextPaintFlags     func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	appendAnnotationTextCode        func(unsafe.Pointer, uintptr, *byte, *byte, *byte, *byte) int32
-	removeAnnotationTextCode        func(unsafe.Pointer, uintptr, *byte, *byte, uintptr) int32
-	setAnnotationTextFont           func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	setAnnotationGraphicResource    func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	removeAnnotation                func(unsafe.Pointer, uintptr, *byte) int32
-	setAnnotationCreator            func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setAnnotationSubtype            func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setAnnotationLastModDate        func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setAnnotationAppearanceBoundary func(unsafe.Pointer, uintptr, *byte, float64, float64, float64, float64) int32
-	setAnnotationRemark             func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setAnnotationParameter          func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	removeAnnotationParameter       func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setAnnotationVisible            func(unsafe.Pointer, uintptr, *byte, int32) int32
-	setAnnotationPrint              func(unsafe.Pointer, uintptr, *byte, int32) int32
-	setAnnotationFlag               func(unsafe.Pointer, uintptr, *byte, *byte, int32) int32
-	fonts                           func(unsafe.Pointer, *nativeBuffer) int32
-	fontData                        func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageFonts                       func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageFontData                    func(unsafe.Pointer, uintptr, uintptr, *nativeBuffer) int32
-	signatures                      func(unsafe.Pointer, *nativeBuffer) int32
-	signedValueData                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	sealData                        func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	checkReferences                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	checkDescription                func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	checkSealMatch                  func(unsafe.Pointer, uintptr, *int32) int32
-	checkSealSignature              func(unsafe.Pointer, uintptr, *int32) int32
-	checkSealWithID                 func(unsafe.Pointer, uintptr, *byte, *int32) int32
-	checkSealCertValidity           func(unsafe.Pointer, uintptr, uint64, *int32) int32
-	checkSealSignerAuthorization    func(unsafe.Pointer, uintptr, *int32) int32
-	checkSealValidity               func(unsafe.Pointer, uintptr, uint64, *int32) int32
-	checkSealIssuerChain            func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *int32) int32
-	checkSESValue                   func(unsafe.Pointer, uintptr, *int32) int32
-	checkSESWithID                  func(unsafe.Pointer, uintptr, *byte, *int32) int32
-	checkDigitalValue               func(unsafe.Pointer, uintptr, *byte, uintptr, *int32) int32
-	checkDigitalWithID              func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, *int32) int32
-	checkCertValidity               func(unsafe.Pointer, uintptr, *byte, uintptr, uint64, *int32) int32
-	checkDirectAnchor               func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *int32) int32
-	verifyDirectAnchor              func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *nativeBuffer) int32
-	verifyDirectWithID              func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *byte, *nativeBuffer) int32
-	verifyOrderedChain              func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *nativeBuffer) int32
-	verifyChainWithID               func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *byte, *nativeBuffer) int32
-	verifySignaturePool             func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *byte, *nativeBuffer) int32
-	verifyTwoChains                 func(unsafe.Pointer, uintptr, *byte, uintptr, *nativeBuffer) int32
-	verifyTwoPools                  func(unsafe.Pointer, uintptr, *byte, uintptr, *nativeBuffer) int32
-	addDigitalSign                  func(unsafe.Pointer, *byte, uintptr, *byte, *uintptr) int32
-	addDigitalWithID                func(unsafe.Pointer, *byte, uintptr, *byte, *byte, *uintptr) int32
-	addSESWithIDs                   func(unsafe.Pointer, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, *byte, *byte, *uintptr) int32
-	addSESWithStamp                 func(unsafe.Pointer, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, float64, float64, float64, float64, *byte, *byte, *uintptr) int32
+	open                            func(*byte, *uintptr) int32
+	fromBytes                       func(*byte, uintptr, *uintptr) int32
+	newDocument                     func(*uintptr) int32
+	isEncrypted                     func(uintptr, *int32) int32
+	encryptionInfo                  func(uintptr, *nativeBuffer) int32
+	decryptWithPassword             func(uintptr, *byte, *byte, *uintptr) int32
+	decryptWithSM2PrivateKey        func(uintptr, *byte, uintptr, *byte, *uintptr) int32
+	encryptWithPasswords            func(uintptr, *byte, *uintptr) int32
+	encryptWithCertificates         func(uintptr, *byte, *uintptr) int32
+	encryptWithRecipients           func(uintptr, *byte, *uintptr) int32
+	fromPDF                         func(*byte, uintptr, *uintptr) int32
+	close                           func(uintptr)
+	pageCount                       func(uintptr, *uintptr) int32
+	appendDocumentBody              func(uintptr, *uintptr) int32
+	moveDocumentBody                func(uintptr, uintptr, uintptr) int32
+	removeDocumentBody              func(uintptr, uintptr) int32
+	extractDocumentBody             func(uintptr, uintptr, *uintptr) int32
+	appendDocumentBodiesFrom        func(uintptr, uintptr, *nativeBuffer) int32
+	appendDocumentBodyFrom          func(uintptr, uintptr, uintptr, *uintptr) int32
+	movePage                        func(uintptr, uintptr, uintptr) int32
+	reorderDocumentPages            func(uintptr, uintptr, *byte) int32
+	duplicatePage                   func(uintptr, uintptr, *uintptr) int32
+	duplicatePageAt                 func(uintptr, uintptr, uintptr, *uintptr) int32
+	removePage                      func(uintptr, uintptr) int32
+	pages                           func(uintptr, *nativeBuffer) int32
+	setPageArea                     func(uintptr, uintptr, *byte) int32
+	documentPageArea                func(uintptr, uintptr, *nativeBuffer) int32
+	setDocumentPageArea             func(uintptr, uintptr, *byte) int32
+	validateReferences              func(uintptr, *nativeBuffer) int32
+	archiveViolations               func(uintptr, *nativeBuffer) int32
+	prepareArchive                  func(uintptr, *uintptr) int32
+	entries                         func(uintptr, *nativeBuffer) int32
+	documents                       func(uintptr, *nativeBuffer) int32
+	packageInfo                     func(uintptr, *nativeBuffer) int32
+	setPackageHeader                func(uintptr, *byte, *byte) int32
+	documentPermissions             func(uintptr, uintptr, *nativeBuffer) int32
+	setDocumentPermissions          func(uintptr, uintptr, *byte) int32
+	viewPreferences                 func(uintptr, uintptr, *nativeBuffer) int32
+	setViewPreferences              func(uintptr, uintptr, *byte) int32
+	documentActions                 func(uintptr, uintptr, *nativeBuffer) int32
+	addDocumentAction               func(uintptr, uintptr, *byte) int32
+	removeDocumentAction            func(uintptr, uintptr, uintptr) int32
+	pageActions                     func(uintptr, uintptr, *nativeBuffer) int32
+	addPageAction                   func(uintptr, uintptr, *byte) int32
+	removePageAction                func(uintptr, uintptr, uintptr) int32
+	integrityManifest               func(uintptr, *nativeBuffer) int32
+	checkIntegrityManifest          func(uintptr, *nativeBuffer) int32
+	verifyIntegrityManifestSM2      func(uintptr, *byte, *nativeBuffer) int32
+	protectIntegritySM2             func(uintptr, *byte, uintptr, *byte, uintptr, *byte) int32
+	verifyIntegrityOrderedChain     func(uintptr, *byte, *nativeBuffer) int32
+	verifyIntegrityPool             func(uintptr, *byte, *nativeBuffer) int32
+	versions                        func(uintptr, *nativeBuffer) int32
+	extractVersionSnapshot          func(uintptr, uintptr, *uintptr) int32
+	addVersionSnapshot              func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	bookmarks                       func(uintptr, *nativeBuffer) int32
+	addBookmark                     func(uintptr, uintptr, *byte) int32
+	removeBookmark                  func(uintptr, uintptr, *byte) int32
+	addOutline                      func(uintptr, uintptr, *byte, *uintptr) int32
+	removeOutline                   func(uintptr, uintptr) int32
+	setOutlineTitle                 func(uintptr, uintptr, *byte) int32
+	setOutlineExpanded              func(uintptr, uintptr, int32) int32
+	setOutlineDestination           func(uintptr, uintptr, *byte) int32
+	setOutlineBookmark              func(uintptr, uintptr, *byte) int32
+	outlines                        func(uintptr, *nativeBuffer) int32
+	setInfoField                    func(uintptr, uintptr, *byte, *byte) int32
+	removeInfoField                 func(uintptr, uintptr, *byte) int32
+	addKeyword                      func(uintptr, uintptr, *byte) int32
+	removeKeyword                   func(uintptr, uintptr, uintptr) int32
+	setCustomData                   func(uintptr, uintptr, *byte, *byte) int32
+	removeCustomData                func(uintptr, uintptr, *byte) int32
+	pageText                        func(uintptr, uintptr, *nativeBuffer) int32
+	allText                         func(uintptr, *nativeBuffer) int32
+	regionText                      func(uintptr, uintptr, float64, float64, float64, float64, *nativeBuffer) int32
+	keywordPositions                func(uintptr, *byte, *nativeBuffer) int32
+	pageSources                     func(uintptr, uintptr, *nativeBuffer) int32
+	pageLayers                      func(uintptr, uintptr, *nativeBuffer) int32
+	promotePageToTemplate           func(uintptr, uintptr, *byte, *byte, *uintptr) int32
+	applyPageTemplate               func(uintptr, uintptr, *byte, *byte) int32
+	removePageTemplate              func(uintptr, uintptr, *byte) int32
+	removeDocumentTemplate          func(uintptr, uintptr, *byte) int32
+	pageObjects                     func(uintptr, uintptr, *nativeBuffer) int32
+	pageObjectClips                 func(uintptr, uintptr, *nativeBuffer) int32
+	pageObjectPaints                func(uintptr, uintptr, *nativeBuffer) int32
+	pageObjectStrokeStyles          func(uintptr, uintptr, *nativeBuffer) int32
+	pageObjectActions               func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	pageSourceObjectActions         func(uintptr, uintptr, *byte, *byte, *nativeBuffer) int32
+	addPageObjectURIAction          func(uintptr, uintptr, *byte, *byte) int32
+	addPageObjectGotoAction         func(uintptr, uintptr, *byte, *byte) int32
+	addPageObjectBookmarkAction     func(uintptr, uintptr, *byte, *byte) int32
+	addPageObjectAttachmentAction   func(uintptr, uintptr, *byte, *byte, int32) int32
+	addPageObjectMediaAction        func(uintptr, uintptr, *byte, *byte) int32
+	removePageObjectAction          func(uintptr, uintptr, *byte, uintptr) int32
+	setPageObjectActionRegions      func(uintptr, uintptr, *byte, uintptr, *byte) int32
+	templateText                    func(uintptr, uintptr, *nativeBuffer) int32
+	textObjects                     func(uintptr, uintptr, *nativeBuffer) int32
+	pagePaths                       func(uintptr, uintptr, *nativeBuffer) int32
+	pageImages                      func(uintptr, uintptr, *nativeBuffer) int32
+	pageMultimediaResources         func(uintptr, uintptr, *nativeBuffer) int32
+	pageMultimediaData              func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	documentMultimediaResources     func(uintptr, uintptr, *nativeBuffer) int32
+	documentMultimediaData          func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	compositeImages                 func(uintptr, uintptr, *nativeBuffer) int32
+	compositeObjects                func(uintptr, uintptr, *nativeBuffer) int32
+	compositeUnits                  func(uintptr, uintptr, *nativeBuffer) int32
+	setPageCompositeUnitImages      func(uintptr, uintptr, *byte, *byte, *byte) int32
+	imageData                       func(uintptr, uintptr, uintptr, *nativeBuffer) int32
+	compositeImageData              func(uintptr, uintptr, uintptr, *nativeBuffer) int32
+	pageSVG                         func(uintptr, uintptr, *nativeBuffer) int32
+	pageSVGWithOptions              func(uintptr, uintptr, int32, *nativeBuffer) int32
+	pagePNG                         func(uintptr, uintptr, float64, *nativeBuffer) int32
+	pagePNGWithOptions              func(uintptr, uintptr, float64, int32, *nativeBuffer) int32
+	toPDF                           func(uintptr, *nativeBuffer) int32
+	toPDFWithOptions                func(uintptr, int32, *nativeBuffer) int32
+	attachments                     func(uintptr, *nativeBuffer) int32
+	customTags                      func(uintptr, *nativeBuffer) int32
+	customTagData                   func(uintptr, uintptr, *nativeBuffer) int32
+	replaceCustomTagData            func(uintptr, uintptr, *byte, uintptr, *nativeBuffer) int32
+	addCustomTag                    func(uintptr, uintptr, *byte, *byte, uintptr, *nativeBuffer) int32
+	updateCustomTag                 func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	removeCustomTag                 func(uintptr, uintptr) int32
+	extensions                      func(uintptr, *nativeBuffer) int32
+	addExtension                    func(uintptr, *byte) int32
+	updateExtension                 func(uintptr, uintptr, *byte) int32
+	removeExtension                 func(uintptr, uintptr) int32
+	annotations                     func(uintptr, *nativeBuffer) int32
+	annotationObjects               func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	appendAnnotationObjects         func(uintptr, uintptr, *byte, *byte, *nativeBuffer) int32
+	updateAnnotationObject          func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationObjectName         func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationObjectBlendMode    func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationObjectDrawParam    func(uintptr, uintptr, *byte, *byte, *byte) int32
+	removeAnnotationObject          func(uintptr, uintptr, *byte, *byte) int32
+	setAnnotationPathData           func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationPathStrokeStyle    func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationTextCode           func(uintptr, uintptr, *byte, *byte, uintptr, *byte) int32
+	editAnnotationTextCode          func(uintptr, *byte) int32
+	setAnnotationTextCodeLayout     func(uintptr, uintptr, *byte, *byte, uintptr, *byte) int32
+	setAnnotationTextTypography     func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationTextPaintFlags     func(uintptr, uintptr, *byte, *byte, *byte) int32
+	appendAnnotationTextCode        func(uintptr, uintptr, *byte, *byte, *byte, *byte) int32
+	removeAnnotationTextCode        func(uintptr, uintptr, *byte, *byte, uintptr) int32
+	setAnnotationTextFont           func(uintptr, uintptr, *byte, *byte, *byte) int32
+	setAnnotationGraphicResource    func(uintptr, uintptr, *byte, *byte, *byte) int32
+	removeAnnotation                func(uintptr, uintptr, *byte) int32
+	setAnnotationCreator            func(uintptr, uintptr, *byte, *byte) int32
+	setAnnotationSubtype            func(uintptr, uintptr, *byte, *byte) int32
+	setAnnotationLastModDate        func(uintptr, uintptr, *byte, *byte) int32
+	setAnnotationAppearanceBoundary func(uintptr, uintptr, *byte, float64, float64, float64, float64) int32
+	setAnnotationRemark             func(uintptr, uintptr, *byte, *byte) int32
+	setAnnotationParameter          func(uintptr, uintptr, *byte, *byte, *byte) int32
+	removeAnnotationParameter       func(uintptr, uintptr, *byte, *byte) int32
+	setAnnotationVisible            func(uintptr, uintptr, *byte, int32) int32
+	setAnnotationPrint              func(uintptr, uintptr, *byte, int32) int32
+	setAnnotationFlag               func(uintptr, uintptr, *byte, *byte, int32) int32
+	fonts                           func(uintptr, *nativeBuffer) int32
+	fontData                        func(uintptr, uintptr, *nativeBuffer) int32
+	pageFonts                       func(uintptr, uintptr, *nativeBuffer) int32
+	pageFontData                    func(uintptr, uintptr, uintptr, *nativeBuffer) int32
+	signatures                      func(uintptr, *nativeBuffer) int32
+	signedValueData                 func(uintptr, uintptr, *nativeBuffer) int32
+	sealData                        func(uintptr, uintptr, *nativeBuffer) int32
+	checkReferences                 func(uintptr, uintptr, *nativeBuffer) int32
+	checkDescription                func(uintptr, uintptr, *nativeBuffer) int32
+	checkSealMatch                  func(uintptr, uintptr, *int32) int32
+	checkSealSignature              func(uintptr, uintptr, *int32) int32
+	checkSealWithID                 func(uintptr, uintptr, *byte, *int32) int32
+	checkSealCertValidity           func(uintptr, uintptr, uint64, *int32) int32
+	checkSealSignerAuthorization    func(uintptr, uintptr, *int32) int32
+	checkSealValidity               func(uintptr, uintptr, uint64, *int32) int32
+	checkSealIssuerChain            func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *int32) int32
+	checkSESValue                   func(uintptr, uintptr, *int32) int32
+	checkSESWithID                  func(uintptr, uintptr, *byte, *int32) int32
+	checkDigitalValue               func(uintptr, uintptr, *byte, uintptr, *int32) int32
+	checkDigitalWithID              func(uintptr, uintptr, *byte, uintptr, *byte, *int32) int32
+	checkCertValidity               func(uintptr, uintptr, *byte, uintptr, uint64, *int32) int32
+	checkDirectAnchor               func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *int32) int32
+	verifyDirectAnchor              func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *nativeBuffer) int32
+	verifyDirectWithID              func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *byte, *nativeBuffer) int32
+	verifyOrderedChain              func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *nativeBuffer) int32
+	verifyChainWithID               func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *byte, *nativeBuffer) int32
+	verifySignaturePool             func(uintptr, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, uint64, *byte, *byte, *nativeBuffer) int32
+	verifyTwoChains                 func(uintptr, uintptr, *byte, uintptr, *nativeBuffer) int32
+	verifyTwoPools                  func(uintptr, uintptr, *byte, uintptr, *nativeBuffer) int32
+	addDigitalSign                  func(uintptr, *byte, uintptr, *byte, *uintptr) int32
+	addDigitalWithID                func(uintptr, *byte, uintptr, *byte, *byte, *uintptr) int32
+	addSESWithIDs                   func(uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, *byte, *byte, *uintptr) int32
+	addSESWithStamp                 func(uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, float64, float64, float64, float64, *byte, *byte, *uintptr) int32
 	createSESSeal                   func(*byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, *nativeBuffer) int32
-	attachData                      func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	getEntry                        func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	setEntry                        func(unsafe.Pointer, *byte, *byte, uintptr) int32
-	removeEntry                     func(unsafe.Pointer, *byte, *int32) int32
-	addTextPage                     func(unsafe.Pointer, *byte, float64, float64) int32
-	writeTextPage                   func(unsafe.Pointer, *byte, *uintptr) int32
-	addBlankPage                    func(unsafe.Pointer, float64, float64) int32
-	addTextObject                   func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addCompositeTextObject          func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	removePageObject                func(unsafe.Pointer, uintptr, *byte) int32
-	duplicatePageObject             func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addPageLayer                    func(unsafe.Pointer, uintptr, *byte, *byte, *uintptr) int32
-	setPageLayerType                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageLayerName                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageLayerDrawParam           func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	addDocumentDrawParam            func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addPageDrawParam                func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	setDocumentDrawParam            func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageDrawParam                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removeDocumentDrawParam         func(unsafe.Pointer, uintptr, *byte) int32
-	removePageDrawParam             func(unsafe.Pointer, uintptr, *byte) int32
-	pageColorSpaces                 func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	documentColorSpaces             func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	pageDrawParams                  func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	documentDrawParams              func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	addDocumentColorSpace           func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addPageColorSpace               func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	setDocumentColorSpace           func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageColorSpace               func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removeDocumentColorSpace        func(unsafe.Pointer, uintptr, *byte) int32
-	removePageColorSpace            func(unsafe.Pointer, uintptr, *byte) int32
-	documentDefaultColorSpace       func(unsafe.Pointer, uintptr, *nativeBuffer) int32
-	setDocumentDefaultColorSpace    func(unsafe.Pointer, uintptr, *byte) int32
-	setPageObjectDrawParam          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	movePageObjectToLayer           func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	groupPageObjects                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	ungroupPageObjects              func(unsafe.Pointer, uintptr, *byte) int32
-	movePageObject                  func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectVisible            func(unsafe.Pointer, uintptr, *byte, int32) int32
-	setPageObjectName               func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectBlendMode          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectClipRects          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectPathClips          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectClips              func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectAlpha              func(unsafe.Pointer, uintptr, *byte, int32) int32
-	setPagePathStrokeStyle          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPagePathDashSequence         func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPagePathData                 func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageTextTypography           func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageTextCode                 func(unsafe.Pointer, uintptr, *byte, uintptr, *byte) int32
-	editTextCode                    func(unsafe.Pointer, *byte) int32
-	setPageTextCodeLayout           func(unsafe.Pointer, uintptr, *byte, uintptr, *byte) int32
-	appendPageTextCode              func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32
-	removePageTextCode              func(unsafe.Pointer, uintptr, *byte, uintptr) int32
-	setPageTextFont                 func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageTextPaintFlags           func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageImageMask                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageImageSubstitution        func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageImageBorder              func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectGouraudFill        func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectGouraudStroke      func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectGradientFill       func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectGradientStroke     func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectPatternFill        func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectPatternStroke      func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectSolidFill          func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectSolidStroke        func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageObjectBoundary           func(unsafe.Pointer, uintptr, *byte, float64, float64, float64, float64) int32
-	setPageObjectCTM                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	removePageLayer                 func(unsafe.Pointer, uintptr, *byte) int32
-	addPathObject                   func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addCompositePathObject          func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addCompositeObject              func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addTextWatermark                func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addTextStampAnnotation          func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addTextWatermarkAllPages        func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	addImageWatermark               func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addImageStampAnnotation         func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addImageWatermarkAllPages       func(unsafe.Pointer, *byte, *nativeBuffer) int32
-	addPathAnnotation               func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addMultiPathAnnotation          func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addMixedAnnotation              func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addHighlightAnnotation          func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addTextNoteAnnotation           func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addShapeAnnotation              func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addLineAnnotation               func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addURILinkAnnotation            func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addGotoLinkAnnotation           func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addBookmarkLinkAnnotation       func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addAttachmentLinkAnnotation     func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addMediaLinkAnnotation          func(unsafe.Pointer, uintptr, *byte, *uintptr) int32
-	addTextWithFont                 func(unsafe.Pointer, *byte, float64, float64, uintptr) int32
-	addFont                         func(unsafe.Pointer, *byte, *byte, uintptr, *uintptr) int32
-	addFontToDocument               func(unsafe.Pointer, uintptr, *byte, *byte, uintptr, *uintptr) int32
-	addFontToPage                   func(unsafe.Pointer, uintptr, *byte, *byte, uintptr, *uintptr) int32
-	setFontAttribute                func(unsafe.Pointer, uintptr, *byte, *byte) int32
-	setPageFontAttribute            func(unsafe.Pointer, uintptr, uintptr, *byte, *byte) int32
-	replaceFontData                 func(unsafe.Pointer, uintptr, *byte, uintptr) int32
-	replacePageFontData             func(unsafe.Pointer, uintptr, uintptr, *byte, uintptr) int32
-	appendTextPage                  func(unsafe.Pointer, uintptr, *byte, float64, float64) int32
-	appendBlankPage                 func(unsafe.Pointer, uintptr, float64, float64) int32
-	insertTextPage                  func(unsafe.Pointer, uintptr, uintptr, *byte, float64, float64, *uintptr) int32
-	insertBlankPage                 func(unsafe.Pointer, uintptr, uintptr, float64, float64, *uintptr) int32
-	addFlowedText                   func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	addTable                        func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	addFlowedSpans                  func(unsafe.Pointer, uintptr, *byte, *nativeBuffer) int32
-	appendTextWithFont              func(unsafe.Pointer, uintptr, *byte, float64, float64, uintptr) int32
-	appendPathPage                  func(unsafe.Pointer, uintptr, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
-	appendImagePage                 func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, float64, float64) int32
-	addImagePage                    func(unsafe.Pointer, *byte, uintptr, *byte, float64, float64) int32
-	addImageObject                  func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, float64, float64, float64, float64, *uintptr) int32
-	addCompositeImageObject         func(unsafe.Pointer, uintptr, *byte, uintptr, *byte, float64, float64, float64, float64, *uintptr) int32
-	addPathPage                     func(unsafe.Pointer, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
-	addAttachment                   func(unsafe.Pointer, *byte, *byte, uintptr) int32
-	addMultimediaResource           func(unsafe.Pointer, uintptr, *byte, *byte, *byte, uintptr, *uintptr) int32
-	addPageMultimediaResource       func(unsafe.Pointer, uintptr, *byte, *byte, *byte, uintptr, *uintptr) int32
-	replaceDocumentMultimediaData   func(unsafe.Pointer, uintptr, *byte, *byte, uintptr) int32
-	replacePageMultimediaData       func(unsafe.Pointer, uintptr, *byte, *byte, uintptr) int32
-	removeDocumentMultimedia        func(unsafe.Pointer, uintptr, *byte) int32
-	removePageMultimedia            func(unsafe.Pointer, uintptr, *byte) int32
-	addAttachmentToDocument         func(unsafe.Pointer, uintptr, *byte, *byte, uintptr) int32
-	removeAttachment                func(unsafe.Pointer, uintptr) int32
-	renameAttachment                func(unsafe.Pointer, uintptr, *byte) int32
-	replaceAttachmentData           func(unsafe.Pointer, uintptr, *byte, uintptr) int32
-	setAttachmentMetadata           func(unsafe.Pointer, uintptr, *byte) int32
-	save                            func(unsafe.Pointer, *byte) int32
-	toBytes                         func(unsafe.Pointer, *nativeBuffer) int32
+	attachData                      func(uintptr, uintptr, *nativeBuffer) int32
+	getEntry                        func(uintptr, *byte, *nativeBuffer) int32
+	setEntry                        func(uintptr, *byte, *byte, uintptr) int32
+	removeEntry                     func(uintptr, *byte, *int32) int32
+	addTextPage                     func(uintptr, *byte, float64, float64) int32
+	writeTextPage                   func(uintptr, *byte, *uintptr) int32
+	addBlankPage                    func(uintptr, float64, float64) int32
+	addTextObject                   func(uintptr, uintptr, *byte, *uintptr) int32
+	addCompositeTextObject          func(uintptr, uintptr, *byte, *uintptr) int32
+	removePageObject                func(uintptr, uintptr, *byte) int32
+	duplicatePageObject             func(uintptr, uintptr, *byte, *uintptr) int32
+	addPageLayer                    func(uintptr, uintptr, *byte, *byte, *uintptr) int32
+	setPageLayerType                func(uintptr, uintptr, *byte, *byte) int32
+	setPageLayerName                func(uintptr, uintptr, *byte, *byte) int32
+	setPageLayerDrawParam           func(uintptr, uintptr, *byte, *byte) int32
+	addDocumentDrawParam            func(uintptr, uintptr, *byte, *uintptr) int32
+	addPageDrawParam                func(uintptr, uintptr, *byte, *uintptr) int32
+	setDocumentDrawParam            func(uintptr, uintptr, *byte, *byte) int32
+	setPageDrawParam                func(uintptr, uintptr, *byte, *byte) int32
+	removeDocumentDrawParam         func(uintptr, uintptr, *byte) int32
+	removePageDrawParam             func(uintptr, uintptr, *byte) int32
+	pageColorSpaces                 func(uintptr, uintptr, *nativeBuffer) int32
+	documentColorSpaces             func(uintptr, uintptr, *nativeBuffer) int32
+	pageDrawParams                  func(uintptr, uintptr, *nativeBuffer) int32
+	documentDrawParams              func(uintptr, uintptr, *nativeBuffer) int32
+	addDocumentColorSpace           func(uintptr, uintptr, *byte, *uintptr) int32
+	addPageColorSpace               func(uintptr, uintptr, *byte, *uintptr) int32
+	setDocumentColorSpace           func(uintptr, uintptr, *byte, *byte) int32
+	setPageColorSpace               func(uintptr, uintptr, *byte, *byte) int32
+	removeDocumentColorSpace        func(uintptr, uintptr, *byte) int32
+	removePageColorSpace            func(uintptr, uintptr, *byte) int32
+	documentDefaultColorSpace       func(uintptr, uintptr, *nativeBuffer) int32
+	setDocumentDefaultColorSpace    func(uintptr, uintptr, *byte) int32
+	setPageObjectDrawParam          func(uintptr, uintptr, *byte, *byte) int32
+	movePageObjectToLayer           func(uintptr, uintptr, *byte, *byte) int32
+	groupPageObjects                func(uintptr, uintptr, *byte, *byte) int32
+	ungroupPageObjects              func(uintptr, uintptr, *byte) int32
+	movePageObject                  func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectVisible            func(uintptr, uintptr, *byte, int32) int32
+	setPageObjectName               func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectBlendMode          func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectClipRects          func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectPathClips          func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectClips              func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectAlpha              func(uintptr, uintptr, *byte, int32) int32
+	setPagePathStrokeStyle          func(uintptr, uintptr, *byte, *byte) int32
+	setPagePathDashSequence         func(uintptr, uintptr, *byte, *byte) int32
+	setPagePathData                 func(uintptr, uintptr, *byte, *byte) int32
+	setPageTextTypography           func(uintptr, uintptr, *byte, *byte) int32
+	setPageTextCode                 func(uintptr, uintptr, *byte, uintptr, *byte) int32
+	editTextCode                    func(uintptr, *byte) int32
+	setPageTextCodeLayout           func(uintptr, uintptr, *byte, uintptr, *byte) int32
+	appendPageTextCode              func(uintptr, uintptr, *byte, *byte, *byte) int32
+	removePageTextCode              func(uintptr, uintptr, *byte, uintptr) int32
+	setPageTextFont                 func(uintptr, uintptr, *byte, *byte) int32
+	setPageTextPaintFlags           func(uintptr, uintptr, *byte, *byte) int32
+	setPageImageMask                func(uintptr, uintptr, *byte, *byte) int32
+	setPageImageSubstitution        func(uintptr, uintptr, *byte, *byte) int32
+	setPageImageBorder              func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectGouraudFill        func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectGouraudStroke      func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectGradientFill       func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectGradientStroke     func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectPatternFill        func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectPatternStroke      func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectSolidFill          func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectSolidStroke        func(uintptr, uintptr, *byte, *byte) int32
+	setPageObjectBoundary           func(uintptr, uintptr, *byte, float64, float64, float64, float64) int32
+	setPageObjectCTM                func(uintptr, uintptr, *byte, *byte) int32
+	removePageLayer                 func(uintptr, uintptr, *byte) int32
+	addPathObject                   func(uintptr, uintptr, *byte, *uintptr) int32
+	addCompositePathObject          func(uintptr, uintptr, *byte, *uintptr) int32
+	addCompositeObject              func(uintptr, uintptr, *byte, *uintptr) int32
+	addTextWatermark                func(uintptr, uintptr, *byte, *uintptr) int32
+	addTextStampAnnotation          func(uintptr, uintptr, *byte, *uintptr) int32
+	addTextWatermarkAllPages        func(uintptr, *byte, *nativeBuffer) int32
+	addImageWatermark               func(uintptr, uintptr, *byte, *uintptr) int32
+	addImageStampAnnotation         func(uintptr, uintptr, *byte, *uintptr) int32
+	addImageWatermarkAllPages       func(uintptr, *byte, *nativeBuffer) int32
+	addPathAnnotation               func(uintptr, uintptr, *byte, *uintptr) int32
+	addMultiPathAnnotation          func(uintptr, uintptr, *byte, *uintptr) int32
+	addMixedAnnotation              func(uintptr, uintptr, *byte, *uintptr) int32
+	addHighlightAnnotation          func(uintptr, uintptr, *byte, *uintptr) int32
+	addTextNoteAnnotation           func(uintptr, uintptr, *byte, *uintptr) int32
+	addShapeAnnotation              func(uintptr, uintptr, *byte, *uintptr) int32
+	addLineAnnotation               func(uintptr, uintptr, *byte, *uintptr) int32
+	addURILinkAnnotation            func(uintptr, uintptr, *byte, *uintptr) int32
+	addGotoLinkAnnotation           func(uintptr, uintptr, *byte, *uintptr) int32
+	addBookmarkLinkAnnotation       func(uintptr, uintptr, *byte, *uintptr) int32
+	addAttachmentLinkAnnotation     func(uintptr, uintptr, *byte, *uintptr) int32
+	addMediaLinkAnnotation          func(uintptr, uintptr, *byte, *uintptr) int32
+	addTextWithFont                 func(uintptr, *byte, float64, float64, uintptr) int32
+	addFont                         func(uintptr, *byte, *byte, uintptr, *uintptr) int32
+	addFontToDocument               func(uintptr, uintptr, *byte, *byte, uintptr, *uintptr) int32
+	addFontToPage                   func(uintptr, uintptr, *byte, *byte, uintptr, *uintptr) int32
+	setFontAttribute                func(uintptr, uintptr, *byte, *byte) int32
+	setPageFontAttribute            func(uintptr, uintptr, uintptr, *byte, *byte) int32
+	replaceFontData                 func(uintptr, uintptr, *byte, uintptr) int32
+	replacePageFontData             func(uintptr, uintptr, uintptr, *byte, uintptr) int32
+	appendTextPage                  func(uintptr, uintptr, *byte, float64, float64) int32
+	appendBlankPage                 func(uintptr, uintptr, float64, float64) int32
+	insertTextPage                  func(uintptr, uintptr, uintptr, *byte, float64, float64, *uintptr) int32
+	insertBlankPage                 func(uintptr, uintptr, uintptr, float64, float64, *uintptr) int32
+	addFlowedText                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
+	appendPathPage                  func(uintptr, uintptr, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
+	appendImagePage                 func(uintptr, uintptr, *byte, uintptr, *byte, float64, float64) int32
+	addImagePage                    func(uintptr, *byte, uintptr, *byte, float64, float64) int32
+	addImageObject                  func(uintptr, uintptr, *byte, uintptr, *byte, float64, float64, float64, float64, *uintptr) int32
+	addCompositeImageObject         func(uintptr, uintptr, *byte, uintptr, *byte, float64, float64, float64, float64, *uintptr) int32
+	addPathPage                     func(uintptr, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
+	addAttachment                   func(uintptr, *byte, *byte, uintptr) int32
+	addMultimediaResource           func(uintptr, uintptr, *byte, *byte, *byte, uintptr, *uintptr) int32
+	addPageMultimediaResource       func(uintptr, uintptr, *byte, *byte, *byte, uintptr, *uintptr) int32
+	replaceDocumentMultimediaData   func(uintptr, uintptr, *byte, *byte, uintptr) int32
+	replacePageMultimediaData       func(uintptr, uintptr, *byte, *byte, uintptr) int32
+	removeDocumentMultimedia        func(uintptr, uintptr, *byte) int32
+	removePageMultimedia            func(uintptr, uintptr, *byte) int32
+	addAttachmentToDocument         func(uintptr, uintptr, *byte, *byte, uintptr) int32
+	removeAttachment                func(uintptr, uintptr) int32
+	renameAttachment                func(uintptr, uintptr, *byte) int32
+	replaceAttachmentData           func(uintptr, uintptr, *byte, uintptr) int32
+	setAttachmentMetadata           func(uintptr, uintptr, *byte) int32
+	save                            func(uintptr, *byte) int32
+	toBytes                         func(uintptr, *nativeBuffer) int32
 	bufferFree                      func(nativeBuffer)
 }
 
@@ -762,8 +762,9 @@ func bytesAt(buffer nativeBuffer) ([]byte, error) {
 
 // Document owns an OFD document in the Rust library.
 type Document struct {
-	mu     sync.Mutex
-	handle unsafe.Pointer
+	mu sync.Mutex
+	// The native ABI returns an opaque registry ID, not an address Go may scan.
+	handle uintptr
 }
 
 // Attachment describes one embedded file.
@@ -1864,7 +1865,7 @@ func Open(path string) (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.open(&pathBytes[0], &handle)); err != nil {
 		return nil, fmt.Errorf("open ofd: %w", err)
 	}
@@ -1884,7 +1885,7 @@ func FromBytes(data []byte) (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	status := api.fromBytes(pointer, uintptr(len(data)), &handle)
 	runtime.KeepAlive(data)
 	if err := nativeError(status); err != nil {
@@ -1902,7 +1903,7 @@ func New() (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.newDocument(&handle)); err != nil {
 		return nil, fmt.Errorf("create ofd: %w", err)
 	}
@@ -1922,7 +1923,7 @@ func FromPDF(data []byte) (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	status := api.fromPDF(pointer, uintptr(len(data)), &handle)
 	runtime.KeepAlive(data)
 	if err := nativeError(status); err != nil {
@@ -2039,7 +2040,7 @@ func (doc *Document) DecryptWithPassword(password, username string) (*Document, 
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.decryptWithPassword(doc.handle, &passwordBytes[0], namePtr, &handle)); err != nil {
 		return nil, fmt.Errorf("decrypt OFD: %w", err)
 	}
@@ -2065,7 +2066,7 @@ func (doc *Document) EncryptWithPasswords(recipients []PasswordRecipient) (*Docu
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.encryptWithPasswords(doc.handle, &encoded[0], &handle)); err != nil {
 		return nil, fmt.Errorf("encrypt OFD: %w", err)
 	}
@@ -2098,7 +2099,7 @@ func (doc *Document) DecryptWithSM2PrivateKey(privateKey []byte, username string
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.decryptWithSM2PrivateKey(doc.handle, keyPtr, uintptr(len(privateKey)), namePtr, &handle)); err != nil {
 		return nil, fmt.Errorf("decrypt OFD with SM2: %w", err)
 	}
@@ -2126,7 +2127,7 @@ func (doc *Document) EncryptWithCertificates(recipients []CertificateRecipient) 
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.encryptWithCertificates(doc.handle, &encoded[0], &handle)); err != nil {
 		return nil, fmt.Errorf("encrypt OFD with certificates: %w", err)
 	}
@@ -2152,7 +2153,7 @@ func (doc *Document) EncryptWithRecipients(recipients []EncryptionRecipient) (*D
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.encryptWithRecipients(doc.handle, &encoded[0], &handle)); err != nil {
 		return nil, fmt.Errorf("encrypt OFD for recipients: %w", err)
 	}
@@ -2168,15 +2169,15 @@ func (doc *Document) Close() {
 	}
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
-	if doc.handle != nil {
+	if doc.handle != 0 {
 		api.close(doc.handle)
-		doc.handle = nil
+		doc.handle = 0
 	}
 	runtime.SetFinalizer(doc, nil)
 }
 
 func (doc *Document) requireOpen() error {
-	if doc.handle == nil {
+	if doc.handle == 0 {
 		return errors.New("document is closed")
 	}
 	return nil
@@ -3003,7 +3004,7 @@ func (doc *Document) ExtractDocumentBody(index int) (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.extractDocumentBody(doc.handle, uintptr(index), &handle)); err != nil {
 		return nil, fmt.Errorf("extract document body: %w", err)
 	}
@@ -3336,7 +3337,7 @@ func (doc *Document) PrepareArchive() (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.prepareArchive(doc.handle, &handle)); err != nil {
 		return nil, fmt.Errorf("prepare OFD archive: %w", err)
 	}
@@ -3940,7 +3941,7 @@ func (doc *Document) ExtractVersionSnapshot(index int) (*Document, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var handle unsafe.Pointer
+	var handle uintptr
 	if err := nativeError(api.extractVersionSnapshot(doc.handle, uintptr(index), &handle)); err != nil {
 		return nil, fmt.Errorf("extract version snapshot: %w", err)
 	}
@@ -5343,7 +5344,7 @@ func (doc *Document) SetAnnotationObjectDrawParam(pageIndex int, annotationID, o
 
 func (doc *Document) setAnnotationObjectString(
 	pageIndex int, annotationID, objectID string, value *string,
-	call func(unsafe.Pointer, uintptr, *byte, *byte, *byte) int32, operation string,
+	call func(uintptr, uintptr, *byte, *byte, *byte) int32, operation string,
 ) error {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -7074,7 +7075,7 @@ func (doc *Document) RemovePageObject(pageIndex int, objectID string) error {
 	return nil
 }
 
-func (doc *Document) colorSpaces(index int, call func(unsafe.Pointer, uintptr, *nativeBuffer) int32) ([]ColorSpace, error) {
+func (doc *Document) colorSpaces(index int, call func(uintptr, uintptr, *nativeBuffer) int32) ([]ColorSpace, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -7111,7 +7112,7 @@ func (doc *Document) DocumentColorSpaces(documentIndex int) ([]ColorSpace, error
 	return doc.colorSpaces(documentIndex, api.documentColorSpaces)
 }
 
-func (doc *Document) drawParams(index int, call func(unsafe.Pointer, uintptr, *nativeBuffer) int32) ([]DrawParam, error) {
+func (doc *Document) drawParams(index int, call func(uintptr, uintptr, *nativeBuffer) int32) ([]DrawParam, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -7159,7 +7160,7 @@ func (doc *Document) AddPageColorSpace(pageIndex int, spec ColorSpaceSpec) (int,
 }
 
 func (doc *Document) setColorSpace(index int, id string, spec ColorSpaceSpec,
-	call func(unsafe.Pointer, uintptr, *byte, *byte) int32) error {
+	call func(uintptr, uintptr, *byte, *byte) int32) error {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -7199,7 +7200,7 @@ func (doc *Document) SetPageColorSpace(pageIndex int, id string, spec ColorSpace
 }
 
 func (doc *Document) removeColorSpace(index int, id string,
-	call func(unsafe.Pointer, uintptr, *byte) int32) error {
+	call func(uintptr, uintptr, *byte) int32) error {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -7231,7 +7232,7 @@ func (doc *Document) RemovePageColorSpace(pageIndex int, id string) error {
 }
 
 func (doc *Document) addColorSpace(index int, spec ColorSpaceSpec,
-	call func(unsafe.Pointer, uintptr, *byte, *uintptr) int32) (int, error) {
+	call func(uintptr, uintptr, *byte, *uintptr) int32) (int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -7366,7 +7367,7 @@ func (doc *Document) AddPageDrawParam(pageIndex int, style DrawParamStyle) (int,
 }
 
 func (doc *Document) setDrawParam(index int, id string, style DrawParamStyle,
-	call func(unsafe.Pointer, uintptr, *byte, *byte) int32) error {
+	call func(uintptr, uintptr, *byte, *byte) int32) error {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -7406,7 +7407,7 @@ func (doc *Document) SetPageDrawParam(pageIndex int, id string, style DrawParamS
 }
 
 func (doc *Document) removeDrawParam(index int, id string,
-	call func(unsafe.Pointer, uintptr, *byte) int32) error {
+	call func(uintptr, uintptr, *byte) int32) error {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {
@@ -8367,7 +8368,7 @@ func (doc *Document) SetPageObjectSolidStroke(pageIndex int, objectID string, st
 	return doc.setPageObjectPaint(pageIndex, objectID, style, "solid stroke", api.setPageObjectSolidStroke)
 }
 
-func (doc *Document) setPageObjectPaint(pageIndex int, objectID string, style any, name string, native func(unsafe.Pointer, uintptr, *byte, *byte) int32) error {
+func (doc *Document) setPageObjectPaint(pageIndex int, objectID string, style any, name string, native func(uintptr, uintptr, *byte, *byte) int32) error {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
 	if err := doc.requireOpen(); err != nil {

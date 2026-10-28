@@ -12,12 +12,40 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf16"
 )
+
+func TestNativeHandlesSurviveGarbageCollection(t *testing.T) {
+	documents := make([]*Document, 24)
+	for i := range documents {
+		doc, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		documents[i] = doc
+		t.Cleanup(doc.Close)
+	}
+	for i, doc := range documents {
+		runtime.GC()
+		text := fmt.Sprintf("document %d", i)
+		if err := doc.AddTextPage(text, 40, 30); err != nil {
+			t.Fatal(err)
+		}
+		got, err := doc.PageText(0)
+		if err != nil || len(got) != 1 || got[0] != text {
+			t.Fatalf("after GC: text=%v, err=%v", got, err)
+		}
+		doc.Close()
+		if _, err := doc.PageCount(); err == nil {
+			t.Fatal("closed document still accessible")
+		}
+	}
+}
 
 func TestExplicitNativeLibraryPathDoesNotFallBack(t *testing.T) {
 	if os.Getenv("OFDRW_TEST_INVALID_OVERRIDE") == "1" {
