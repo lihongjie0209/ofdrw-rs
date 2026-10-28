@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- Type0/CID text accepts indirect Identity-H encoding names and width-table
+  metadata, including default widths and both W array forms. Chinese text,
+  spacing and rendering have direct/indirect equivalence tests and a shared
+  Python/Go/Node.js fixture. Width expansion counts overwritten declarations
+  against a one-million-assignment limit.
+
 - Color-space family names, ICC channel counts and Indexed palette bounds
   accept indirect objects. ICC profile compatibility and palette length/type
   checks remain enforced. Tests cover Gray/RGB/CMYK ICC image and vector

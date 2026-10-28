@@ -11,6 +11,21 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('import Chinese Type0 text with indirect encoding and CID width metadata', () => {
+  const document = Document.fromPdfBytes(fs.readFileSync(fixture('type0-indirect-widths.pdf')));
+  const direct = Document.fromPdfBytes(fs.readFileSync(fixture('type0-identity-tounicode.pdf')));
+  try {
+    assert.deepEqual(document.pageText(0), ['中文']);
+    assert.deepEqual(document.pageTextObjects(0), direct.pageTextObjects(0));
+    assert.deepEqual(document.pagePng(0, 72), direct.pagePng(0, 72));
+    const reopened = Document.fromBytes(document.toBytes());
+    try {
+      assert.deepEqual(reopened.pageText(0), ['中文']);
+      assert.deepEqual(reopened.validateReferences(), []);
+    } finally { reopened.close(); }
+  } finally { document.close(); direct.close(); }
+});
+
 test('save a Node.js document to disk and reopen it', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ofdrw-node-'));
   const target = path.join(directory, 'saved.ofd');

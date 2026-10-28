@@ -1518,7 +1518,7 @@ fn parse_color_space_inner(
         .as_array()
         .map_err(|_| OfdError::Invalid("unsupported PDF color space resource".into()))?;
     if let [kind, profile] = array.as_slice() {
-        let kind = pdf_color_value(pdf, kind, "color space family")?;
+        let kind = pdf_resolved_value(pdf, kind, "color space family")?;
         if kind.as_name().ok() == Some(b"CalGray".as_slice()) {
             let profile = if matches!(profile, Object::Reference(_)) {
                 pdf.ok_or_else(|| OfdError::Invalid("PDF CalGray is unresolved".into()))?
@@ -1550,7 +1550,7 @@ fn parse_color_space_inner(
             }
             let gamma = match dict.get(b"Gamma") {
                 Ok(value) => f64::from(
-                    pdf_color_value(pdf, value, "CalGray Gamma")?
+                    pdf_resolved_value(pdf, value, "CalGray Gamma")?
                         .as_float()
                         .map_err(|_| OfdError::Invalid("PDF CalGray Gamma is invalid".into()))?,
                 ),
@@ -1653,7 +1653,7 @@ fn parse_color_space_inner(
             .dict
             .get(b"N")
             .map_err(|_| OfdError::Invalid("PDF ICC N is missing".into()))?;
-        let channels = pdf_color_value(Some(pdf), channels, "ICC N")?
+        let channels = pdf_resolved_value(Some(pdf), channels, "ICC N")?
             .as_i64()
             .map_err(|_| OfdError::Invalid("PDF ICC N is not an integer".into()))?;
         let (channels, expected, layout) = match channels {
@@ -1709,7 +1709,7 @@ fn parse_color_space_inner(
     let [kind, base, high, lookup] = array.as_slice() else {
         return Err(OfdError::Invalid("invalid PDF Indexed color space".into()));
     };
-    let kind = pdf_color_value(pdf, kind, "color space family")?;
+    let kind = pdf_resolved_value(pdf, kind, "color space family")?;
     if kind.as_name().ok() != Some(b"Indexed".as_slice())
         && kind.as_name().ok() != Some(b"I".as_slice())
     {
@@ -1721,7 +1721,7 @@ fn parse_color_space_inner(
             "PDF Indexed base cannot be Indexed".into(),
         ));
     }
-    let high = pdf_color_value(pdf, high, "Indexed hival")?
+    let high = pdf_resolved_value(pdf, high, "Indexed hival")?
         .as_i64()
         .map_err(|_| OfdError::Invalid("PDF Indexed hival is not an integer".into()))?;
     if !(0..=255).contains(&high) {
@@ -1788,7 +1788,7 @@ fn parse_color_space_inner(
     Ok(PdfColorSpace::Indexed { palettes })
 }
 
-fn pdf_color_value<'a>(
+fn pdf_resolved_value<'a>(
     pdf: Option<&'a PdfDocument>,
     value: &'a Object,
     name: &str,
@@ -1807,7 +1807,7 @@ fn pdf_color_numbers<const N: usize>(
     value: &Object,
     name: &str,
 ) -> Result<[f64; N], OfdError> {
-    let values = pdf_color_value(pdf, value, name)?
+    let values = pdf_resolved_value(pdf, value, name)?
         .as_array()
         .map_err(|_| OfdError::Invalid(format!("PDF {name} is not an array")))?;
     if values.len() != N {
@@ -1816,7 +1816,7 @@ fn pdf_color_numbers<const N: usize>(
     let mut result = [0.0; N];
     for (number, value) in result.iter_mut().zip(values) {
         *number = f64::from(
-            pdf_color_value(pdf, value, name)?
+            pdf_resolved_value(pdf, value, name)?
                 .as_float()
                 .map_err(|_| OfdError::Invalid(format!("PDF {name} is not numeric")))?,
         );
@@ -6875,7 +6875,14 @@ fn import_type0_text(
     elements: &[Object],
     visible: bool,
 ) -> Result<(), OfdError> {
-    if font.get(b"Encoding").and_then(Object::as_name).ok() != Some(b"Identity-H".as_slice()) {
+    let encoding = font
+        .get(b"Encoding")
+        .map_err(|_| OfdError::Invalid("PDF Type0 font has no Encoding".into()))?;
+    if pdf_resolved_value(Some(page.pdf), encoding, "Type0 Encoding")?
+        .as_name()
+        .ok()
+        != Some(b"Identity-H".as_slice())
+    {
         return Err(OfdError::Invalid(
             "PDF Type0 encoding is not Identity-H".into(),
         ));
@@ -6911,58 +6918,7 @@ fn import_type0_text(
     {
         return Err(OfdError::Invalid("unsupported PDF CID font subtype".into()));
     }
-    let default_width = match descendant.get(b"DW") {
-        Ok(value) => pdf_cid_width(value)?,
-        Err(_) => 1000.0,
-    };
-    let mut widths = HashMap::new();
-    if let Ok(value) = descendant.get(b"W") {
-        let (_, value) = page
-            .pdf
-            .dereference(value)
-            .map_err(|error| OfdError::Invalid(format!("invalid PDF CID widths: {error}")))?;
-        let values = value
-            .as_array()
-            .map_err(|_| OfdError::Invalid("PDF CID W is not an array".into()))?;
-        let mut index = 0;
-        while index < values.len() {
-            let first = values[index]
-                .as_i64()
-                .map_err(|_| OfdError::Invalid("PDF CID W start is invalid".into()))?;
-            if !(0..=65535).contains(&first) {
-                return Err(OfdError::Invalid("PDF CID W start is invalid".into()));
-            }
-            index += 1;
-            let next = values
-                .get(index)
-                .ok_or_else(|| OfdError::Invalid("PDF CID W entry is incomplete".into()))?;
-            if let Ok(width_array) = next.as_array() {
-                if width_array.is_empty() || width_array.len() > 65536 - first as usize {
-                    return Err(OfdError::Invalid("PDF CID W range is invalid".into()));
-                }
-                for (offset, value) in width_array.iter().enumerate() {
-                    widths.insert(first as u16 + offset as u16, pdf_cid_width(value)?);
-                }
-                index += 1;
-            } else {
-                let last = next
-                    .as_i64()
-                    .map_err(|_| OfdError::Invalid("PDF CID W end is invalid".into()))?;
-                if !(first..=65535).contains(&last) {
-                    return Err(OfdError::Invalid("PDF CID W range is invalid".into()));
-                }
-                index += 1;
-                let width =
-                    pdf_cid_width(values.get(index).ok_or_else(|| {
-                        OfdError::Invalid("PDF CID W entry is incomplete".into())
-                    })?)?;
-                for cid in first..=last {
-                    widths.insert(cid as u16, width);
-                }
-                index += 1;
-            }
-        }
-    }
+    let (default_width, widths) = pdf_cid_widths(page.pdf, descendant)?;
 
     let mut text = String::new();
     let mut cids = Vec::new();
@@ -7036,9 +6992,83 @@ fn import_type0_text(
     )
 }
 
-fn pdf_cid_width(value: &Object) -> Result<f64, OfdError> {
+fn pdf_cid_widths(
+    pdf: &PdfDocument,
+    descendant: &lopdf::Dictionary,
+) -> Result<(f64, HashMap<u16, f64>), OfdError> {
+    let default_width = match descendant.get(b"DW") {
+        Ok(value) => pdf_cid_width(pdf, value)?,
+        Err(_) => 1000.0,
+    };
+    let mut widths = HashMap::new();
+    if let Ok(value) = descendant.get(b"W") {
+        let value = pdf_resolved_value(Some(pdf), value, "CID W")?;
+        let values = value
+            .as_array()
+            .map_err(|_| OfdError::Invalid("PDF CID W is not an array".into()))?;
+        let mut index = 0;
+        let mut assignments = 0_usize;
+        while index < values.len() {
+            let first = pdf_resolved_value(Some(pdf), &values[index], "CID W start")?
+                .as_i64()
+                .map_err(|_| OfdError::Invalid("PDF CID W start is invalid".into()))?;
+            if !(0..=65535).contains(&first) {
+                return Err(OfdError::Invalid("PDF CID W start is invalid".into()));
+            }
+            index += 1;
+            let next = values
+                .get(index)
+                .ok_or_else(|| OfdError::Invalid("PDF CID W entry is incomplete".into()))?;
+            let next = pdf_resolved_value(Some(pdf), next, "CID W entry")?;
+            if let Ok(width_array) = next.as_array() {
+                if width_array.is_empty() || width_array.len() > 65536 - first as usize {
+                    return Err(OfdError::Invalid("PDF CID W range is invalid".into()));
+                }
+                assignments += width_array.len();
+                check_cid_width_assignments(assignments)?;
+                for (offset, value) in width_array.iter().enumerate() {
+                    widths.insert(first as u16 + offset as u16, pdf_cid_width(pdf, value)?);
+                }
+                index += 1;
+            } else {
+                let last = next
+                    .as_i64()
+                    .map_err(|_| OfdError::Invalid("PDF CID W end is invalid".into()))?;
+                if !(first..=65535).contains(&last) {
+                    return Err(OfdError::Invalid("PDF CID W range is invalid".into()));
+                }
+                index += 1;
+                let width = pdf_cid_width(
+                    pdf,
+                    values
+                        .get(index)
+                        .ok_or_else(|| OfdError::Invalid("PDF CID W entry is incomplete".into()))?,
+                )?;
+                assignments += (last - first + 1) as usize;
+                check_cid_width_assignments(assignments)?;
+                for cid in first..=last {
+                    widths.insert(cid as u16, width);
+                }
+                index += 1;
+            }
+        }
+    }
+    Ok((default_width, widths))
+}
+
+fn check_cid_width_assignments(assignments: usize) -> Result<(), OfdError> {
+    // Count overwritten entries too: repeated full ranges must not multiply parsing work.
+    if assignments > 1_000_000 {
+        return Err(OfdError::Limit(
+            "PDF CID W has too many width assignments".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn pdf_cid_width(pdf: &PdfDocument, value: &Object) -> Result<f64, OfdError> {
     let width = f64::from(
-        value
+        pdf_resolved_value(Some(pdf), value, "CID width")?
             .as_float()
             .map_err(|_| OfdError::Invalid("PDF CID width is not numeric".into()))?,
     );
@@ -25094,6 +25124,142 @@ mod tests {
         let mut multiple_bytes = Vec::new();
         multiple_chars.save_to(&mut multiple_bytes).unwrap();
         assert!(OfdDocument::from_pdf_bytes(&multiple_bytes).is_err());
+    }
+
+    #[test]
+    fn indirect_cid_widths_preserve_chinese_text_spacing_and_rendering() {
+        let direct = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/type0-identity-tounicode.pdf"
+        ))
+        .unwrap();
+        let indirect = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/type0-indirect-widths.pdf"
+        ))
+        .unwrap();
+        assert_eq!(indirect.page_text(0).unwrap(), ["中文"]);
+        assert_eq!(
+            indirect.page_text_objects(0).unwrap(),
+            direct.page_text_objects(0).unwrap()
+        );
+        assert_eq!(
+            indirect.page_png(0, 72.0).unwrap(),
+            direct.page_png(0, 72.0).unwrap()
+        );
+        let reopened = OfdDocument::from_bytes(&indirect.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["中文"]);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn indirect_cid_default_width_drives_unlisted_character_advances() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../tests/fixtures/type0-identity-tounicode.pdf"
+        ))
+        .unwrap();
+        let width = pdf.add_object(Object::Integer(900));
+        let descendant = pdf.get_object_mut((7, 0)).unwrap().as_dict_mut().unwrap();
+        descendant.remove(b"W");
+        descendant.set("DW", Object::Reference(width));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let objects = document.page_text_objects(0).unwrap();
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 9.6 * MM_PER_PT).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cid_width_tables_resolve_mixed_forms_and_boundary_codes() {
+        let mut pdf = PdfDocument::new();
+        let first = pdf.add_object(Object::Integer(0));
+        let last = pdf.add_object(Object::Integer(65535));
+        let width = pdf.add_object(Object::Real(400.5));
+        let array = pdf.add_object(Object::Array(vec![Object::Reference(width), 500.into()]));
+        let table = pdf.add_object(Object::Array(vec![
+            Object::Reference(first),
+            Object::Reference(array),
+            Object::Reference(last),
+            Object::Reference(last),
+            Object::Reference(width),
+            1.into(),
+            1.into(),
+            700.into(),
+        ]));
+        let (default, widths) =
+            pdf_cid_widths(&pdf, &dictionary! {"W" => Object::Reference(table)}).unwrap();
+        assert_eq!(default, 1000.0);
+        assert_eq!(widths.len(), 3);
+        assert_eq!(widths[&0], 400.5);
+        assert_eq!(widths[&1], 700.0);
+        assert_eq!(widths[&65535], 400.5);
+    }
+
+    #[test]
+    fn cid_width_tables_reject_invalid_indirect_metadata() {
+        let mut pdf = PdfDocument::new();
+        let cycle = pdf.add_object(Object::Reference((1, 0)));
+        let missing = Object::Reference((999, 0));
+        for value in [
+            Object::Integer(-1),
+            Object::Integer(10001),
+            Object::Real(f32::NAN),
+            Object::Real(f32::INFINITY),
+            Object::Name(b"bad".to_vec()),
+            missing.clone(),
+            Object::Reference(cycle),
+        ] {
+            let id = pdf.add_object(value);
+            assert!(pdf_cid_widths(&pdf, &dictionary! {"DW" => Object::Reference(id)}).is_err());
+            let table = Object::Array(vec![0.into(), Object::Array(vec![Object::Reference(id)])]);
+            assert!(pdf_cid_widths(&pdf, &dictionary! {"W" => table}).is_err());
+        }
+        for values in [
+            vec![0.into()],
+            vec![(-1).into(), Object::Array(vec![500.into()])],
+            vec![65536.into(), Object::Array(vec![500.into()])],
+            vec![Object::Real(1.0), Object::Array(vec![500.into()])],
+            vec![0.into(), Object::Array(vec![])],
+            vec![65535.into(), Object::Array(vec![500.into(), 600.into()])],
+            vec![3.into(), 2.into(), 500.into()],
+            vec![0.into(), 65536.into(), 500.into()],
+            vec![0.into(), 1.into()],
+            vec![0.into(), Object::Real(1.0), 500.into()],
+            vec![missing.clone(), Object::Array(vec![500.into()])],
+            vec![0.into(), missing.clone()],
+            vec![0.into(), 1.into(), missing.clone()],
+            vec![Object::Reference(cycle), 1.into(), 500.into()],
+        ] {
+            let id = pdf.add_object(Object::Array(values));
+            assert!(pdf_cid_widths(&pdf, &dictionary! {"W" => Object::Reference(id)}).is_err());
+        }
+        for table in [missing, Object::Reference(cycle), Object::Integer(1)] {
+            assert!(pdf_cid_widths(&pdf, &dictionary! {"W" => table}).is_err());
+        }
+    }
+
+    #[test]
+    fn cid_width_table_work_limit_counts_overwritten_ranges() {
+        let pdf = PdfDocument::new();
+        let mut values = Vec::new();
+        for _ in 0..15 {
+            values.extend([0.into(), 65535.into(), 500.into()]);
+        }
+        values.extend([0.into(), 16959.into(), 600.into()]);
+        let (_, widths) =
+            pdf_cid_widths(&pdf, &dictionary! {"W" => Object::Array(values.clone())}).unwrap();
+        assert_eq!(widths.len(), 65536);
+        assert_eq!(widths[&0], 600.0);
+        assert_eq!(widths[&65535], 500.0);
+        values.extend([0.into(), Object::Array(vec![500.into()])]);
+        assert!(matches!(
+            pdf_cid_widths(&pdf, &dictionary! {"W" => Object::Array(values)}),
+            Err(OfdError::Limit(_))
+        ));
     }
 
     #[test]

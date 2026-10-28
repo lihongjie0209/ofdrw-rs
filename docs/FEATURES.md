@@ -1669,6 +1669,12 @@ PDF `CIDToGIDMap`. Simple TrueType fonts with `WinAnsiEncoding`,
 Unicode character map agrees with the decoded text; repeated text runs reuse
 the same OFD font resource.
 
+Type0 `Identity-H` encoding names, default CID widths (`DW`), `W` arrays,
+range endpoints, per-CID width arrays and individual widths may be indirect
+objects. Width validation and `TJ` spacing apply after resolution; broken or
+cyclic references return errors. Width-table expansion is limited to 1,000,000
+assignments per parse, counting overlapping and overwritten declarations.
+
 Other source fonts use the document's fallback font for previews. Vertical
 and other CID encodings remain unsupported. The `'` and `"` line operators
 are supported.

@@ -997,7 +997,7 @@ func TestImportsPDFShadingFunctionRange(t *testing.T) {
 }
 
 func TestImportsToUnicodePDF(t *testing.T) {
-	for _, name := range []string{"type1-tounicode.pdf", "type1-subset-tounicode.pdf", "rotated-tounicode.pdf", "metadata-tounicode.pdf", "outline-tounicode.pdf", "type0-identity-tounicode.pdf"} {
+	for _, name := range []string{"type1-tounicode.pdf", "type1-subset-tounicode.pdf", "rotated-tounicode.pdf", "metadata-tounicode.pdf", "outline-tounicode.pdf", "type0-identity-tounicode.pdf", "type0-indirect-widths.pdf"} {
 		t.Run(name, func(t *testing.T) {
 			testImportToUnicodePDF(t, name)
 		})
