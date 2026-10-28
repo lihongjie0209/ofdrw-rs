@@ -1532,19 +1532,15 @@ fn parse_color_space_inner(
             })?;
             let white = dict
                 .get(b"WhitePoint")
-                .and_then(Object::as_array)
                 .map_err(|_| OfdError::Invalid("PDF CalGray has no WhitePoint".into()))?;
-            let white = pdf_color_triple(white, "CalGray WhitePoint")?;
+            let white = pdf_color_triple(pdf, white, "CalGray WhitePoint")?;
             if white[0] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 || white[2] <= 0.0 {
                 return Err(OfdError::Invalid(
                     "PDF CalGray WhitePoint is invalid".into(),
                 ));
             }
             if let Ok(black) = dict.get(b"BlackPoint") {
-                let black = black
-                    .as_array()
-                    .map_err(|_| OfdError::Invalid("PDF CalGray BlackPoint is invalid".into()))?;
-                let black = pdf_color_triple(black, "CalGray BlackPoint")?;
+                let black = pdf_color_triple(pdf, black, "CalGray BlackPoint")?;
                 if black != [0.0; 3] {
                     return Err(OfdError::Invalid(
                         "PDF CalGray nonzero BlackPoint is unsupported".into(),
@@ -1553,7 +1549,7 @@ fn parse_color_space_inner(
             }
             let gamma = match dict.get(b"Gamma") {
                 Ok(value) => f64::from(
-                    value
+                    pdf_color_value(pdf, value, "CalGray Gamma")?
                         .as_float()
                         .map_err(|_| OfdError::Invalid("PDF CalGray Gamma is invalid".into()))?,
                 ),
@@ -1578,17 +1574,13 @@ fn parse_color_space_inner(
             })?;
             let white = dict
                 .get(b"WhitePoint")
-                .and_then(Object::as_array)
                 .map_err(|_| OfdError::Invalid("PDF CalRGB has no WhitePoint".into()))?;
-            let white = pdf_color_triple(white, "CalRGB WhitePoint")?;
+            let white = pdf_color_triple(pdf, white, "CalRGB WhitePoint")?;
             if white[0] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 || white[2] <= 0.0 {
                 return Err(OfdError::Invalid("PDF CalRGB WhitePoint is invalid".into()));
             }
             if let Ok(black) = dict.get(b"BlackPoint") {
-                let black = black
-                    .as_array()
-                    .map_err(|_| OfdError::Invalid("PDF CalRGB BlackPoint is invalid".into()))?;
-                let black = pdf_color_triple(black, "CalRGB BlackPoint")?;
+                let black = pdf_color_triple(pdf, black, "CalRGB BlackPoint")?;
                 if black != [0.0; 3] {
                     return Err(OfdError::Invalid(
                         "PDF CalRGB nonzero BlackPoint is unsupported".into(),
@@ -1596,23 +1588,14 @@ fn parse_color_space_inner(
                 }
             }
             let gamma = match dict.get(b"Gamma") {
-                Ok(value) => pdf_color_triple(
-                    value
-                        .as_array()
-                        .map_err(|_| OfdError::Invalid("PDF CalRGB Gamma is invalid".into()))?,
-                    "CalRGB Gamma",
-                )?,
+                Ok(value) => pdf_color_triple(pdf, value, "CalRGB Gamma")?,
                 Err(_) => [1.0; 3],
             };
             if gamma.iter().any(|value| *value <= 0.0) {
                 return Err(OfdError::Invalid("PDF CalRGB Gamma is invalid".into()));
             }
             let matrix = match dict.get(b"Matrix") {
-                Ok(value) => pdf_calrgb_matrix(
-                    value
-                        .as_array()
-                        .map_err(|_| OfdError::Invalid("PDF CalRGB Matrix is invalid".into()))?,
-                )?,
+                Ok(value) => pdf_calrgb_matrix(pdf, value)?,
                 Err(_) => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             };
             let to_srgb = calibrated_rgb_to_srgb_matrix(white, matrix)?;
@@ -1632,17 +1615,13 @@ fn parse_color_space_inner(
                 .map_err(|_| OfdError::Invalid("PDF Lab parameters are not a dictionary".into()))?;
             let white = dict
                 .get(b"WhitePoint")
-                .and_then(Object::as_array)
                 .map_err(|_| OfdError::Invalid("PDF Lab has no WhitePoint".into()))?;
-            let white = pdf_color_triple(white, "Lab WhitePoint")?;
+            let white = pdf_color_triple(pdf, white, "Lab WhitePoint")?;
             if white[0] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 || white[2] <= 0.0 {
                 return Err(OfdError::Invalid("PDF Lab WhitePoint is invalid".into()));
             }
             if let Ok(black) = dict.get(b"BlackPoint") {
-                let black = black
-                    .as_array()
-                    .map_err(|_| OfdError::Invalid("PDF Lab BlackPoint is invalid".into()))?;
-                let black = pdf_color_triple(black, "Lab BlackPoint")?;
+                let black = pdf_color_triple(pdf, black, "Lab BlackPoint")?;
                 if black != [0.0; 3] {
                     return Err(OfdError::Invalid(
                         "PDF Lab nonzero BlackPoint is unsupported".into(),
@@ -1650,11 +1629,7 @@ fn parse_color_space_inner(
                 }
             }
             let range = match dict.get(b"Range") {
-                Ok(value) => pdf_lab_range(
-                    value
-                        .as_array()
-                        .map_err(|_| OfdError::Invalid("PDF Lab Range is invalid".into()))?,
-                )?,
+                Ok(value) => pdf_lab_range(pdf, value)?,
                 Err(_) => [-100.0, 100.0, -100.0, 100.0],
             };
             let to_srgb = calibrated_rgb_to_srgb_matrix(
@@ -1809,78 +1784,68 @@ fn parse_color_space_inner(
     Ok(PdfColorSpace::Indexed { palettes })
 }
 
-fn pdf_color_triple(values: &[Object], name: &str) -> Result<[f64; 3], OfdError> {
-    let [x, y, z] = values else {
-        return Err(OfdError::Invalid(format!(
-            "PDF {name} must have three values"
-        )));
-    };
-    let [x, y, z] = [x, y, z].map(|value| {
-        value
-            .as_float()
-            .map(f64::from)
-            .map_err(|_| OfdError::Invalid(format!("PDF {name} is not numeric")))
-    });
-    let values = [x?, y?, z?];
-    if values
-        .iter()
-        .any(|value| !value.is_finite() || *value < 0.0 || *value > 1e6)
-    {
+fn pdf_color_value<'a>(
+    pdf: Option<&'a PdfDocument>,
+    value: &'a Object,
+    name: &str,
+) -> Result<&'a Object, OfdError> {
+    if !matches!(value, Object::Reference(_)) {
+        return Ok(value);
+    }
+    pdf.ok_or_else(|| OfdError::Invalid(format!("PDF {name} is unresolved")))?
+        .dereference(value)
+        .map(|(_, value)| value)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF {name}: {error}")))
+}
+
+fn pdf_color_numbers<const N: usize>(
+    pdf: Option<&PdfDocument>,
+    value: &Object,
+    name: &str,
+) -> Result<[f64; N], OfdError> {
+    let values = pdf_color_value(pdf, value, name)?
+        .as_array()
+        .map_err(|_| OfdError::Invalid(format!("PDF {name} is not an array")))?;
+    if values.len() != N {
+        return Err(OfdError::Invalid(format!("PDF {name} needs {N} values")));
+    }
+    let mut result = [0.0; N];
+    for (number, value) in result.iter_mut().zip(values) {
+        *number = f64::from(
+            pdf_color_value(pdf, value, name)?
+                .as_float()
+                .map_err(|_| OfdError::Invalid(format!("PDF {name} is not numeric")))?,
+        );
+        if !number.is_finite() || number.abs() > 1e6 {
+            return Err(OfdError::Invalid(format!("PDF {name} is invalid")));
+        }
+    }
+    Ok(result)
+}
+
+fn pdf_color_triple(
+    pdf: Option<&PdfDocument>,
+    value: &Object,
+    name: &str,
+) -> Result<[f64; 3], OfdError> {
+    let values = pdf_color_numbers(pdf, value, name)?;
+    if values.iter().any(|value| *value < 0.0) {
         return Err(OfdError::Invalid(format!("PDF {name} is invalid")));
     }
     Ok(values)
 }
 
-fn pdf_calrgb_matrix(values: &[Object]) -> Result<[f64; 9], OfdError> {
-    if values.len() != 9 {
-        return Err(OfdError::Invalid(
-            "PDF CalRGB Matrix needs nine values".into(),
-        ));
-    }
-    let values = values
-        .iter()
-        .map(|value| {
-            let value = f64::from(
-                value
-                    .as_float()
-                    .map_err(|_| OfdError::Invalid("PDF CalRGB Matrix is not numeric".into()))?,
-            );
-            if !value.is_finite() || value.abs() > 1e6 {
-                return Err(OfdError::Invalid("PDF CalRGB Matrix is invalid".into()));
-            }
-            Ok(value)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    values
-        .try_into()
-        .map_err(|_| OfdError::Invalid("PDF CalRGB Matrix needs nine values".into()))
+fn pdf_calrgb_matrix(pdf: Option<&PdfDocument>, value: &Object) -> Result<[f64; 9], OfdError> {
+    pdf_color_numbers(pdf, value, "CalRGB Matrix")
 }
 
-fn pdf_lab_range(values: &[Object]) -> Result<[f64; 4], OfdError> {
-    if values.len() != 4 {
-        return Err(OfdError::Invalid("PDF Lab Range needs four values".into()));
-    }
-    let values = values
-        .iter()
-        .map(|value| {
-            let value = f64::from(
-                value
-                    .as_float()
-                    .map_err(|_| OfdError::Invalid("PDF Lab Range is not numeric".into()))?,
-            );
-            if !value.is_finite() || value.abs() > 1e6 {
-                return Err(OfdError::Invalid("PDF Lab Range is invalid".into()));
-            }
-            Ok(value)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let [a_min, a_max, b_min, b_max]: [f64; 4] = values
-        .try_into()
-        .map_err(|_| OfdError::Invalid("PDF Lab Range needs four values".into()))?;
+fn pdf_lab_range(pdf: Option<&PdfDocument>, value: &Object) -> Result<[f64; 4], OfdError> {
+    let values = pdf_color_numbers(pdf, value, "Lab Range")?;
+    let [a_min, a_max, b_min, b_max] = values;
     if a_min >= a_max || b_min >= b_max {
         return Err(OfdError::Invalid("PDF Lab Range is invalid".into()));
     }
-    Ok([a_min, a_max, b_min, b_max])
+    Ok(values)
 }
 
 fn lab_inverse(value: f64) -> f64 {
@@ -16957,6 +16922,241 @@ mod tests {
                 Object::Dictionary(parameters),
             ]);
             assert!(parse_color_space(None, None, &color_space, 0).is_err());
+        }
+    }
+
+    fn indirect_calibrated_space(pdf: &mut PdfDocument, mut space: Object) -> Object {
+        let array = space.as_array_mut().unwrap();
+        let dict = array[1].as_dict_mut().unwrap();
+        dict.set("BlackPoint", Object::Array(vec![Object::Integer(0); 3]));
+        for (_, value) in dict.iter_mut() {
+            if let Object::Array(values) = value {
+                for number in values {
+                    let id = pdf.add_object(number.clone());
+                    *number = Object::Reference(id);
+                }
+            }
+            let id = pdf.add_object(value.clone());
+            *value = Object::Reference(id);
+        }
+        let id = pdf.add_object(array[1].clone());
+        array[1] = Object::Reference(id);
+        let id = pdf.add_object(space);
+        Object::Reference(id)
+    }
+
+    fn calgray_space() -> Object {
+        Object::Array(vec![
+            Object::Name(b"CalGray".to_vec()),
+            Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![Object::Integer(1); 3]),
+                "Gamma" => Object::Real(2.2),
+            }),
+        ])
+    }
+
+    #[test]
+    fn calibrated_color_parameters_accept_indirect_arrays_and_numbers() {
+        for (space, values) in [
+            (calgray_space(), vec![0.5]),
+            (calrgb_space(), vec![0.2, 0.5, 0.8]),
+            (lab_space(), vec![50.0, -25.0, 30.0]),
+        ] {
+            let expected = parse_color_space(None, None, &space, 0)
+                .unwrap()
+                .color(&values)
+                .unwrap();
+            let mut pdf = PdfDocument::new();
+            let indirect = indirect_calibrated_space(&mut pdf, space);
+            let actual = parse_color_space(Some(&pdf), None, &indirect, 0)
+                .unwrap()
+                .color(&values)
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(parse_color_space(None, None, &indirect, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn calibrated_color_references_preserve_parameter_validation() {
+        for space in [calgray_space(), calrgb_space(), lab_space()] {
+            let dict = space.as_array().unwrap()[1].as_dict().unwrap();
+            for (key, value) in dict.iter() {
+                for broken in [Object::Reference((999, 0)), Object::Name(b"bad".to_vec())] {
+                    let mut pdf = PdfDocument::new();
+                    let mut malformed = space.clone();
+                    let id = pdf.add_object(broken);
+                    malformed.as_array_mut().unwrap()[1]
+                        .as_dict_mut()
+                        .unwrap()
+                        .set(key.clone(), Object::Reference(id));
+                    assert!(parse_color_space(Some(&pdf), None, &malformed, 0).is_err());
+                    if let Object::Array(values) = value {
+                        let mut members = values.clone();
+                        members[0] = Object::Reference(id);
+                        malformed.as_array_mut().unwrap()[1]
+                            .as_dict_mut()
+                            .unwrap()
+                            .set(key.clone(), Object::Array(members));
+                        assert!(parse_color_space(Some(&pdf), None, &malformed, 0).is_err());
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_calibrated_reference_rendering(mut pdf: PdfDocument, space: Object, image: bool) {
+        let set_space = |pdf: &mut PdfDocument, space| {
+            if image {
+                pdf.get_object_mut((5, 0))
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap()
+                    .dict
+                    .set("ColorSpace", space);
+            } else {
+                pdf.get_object_mut((3, 0))
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set(
+                        "Resources",
+                        dictionary! {"ColorSpace" => dictionary! {"CS1" => space}},
+                    );
+            }
+        };
+        set_space(&mut pdf, space.clone());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let expected = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let indirect = indirect_calibrated_space(&mut pdf, space);
+        set_space(&mut pdf, indirect);
+        bytes.clear();
+        pdf.save_to(&mut bytes).unwrap();
+        let actual = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(actual.page_svg(0).unwrap(), expected.page_svg(0).unwrap());
+        assert_eq!(
+            actual.page_png(0, 72.0).unwrap(),
+            expected.page_png(0, 72.0).unwrap()
+        );
+        assert!(actual.validate_references().unwrap().is_empty());
+        let roundtrip = OfdDocument::from_bytes(&actual.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            roundtrip.page_png(0, 72.0).unwrap(),
+            expected.page_png(0, 72.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn indirect_calibrated_colors_render_vector_paint_equivalently() {
+        for (space, content) in [
+            (
+                calgray_space(),
+                b"/CS1 cs .5 sc 10 20 18 18 re f".as_slice(),
+            ),
+            (
+                calrgb_space(),
+                b"/CS1 cs .2 .5 .8 sc 10 20 18 18 re f".as_slice(),
+            ),
+            (
+                lab_space(),
+                b"/CS1 cs 50 -25 30 sc 10 20 18 18 re f".as_slice(),
+            ),
+        ] {
+            let pdf = PdfDocument::load_mem(&vector_pdf(content)).unwrap();
+            assert_calibrated_reference_rendering(pdf, space, false);
+        }
+    }
+
+    #[test]
+    fn indirect_calibrated_colors_render_image_samples_equivalently() {
+        for (space, gray) in [
+            (calgray_space(), true),
+            (calrgb_space(), false),
+            (lab_space(), false),
+        ] {
+            let samples = if gray { &[128; 4][..] } else { &[128; 12][..] };
+            let pdf = PdfDocument::load_mem(&image_pdf(samples, None, gray)).unwrap();
+            assert_calibrated_reference_rendering(pdf, space, true);
+        }
+    }
+
+    #[test]
+    fn indirect_calibrated_colors_render_shading_equivalently() {
+        for (space, functions) in [
+            (calgray_space(), vec![scalar_exponential(0.0, 1.0, 1.0)]),
+            (calrgb_space(), vec![scalar_exponential(0.0, 1.0, 1.0); 3]),
+            (
+                lab_space(),
+                vec![
+                    scalar_exponential(50.0, 50.0, 1.0),
+                    scalar_exponential(-100.0, 100.0, 1.0),
+                    scalar_exponential(0.0, 0.0, 1.0),
+                ],
+            ),
+        ] {
+            let mut pdf = PdfDocument::load_mem(include_bytes!(
+                "../tests/fixtures/shading-function-array-axial.pdf"
+            ))
+            .unwrap();
+            pdf.objects.insert((6, 0), Object::Array(functions));
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("ColorSpace", space.clone());
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let expected = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            let indirect = indirect_calibrated_space(&mut pdf, space);
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("ColorSpace", indirect);
+            bytes.clear();
+            pdf.save_to(&mut bytes).unwrap();
+            let actual = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(
+                actual.page_png(0, 72.0).unwrap(),
+                expected.page_png(0, 72.0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn calibrated_color_references_reject_cycles_and_invalid_numeric_values() {
+        for value in [
+            Object::Reference((1, 0)),
+            Object::Real(f32::NAN),
+            Object::Real(f32::INFINITY),
+            Object::Real(1e7),
+        ] {
+            let mut pdf = PdfDocument::new();
+            pdf.objects.insert((1, 0), value);
+            for name in ["WhitePoint", "Gamma", "Matrix"] {
+                let mut space = calrgb_space();
+                let count = if name == "Matrix" { 9 } else { 3 };
+                space.as_array_mut().unwrap()[1]
+                    .as_dict_mut()
+                    .unwrap()
+                    .set(name, Object::Array(vec![Object::Reference((1, 0)); count]));
+                assert!(parse_color_space(Some(&pdf), None, &space, 0).is_err());
+            }
+        }
+        let mut space = lab_space();
+        for values in [[100, -100, -100, 100], [-100, 100, 100, -100]] {
+            let mut pdf = PdfDocument::new();
+            let members = values
+                .into_iter()
+                .map(|value| Object::Reference(pdf.add_object(Object::Integer(value))))
+                .collect();
+            let id = pdf.add_object(Object::Array(members));
+            space.as_array_mut().unwrap()[1]
+                .as_dict_mut()
+                .unwrap()
+                .set("Range", Object::Reference(id));
+            assert!(parse_color_space(Some(&pdf), None, &space, 0).is_err());
         }
     }
 

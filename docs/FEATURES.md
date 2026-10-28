@@ -1452,6 +1452,12 @@ marker in the JPEG takes precedence. Four-component JPEGs with
 `ColorTransform` 1 and no Adobe marker decode YUVK into CMYK before applying
 the PDF color space, `Decode`, and color-key mask.
 
+CalGray, CalRGB and Lab parameter dictionaries, their WhitePoint, BlackPoint,
+Gamma, Matrix and Range arrays, and individual numeric entries may be indirect
+objects. Scalar CalGray Gamma may also be indirect. The same validation and
+color conversion apply to vector paint, image samples and shading; missing or
+cyclic references return errors.
+
 The PDF `cs`/`CS` and `sc`/`SC`/`scn`/`SCN` operators support DeviceGray,
 DeviceRGB, DeviceCMYK, CalGray, CalRGB, and Lab, including names mapped by
 the current page or Form resource dictionary. Selecting a space resets its

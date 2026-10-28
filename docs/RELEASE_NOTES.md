@@ -1,5 +1,10 @@
 Unreleased source changes after v0.1.0:
 
+- CalGray, CalRGB and Lab parameters accept indirect arrays and numeric
+  entries, including scalar CalGray Gamma. Direct and indirect definitions
+  retain equivalent vector, image and shading output. Invalid references and
+  numeric metadata return errors rather than silently selecting defaults.
+
 - PDF axial and radial shading accept arrays of independent component
   functions, mixing sampled, exponential, nested stitching and calculator
   functions. Values remain in component space through Lab/ICC conversion;
