@@ -11,6 +11,19 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('decode PDF Differences glyph names without a ToUnicode map', () => {
+  const document = Document.fromPdfBytes(fs.readFileSync(fixture('encoding-differences.pdf')));
+  try {
+    assert.deepEqual(document.pageText(0), ['中文']);
+    const reopened = Document.fromBytes(document.toBytes());
+    try {
+      assert.deepEqual(reopened.pageText(0), ['中文']);
+      assert.deepEqual(reopened.validateReferences(), []);
+      assert.deepEqual(reopened.pagePng(0, 72), document.pagePng(0, 72));
+    } finally { reopened.close(); }
+  } finally { document.close(); }
+});
+
 test('import Chinese Type0 text with indirect encoding and CID width metadata', () => {
   const document = Document.fromPdfBytes(fs.readFileSync(fixture('type0-indirect-widths.pdf')));
   const direct = Document.fromPdfBytes(fs.readFileSync(fixture('type0-identity-tounicode.pdf')));

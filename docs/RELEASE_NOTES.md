@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- Simple-font Encoding dictionaries support named base encodings and
+  Differences glyph-name overrides without ToUnicode. Tests cover Adobe
+  glyph names, Unicode names, indirect entries, spacing, embedded TrueType
+  reuse, ToUnicode precedence and three language bindings. An embedded-font
+  fixture is also checked against an independent Ghostscript raster.
+
 - Type0/CID text accepts indirect Identity-H encoding names and width-table
   metadata, including default widths and both W array forms. Chinese text,
   spacing and rendering have direct/indirect equivalence tests and a shared

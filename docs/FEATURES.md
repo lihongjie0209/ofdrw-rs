@@ -1669,6 +1669,22 @@ PDF `CIDToGIDMap`. Simple TrueType fonts with `WinAnsiEncoding`,
 Unicode character map agrees with the decoded text; repeated text runs reuse
 the same OFD font resource.
 
+Simple-font `Encoding` dictionaries may provide a named `BaseEncoding`
+(`StandardEncoding`, `WinAnsiEncoding` or `MacRomanEncoding`) and a
+`Differences` array. Standard Latin Type1 faces use StandardEncoding when the
+dictionary omits its base; TrueType dictionaries require an explicit base or
+a ToUnicode map. Adobe glyph-list names, variant suffixes, `uniXXXX` and
+`uXXXX`–`uXXXXXX` names recover a single Unicode scalar per source code,
+including supplementary-plane characters. Source codes still select widths
+and word spacing. ToUnicode retains precedence when present.
+
+Encoding dictionaries, base names, difference arrays and their members may
+be indirect. Unknown or multi-character mappings fail only if used by the
+text. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
+glyph name. Embedded TrueType reuse also checks overridden glyph names
+against the font's Unicode glyphs; mismatches use the fallback font.
+The mapping follows the [Adobe Glyph List specification](https://github.com/adobe-type-tools/agl-specification).
+
 Type0 `Identity-H` encoding names, default CID widths (`DW`), `W` arrays,
 range endpoints, per-CID width arrays and individual widths may be indirect
 objects. Width validation and `TJ` spacing apply after resolution; broken or

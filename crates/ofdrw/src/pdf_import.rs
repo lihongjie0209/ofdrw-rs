@@ -1,6 +1,7 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
 mod scalar_function;
+mod simple_encoding;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -6318,23 +6319,11 @@ fn import_text(
                 "PDF Type1 font is not a standard Latin face".into(),
             ));
         }
-        if let Ok(encoding) = font.get(b"Encoding") {
-            let name = encoding.as_name().map_err(|_| {
-                OfdError::Invalid("custom PDF font encoding needs ToUnicode".into())
-            })?;
-            if name != b"StandardEncoding"
-                && name != b"WinAnsiEncoding"
-                && name != b"MacRomanEncoding"
-            {
-                return Err(OfdError::Invalid(
-                    "PDF font encoding is not supported".into(),
-                ));
-            }
-        }
-        Some(
-            font.get_font_encoding(page.pdf)
-                .map_err(|error| OfdError::Invalid(format!("cannot decode PDF font: {error}")))?,
-        )
+        Some(simple_encoding::SimpleEncoding::parse(
+            page.pdf,
+            font,
+            standard_face,
+        )?)
     } else {
         None
     };
@@ -6402,15 +6391,12 @@ fn import_text(
                     }
                     decoded
                 } else {
-                    PdfDocument::decode_text(
-                        encoding.as_ref().ok_or_else(|| {
+                    encoding
+                        .as_ref()
+                        .ok_or_else(|| {
                             OfdError::Invalid("PDF font has no usable text encoding".into())
-                        })?,
-                        bytes,
-                    )
-                    .map_err(|error| {
-                        OfdError::Invalid(format!("cannot decode PDF text: {error}"))
-                    })?
+                        })?
+                        .decode(bytes)?
                 };
                 if decoded.contains('\u{fffd}') || decoded.chars().count() != bytes.len() {
                     return Err(OfdError::Invalid(
@@ -6611,21 +6597,13 @@ fn embedded_pdf_font_id(
             })
     } else {
         let codes = simple_codes.unwrap_or_default();
-        let encoding_name = font.get(b"Encoding").and_then(Object::as_name).ok();
-        if !matches!(
-            encoding_name,
-            Some(b"WinAnsiEncoding" | b"StandardEncoding" | b"MacRomanEncoding")
-        ) {
+        if font.get(b"Encoding").is_err() {
             return Ok(None);
         }
-        let mut standard_font = font.clone();
-        standard_font.remove(b"ToUnicode");
-        let Ok(encoding) = standard_font.get_font_encoding(pdf) else {
+        let Ok(encoding) = simple_encoding::SimpleEncoding::parse(pdf, font, false) else {
             return Ok(None);
         };
-        codes.len() == text.chars().count()
-            && PdfDocument::decode_text(&encoding, codes).ok().as_deref() == Some(text)
-            && text.chars().all(|ch| face.glyph_index(ch).is_some())
+        codes.len() == text.chars().count() && encoding.matches_face(&face, codes, text)
     };
     if !mapped {
         return Ok(None);
@@ -23878,6 +23856,150 @@ mod tests {
         let mut altered = Vec::new();
         without_map.save_to(&mut altered).unwrap();
         assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn encoding_differences_import_chinese_text_without_tounicode() {
+        let document = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/encoding-differences.pdf"
+        ))
+        .unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 6.0 * MM_PER_PT).abs() < 1e-6);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["中文"]);
+        assert!(reopened.validate_references().unwrap().is_empty());
+        assert_eq!(
+            document.page_png(0, 72.0).unwrap(),
+            reopened.page_png(0, 72.0).unwrap()
+        );
+    }
+
+    fn differences_truetype_pdf() -> PdfDocument {
+        let source = text_pdf_with_widths(
+            b"BT /F1 12 Tf 10 20 Td (AB) Tj ET BT /F1 12 Tf 10 40 Td (AB) Tj ET",
+            b"DejaVuSans",
+            Some((b'A', &[600.0, 500.0])),
+        );
+        let mut pdf = PdfDocument::load_mem(&source).unwrap();
+        let file = pdf.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            include_bytes!("../tests/fixtures/dejavu-sans.ttf").to_vec(),
+        ));
+        let descriptor = pdf.add_object(
+            dictionary! {"Type" => Object::Name(b"FontDescriptor".to_vec()),
+            "FontFile2" => Object::Reference(file)},
+        );
+        let font = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("FontDescriptor", Object::Reference(descriptor));
+        font.set("Encoding", dictionary! {"BaseEncoding" => Object::Name(b"WinAnsiEncoding".to_vec()),
+            "Differences" => Object::Array(vec![65.into(), Object::Name(b"B".to_vec()), Object::Name(b"A".to_vec())])});
+        pdf
+    }
+
+    #[test]
+    fn encoding_differences_embed_matching_truetype_and_reuse_font() {
+        let mut pdf = differences_truetype_pdf();
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["BA", "BA"]);
+        let fonts = document.fonts().unwrap();
+        let embedded: Vec<_> = fonts
+            .iter()
+            .enumerate()
+            .filter(|(_, font)| font.embedded_path.is_some())
+            .collect();
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(
+            document.font_data(embedded[0].0).unwrap(),
+            include_bytes!("../tests/fixtures/dejavu-sans.ttf")
+        );
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            document.page_png(0, 72.0).unwrap(),
+            reopened.page_png(0, 72.0).unwrap()
+        );
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tounicode_precedes_differences_without_reusing_a_mismatched_font() {
+        let mut pdf = differences_truetype_pdf();
+        let original =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/type1-tounicode.pdf")).unwrap();
+        let map = pdf.add_object(original.get_object((6, 0)).unwrap().clone());
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("ToUnicode", Object::Reference(map));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文", "中文"]);
+        assert!(document
+            .fonts()
+            .unwrap()
+            .iter()
+            .all(|font| font.embedded_path.is_none()));
+        assert!(document.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn encoding_differences_truetype_matches_independent_raster_reference() {
+        let document = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/encoding-differences-truetype.pdf"
+        ))
+        .unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["BA"]);
+        assert!(document
+            .fonts()
+            .unwrap()
+            .iter()
+            .any(|font| font.embedded_path.is_some()));
+        let actual = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let expected = image::load_from_memory(include_bytes!(
+            "../tests/fixtures/encoding-differences-reference.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        assert_eq!(actual.dimensions(), expected.dimensions());
+        let ink = |image: &image::RgbImage| {
+            image
+                .enumerate_pixels()
+                .filter(|(_, _, pixel)| pixel.0.iter().any(|channel| *channel < 128))
+                .map(|(x, y, _)| (x as i32, y as i32))
+                .collect::<HashSet<_>>()
+        };
+        let actual = ink(&actual);
+        let expected = ink(&expected);
+        assert!(actual.len() > 100 && expected.len() > 100);
+        let mut unmatched = 0;
+        for (source, target) in [(&actual, &expected), (&expected, &actual)] {
+            unmatched += source
+                .iter()
+                .filter(|(x, y)| {
+                    !(-1..=1).any(|dx| (-1..=1).any(|dy| target.contains(&(x + dx, y + dy))))
+                })
+                .count();
+        }
+        // Ghostscript hinting and tiny-skia antialiasing can move an edge by one pixel.
+        let ratio = unmatched as f64 / (actual.len() + expected.len()) as f64;
+        assert!(
+            ratio < 0.03,
+            "Unmatched glyph ink against Ghostscript: {ratio}"
+        );
     }
 
     #[test]

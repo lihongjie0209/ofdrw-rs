@@ -28,6 +28,7 @@ png = "0.18.1"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff"] }
 tiff = "0.11.3"
 ttf-parser = "0.25.1"
+read-fonts = { version = "0.39.2", default-features = false, features = ["agl"] }
 rustybuzz = "0.20.1"
 unicode-bidi = "0.3.18"
 unicode-script = "0.5.8"
