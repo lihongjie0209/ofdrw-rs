@@ -55,7 +55,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         shell: bash
         run: cp ofdrw-rs/tests/java/*.java ofdrw-crypto/src/test/java/org/ofdrw/crypto/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
       - uses: actions/setup-python@v7
@@ -206,7 +206,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         shell: bash
         run: cp ofdrw-rs/tests/java/*.java ofdrw-crypto/src/test/java/org/ofdrw/crypto/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -249,7 +249,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
       - name: Java reads and verifies Rust-generated OFD
         run: bash ofdrw-rs/scripts/java-interop.sh
       - name: Generate fresh Rust crypto packages for Java tests
