@@ -291,6 +291,7 @@ def test_imports_jbig2_pdf_image_across_binding(name):
     "shading-nested-stitching-axial.pdf", "shading-nested-stitching-radial.pdf",
     "shading-indirect-functions-axial.pdf", "shading-indirect-functions-radial.pdf",
     "shading-calculator-axial.pdf", "shading-calculator-radial.pdf",
+    "shading-function-array-axial.pdf", "shading-function-array-radial.pdf",
 ])
 def test_imports_sampled_shading_pdf_across_binding(filename):
     fixture = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" /

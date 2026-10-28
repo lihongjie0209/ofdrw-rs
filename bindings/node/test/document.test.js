@@ -1706,6 +1706,7 @@ test('import PDF axial and radial sampled shading functions through the C ABI', 
     'shading-nested-stitching-axial.pdf', 'shading-nested-stitching-radial.pdf',
     'shading-indirect-functions-axial.pdf', 'shading-indirect-functions-radial.pdf',
     'shading-calculator-axial.pdf', 'shading-calculator-radial.pdf',
+    'shading-function-array-axial.pdf', 'shading-function-array-radial.pdf',
   ]) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture(filename)));
     try {

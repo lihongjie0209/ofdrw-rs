@@ -1,5 +1,7 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
+mod scalar_function;
+
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
@@ -2266,6 +2268,76 @@ fn pdf_function_domain(
     Ok(domain)
 }
 
+fn pdf_function_integer(
+    pdf: &PdfDocument,
+    function: &lopdf::Dictionary,
+    key: &[u8],
+    default: Option<i64>,
+) -> Result<i64, OfdError> {
+    match function.get(key) {
+        Ok(value) => pdf
+            .dereference(value)
+            .map_err(|error| {
+                OfdError::Invalid(format!("invalid PDF sampled Function parameter: {error}"))
+            })?
+            .1
+            .as_i64()
+            .map_err(|_| OfdError::Invalid("invalid PDF sampled Function integer".into())),
+        Err(_) => {
+            default.ok_or_else(|| OfdError::Invalid("missing PDF sampled Function integer".into()))
+        }
+    }
+}
+
+fn pdf_stitching_bounds(
+    pdf: &PdfDocument,
+    function: &lopdf::Dictionary,
+    count: usize,
+    domain: [f64; 2],
+) -> Result<Vec<f64>, OfdError> {
+    if count == 0 || count > 256 {
+        return Err(OfdError::Invalid(
+            "PDF stitching Function has invalid count".into(),
+        ));
+    }
+    let bounds = pdf_function_numbers(pdf, function, b"Bounds", count - 1)?;
+    let mut previous = domain[0];
+    for &bound in &bounds {
+        if bound <= previous || bound >= domain[1] {
+            return Err(OfdError::Invalid("PDF stitching Bounds are invalid".into()));
+        }
+        previous = bound;
+    }
+    Ok(bounds)
+}
+
+fn pdf_function_exponent(
+    pdf: &PdfDocument,
+    function: &lopdf::Dictionary,
+    domain: [f64; 2],
+) -> Result<f64, OfdError> {
+    let exponent = function
+        .get(b"N")
+        .map_err(|_| OfdError::Invalid("PDF shading Function has no N".into()))?;
+    let exponent = pdf
+        .dereference(exponent)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function N: {error}")))?
+        .1
+        .as_float()
+        .map_err(|_| OfdError::Invalid("invalid PDF shading Function N".into()))?
+        as f64;
+    if !exponent.is_finite()
+        || exponent.abs() > 1e6
+        || (exponent.fract() != 0.0 && domain[0] < 0.0)
+        || (exponent < 0.0 && domain[0] <= 0.0 && domain[1] >= 0.0)
+    {
+        return Err(OfdError::Invalid(
+            "PDF shading Function exponent is invalid".into(),
+        ));
+    }
+    Ok(exponent)
+}
+
 fn subdivide_pdf_gradient<F>(
     evaluate: &F,
     start: (f64, [u8; 3]),
@@ -2391,27 +2463,13 @@ fn pdf_sampled_function_points(
         ));
     }
     let size = size as usize;
-    let integer = |key: &[u8], default: Option<i64>| -> Result<i64, OfdError> {
-        match dictionary.get(key) {
-            Ok(value) => pdf
-                .dereference(value)
-                .map_err(|error| {
-                    OfdError::Invalid(format!("invalid PDF sampled Function parameter: {error}"))
-                })?
-                .1
-                .as_i64()
-                .map_err(|_| OfdError::Invalid("invalid PDF sampled Function integer".into())),
-            Err(_) => default
-                .ok_or_else(|| OfdError::Invalid("missing PDF sampled Function integer".into())),
-        }
-    };
-    let bits = integer(b"BitsPerSample", None)?;
+    let bits = pdf_function_integer(pdf, dictionary, b"BitsPerSample", None)?;
     if !matches!(bits, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
         return Err(OfdError::Invalid(
             "invalid PDF sampled Function BitsPerSample".into(),
         ));
     }
-    let cubic = match integer(b"Order", Some(1))? {
+    let cubic = match pdf_function_integer(pdf, dictionary, b"Order", Some(1))? {
         1 => false,
         3 => size >= 4,
         _ => {
@@ -2572,21 +2630,21 @@ fn pdf_sampled_function_points(
     Ok(points)
 }
 
-struct CalculatorSample {
+struct FunctionSample {
     position: f64,
     color: [u8; 3],
     regions: Vec<(usize, u64)>,
 }
 
-fn subdivide_pdf_calculator<F>(
+fn subdivide_pdf_function_samples<F>(
     evaluate: &F,
-    start: &CalculatorSample,
-    end: &CalculatorSample,
+    start: &FunctionSample,
+    end: &FunctionSample,
     depth: usize,
     output: &mut Vec<(f64, [u8; 3])>,
 ) -> Result<(), OfdError>
 where
-    F: Fn(f64) -> Result<CalculatorSample, OfdError>,
+    F: Fn(f64) -> Result<FunctionSample, OfdError>,
 {
     let interval = end.position - start.position;
     let quarter = evaluate(start.position + interval * 0.25)?;
@@ -2617,11 +2675,11 @@ where
     } else {
         if depth >= 40 || (same_region && depth >= 16) {
             return Err(OfdError::Limit(
-                "PDF calculator gradient needs too many subdivisions".into(),
+                "PDF shading function needs too many subdivisions".into(),
             ));
         }
-        subdivide_pdf_calculator(evaluate, start, &middle, depth + 1, output)?;
-        subdivide_pdf_calculator(evaluate, &middle, end, depth + 1, output)?;
+        subdivide_pdf_function_samples(evaluate, start, &middle, depth + 1, output)?;
+        subdivide_pdf_function_samples(evaluate, &middle, end, depth + 1, output)?;
     }
     if output.len() > 10_000 {
         return Err(OfdError::Limit(
@@ -2652,7 +2710,7 @@ fn pdf_calculator_function_points(
     let remaining = std::cell::Cell::new(65_536usize);
     let argument =
         |position: f64| (input[0] + position * (input[1] - input[0])).clamp(domain[0], domain[1]);
-    let evaluate = |position| -> Result<CalculatorSample, OfdError> {
+    let evaluate = |position| -> Result<FunctionSample, OfdError> {
         remaining.set(remaining.get().checked_sub(1).ok_or_else(|| {
             OfdError::Limit("PDF calculator gradient exceeds its evaluation budget".into())
         })?);
@@ -2665,7 +2723,7 @@ fn pdf_calculator_function_points(
             let bounds = color_space.component_bounds(channel);
             *value = value.clamp(bounds[0], bounds[1]);
         }
-        Ok(CalculatorSample {
+        Ok(FunctionSample {
             position,
             color: color_space.color_with_intent(&result.values, rendering_intent)?,
             regions: result.regions,
@@ -2686,7 +2744,7 @@ fn pdf_calculator_function_points(
     positions.dedup();
     let mut output = vec![(0.0, first.color)];
     for pair in positions.windows(2) {
-        subdivide_pdf_calculator(
+        subdivide_pdf_function_samples(
             &evaluate,
             &evaluate(pair[0])?,
             &evaluate(pair[1])?,
@@ -2695,6 +2753,53 @@ fn pdf_calculator_function_points(
         )?;
     }
     Ok(output)
+}
+
+fn pdf_array_function_points(
+    pdf: &PdfDocument,
+    objects: &[Object],
+    color_space: &PdfColorSpace,
+    rendering_intent: RenderingIntent,
+    input: [f64; 2],
+) -> Result<Vec<(f64, [u8; 3])>, OfdError> {
+    if objects.len() != color_space.channels() {
+        return Err(OfdError::Invalid(
+            "PDF shading Function array length does not match its color space".into(),
+        ));
+    }
+    let functions = scalar_function::ScalarFunctions::parse(pdf, objects)?;
+    let remaining = std::cell::Cell::new(65_536usize);
+    let evaluate = |position: f64| -> Result<FunctionSample, OfdError> {
+        remaining.set(remaining.get().checked_sub(1).ok_or_else(|| {
+            OfdError::Limit("PDF Function array exceeds its evaluation budget".into())
+        })?);
+        let mut result = functions.evaluate(input[0] + position * (input[1] - input[0]))?;
+        for (channel, value) in result.values.iter_mut().enumerate() {
+            let bounds = color_space.component_bounds(channel);
+            *value = value.clamp(bounds[0], bounds[1]);
+        }
+        Ok(FunctionSample {
+            position,
+            color: color_space.color_with_intent(&result.values, rendering_intent)?,
+            regions: result.regions,
+        })
+    };
+    let first = evaluate(0.0)?;
+    if input[0] == input[1] {
+        return Ok(vec![(0.0, first.color), (1.0, first.color)]);
+    }
+    let positions = functions.positions(input)?;
+    let mut points = vec![(0.0, first.color)];
+    for pair in positions.windows(2) {
+        subdivide_pdf_function_samples(
+            &evaluate,
+            &evaluate(pair[0])?,
+            &evaluate(pair[1])?,
+            0,
+            &mut points,
+        )?;
+    }
+    Ok(points)
 }
 
 fn pdf_linear_function_points(
@@ -2742,25 +2847,7 @@ fn pdf_linear_function_points(
         ));
     }
     let domain = pdf_function_domain(pdf, function)?;
-    let exponent = function
-        .get(b"N")
-        .map_err(|_| OfdError::Invalid("PDF shading Function has no N".into()))?;
-    let exponent = pdf
-        .dereference(exponent)
-        .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function N: {error}")))?
-        .1
-        .as_float()
-        .map_err(|_| OfdError::Invalid("invalid PDF shading Function N".into()))?
-        as f64;
-    if !exponent.is_finite()
-        || exponent.abs() > 1e6
-        || (exponent.fract() != 0.0 && domain[0] < 0.0)
-        || (exponent < 0.0 && domain[0] <= 0.0 && domain[1] >= 0.0)
-    {
-        return Err(OfdError::Invalid(
-            "PDF shading Function exponent is invalid".into(),
-        ));
-    }
+    let exponent = pdf_function_exponent(pdf, function, domain)?;
     let endpoint = |key: &[u8], default: f64| -> Result<Vec<f64>, OfdError> {
         if function.has(key) {
             pdf_function_numbers(pdf, function, key, color_space.channels())
@@ -2855,7 +2942,13 @@ fn pdf_linear_function_points(
         .into_iter()
         .map(|position| Ok((position, evaluate(position)?)))
         .collect::<Result<Vec<_>, OfdError>>()?;
-    if exponent == 1.0 {
+    // A linear component function can become nonlinear during color conversion.
+    if exponent == 1.0
+        && matches!(
+            color_space,
+            PdfColorSpace::Gray | PdfColorSpace::Rgb | PdfColorSpace::Cmyk
+        )
+    {
         return Ok(base);
     }
     let mut sampled = vec![base[0]];
@@ -2916,6 +3009,27 @@ fn pdf_shading_segments_inner(
     let (_, resolved) = pdf
         .dereference(function)
         .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function: {error}")))?;
+    if let Object::Array(functions) = resolved {
+        if depth != 0 {
+            return Err(OfdError::Invalid(
+                "PDF stitching children must be individual functions".into(),
+            ));
+        }
+        return Ok(pdf_array_function_points(
+            pdf,
+            functions,
+            color_space,
+            rendering_intent,
+            shading_domain,
+        )?
+        .into_iter()
+        .map(|(position, color)| GradientSegment {
+            position: Some(position),
+            color,
+            alpha: None,
+        })
+        .collect());
+    }
     let dictionary = match resolved {
         Object::Stream(stream) => &stream.dict,
         other => other
@@ -2961,19 +3075,7 @@ fn pdf_shading_segments_inner(
         }
     }
     let functions = pdf_function_array(pdf, dictionary, b"Functions")?;
-    if functions.is_empty() || functions.len() > 256 {
-        return Err(OfdError::Invalid(
-            "PDF stitching Function has invalid count".into(),
-        ));
-    }
-    let bounds = pdf_function_numbers(pdf, dictionary, b"Bounds", functions.len() - 1)?;
-    let mut previous = domain[0];
-    for &bound in &bounds {
-        if bound <= previous || bound >= domain[1] {
-            return Err(OfdError::Invalid("PDF stitching Bounds are invalid".into()));
-        }
-        previous = bound;
-    }
+    let bounds = pdf_stitching_bounds(pdf, dictionary, functions.len(), domain)?;
     let encode = pdf_function_numbers(pdf, dictionary, b"Encode", functions.len() * 2)?;
     if shading_domain[0] == shading_domain[1] {
         let input = shading_domain[0].clamp(domain[0], domain[1]);
@@ -11292,6 +11394,636 @@ mod tests {
         assert!(
             matches!(pdf_shading_segments(&pdf, &Object::Reference(id), &PdfColorSpace::Gray, RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Invalid(message)) if message.contains("truncated PDF sampled"))
         );
+    }
+
+    #[test]
+    fn nonlinear_shading_spaces_render_single_and_array_functions_equivalently() {
+        let lab = parse_color_space(None, None, &lab_space(), 0).unwrap();
+        for (space, first, last) in [
+            (PdfColorSpace::CalGray { gamma: 1.0 }, vec![0.0], vec![1.0]),
+            (
+                PdfColorSpace::CalRgb {
+                    gamma: [1.0; 3],
+                    to_srgb: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                },
+                vec![0.0; 3],
+                vec![1.0; 3],
+            ),
+            (lab, vec![50.0, -100.0, 0.0], vec![50.0, 100.0, 0.0]),
+        ] {
+            let single = Object::Dictionary(dictionary! {
+                "FunctionType" => 2, "Domain" => Object::Array(vec![0.into(), 1.into()]),
+                "C0" => Object::Array(first.iter().map(|value| Object::Real(*value as f32)).collect()),
+                "C1" => Object::Array(last.iter().map(|value| Object::Real(*value as f32)).collect()), "N" => 1,
+            });
+            let array = Object::Array(
+                first
+                    .iter()
+                    .zip(&last)
+                    .map(|(first, last)| scalar_exponential(*first, *last, 1.0))
+                    .collect(),
+            );
+            let pdf = PdfDocument::new();
+            let actual = pdf_shading_segments(
+                &pdf,
+                &single,
+                &space,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+            )
+            .unwrap();
+            let expected = pdf_shading_segments(
+                &pdf,
+                &array,
+                &space,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+            )
+            .unwrap();
+            assert!(expected.len() > 2);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn linear_calgray_shading_retains_midpoint_gamma_after_pdf_import() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../tests/fixtures/shading-function-array-axial.pdf"
+        ))
+        .unwrap();
+        pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap().set("ColorSpace", Object::Array(vec![
+            Object::Name(b"CalGray".to_vec()), Object::Dictionary(dictionary! {
+                "WhitePoint" => Object::Array(vec![0.9505.into(), 1.into(), 1.089.into()]), "Gamma" => 1,
+            }),
+        ]));
+        let function = scalar_exponential(0.0, 1.0, 1.0);
+        pdf.objects.insert((6, 0), function.clone());
+        let mut single = Vec::new();
+        pdf.save_to(&mut single).unwrap();
+        let single = OfdDocument::from_pdf_bytes(&single).unwrap();
+        pdf.objects.insert((6, 0), Object::Array(vec![function]));
+        let mut array = Vec::new();
+        pdf.save_to(&mut array).unwrap();
+        let array = OfdDocument::from_pdf_bytes(&array).unwrap();
+        assert_eq!(
+            single.page_png(0, 72.0).unwrap(),
+            array.page_png(0, 72.0).unwrap()
+        );
+        let raster = image::load_from_memory(&single.page_png(0, 72.0).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let expected = PdfColorSpace::CalGray { gamma: 1.0 }.color(&[0.5]).unwrap();
+        assert!(raster
+            .get_pixel(192, 16)
+            .0
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.abs_diff(expected) <= 3));
+    }
+
+    fn scalar_exponential(c0: f64, c1: f64, exponent: f64) -> Object {
+        Object::Dictionary(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => Object::Array(vec![0.into(), 1.into()]),
+            "C0" => Object::Array(vec![Object::Real(c0 as f32)]),
+            "C1" => Object::Array(vec![Object::Real(c1 as f32)]),
+            "N" => Object::Real(exponent as f32),
+        })
+    }
+
+    #[test]
+    fn function_arrays_import_mixed_functions_and_match_independent_reference() {
+        for (source, radial) in [
+            (
+                include_bytes!("../tests/fixtures/shading-function-array-axial.pdf").as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/shading-function-array-radial.pdf").as_slice(),
+                true,
+            ),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            for color in ["#ff0000", "#00ff00", "#0000ff"] {
+                assert!(svg.contains(color), "{color}");
+            }
+            assert!(svg.contains(if radial {
+                "radialGradient"
+            } else {
+                "linearGradient"
+            }));
+            assert!(document.validate_references().unwrap().is_empty());
+            let actual = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                .unwrap()
+                .to_rgb8();
+            if !radial {
+                let expected = image::load_from_memory(include_bytes!(
+                    "../tests/fixtures/shading-function-array-reference.png"
+                ))
+                .unwrap()
+                .to_rgb8();
+                assert_eq!(actual.dimensions(), expected.dimensions());
+                let maximum = actual
+                    .as_raw()
+                    .iter()
+                    .zip(expected.as_raw())
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                assert!(
+                    maximum <= 6,
+                    "Function array shading differs from Ghostscript by {maximum}"
+                );
+            }
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+            assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn function_arrays_preserve_lab_values_before_color_conversion() {
+        let mut lightness = calculator_function(b"{pop 50}", 1);
+        lightness
+            .dict
+            .set("Range", Object::Array(vec![0.into(), 100.into()]));
+        let functions = vec![
+            Object::Stream(lightness),
+            scalar_exponential(-100.0, 100.0, 1.0),
+            scalar_exponential(-80.0, 80.0, 1.0),
+        ];
+        let lab = parse_color_space(None, None, &lab_space(), 0).unwrap();
+        for x in [0.0, 0.123456789, 0.25, 0.5, 1.0] {
+            let points = pdf_array_function_points(
+                &PdfDocument::new(),
+                &functions,
+                &lab,
+                RenderingIntent::RelativeColorimetric,
+                [x, x],
+            )
+            .unwrap();
+            let expected = lab
+                .color(&[50.0, -100.0 + 200.0 * x, -80.0 + 160.0 * x])
+                .unwrap();
+            assert!(points.iter().all(|(_, color)| *color == expected), "x={x}");
+        }
+    }
+
+    #[test]
+    fn function_arrays_support_cmyk_components_without_independent_rgb_quantization() {
+        let functions = vec![
+            scalar_exponential(0.0, 1.0, 1.0),
+            scalar_exponential(1.0, 0.0, 1.0),
+            Object::Stream(sampled_function(8, &[0, 255, 0])),
+            Object::Stream(calculator_function(b"{.25 mul}", 1)),
+        ];
+        for x in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let points = pdf_array_function_points(
+                &PdfDocument::new(),
+                &functions,
+                &PdfColorSpace::Cmyk,
+                RenderingIntent::RelativeColorimetric,
+                [x, x],
+            )
+            .unwrap();
+            let yellow = if x <= 0.5 { x * 2.0 } else { 2.0 - x * 2.0 };
+            let expected = PdfColorSpace::Cmyk
+                .color(&[x, 1.0 - x, yellow, x * 0.25])
+                .unwrap();
+            assert!(points.iter().all(|(_, color)| *color == expected), "x={x}");
+        }
+    }
+
+    #[test]
+    fn function_arrays_keep_the_selected_icc_rendering_intent() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-axial.pdf")).unwrap();
+        let bytes = include_bytes!("../tests/fixtures/snap-newsprint-cmyk.icc");
+        let profile = pdf.add_object(lopdf::Stream::new(dictionary! {"N" => 4}, bytes.to_vec()));
+        let shading = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        shading.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(profile),
+            ]),
+        );
+        shading.set(
+            "Function",
+            Object::Array(
+                [0.3, 0.2, 0.1, 0.2]
+                    .into_iter()
+                    .map(|value| scalar_exponential(value, value, 1.0))
+                    .collect(),
+            ),
+        );
+        pdf.get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/Saturation ri /Sh1 sh".to_vec());
+        let mut encoded = Vec::new();
+        pdf.save_to(&mut encoded).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&encoded).unwrap();
+        let converter = ColorProfile::new_from_slice(bytes)
+            .unwrap()
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgb,
+                TransformOptions {
+                    rendering_intent: RenderingIntent::Saturation,
+                    ..TransformOptions::default()
+                },
+            )
+            .unwrap();
+        let mut expected = [0; 3];
+        converter
+            .transform(&[77, 51, 26, 51], &mut expected)
+            .unwrap();
+        assert!(document.page_svg(0).unwrap().contains(&format!(
+            "#{:02x}{:02x}{:02x}",
+            expected[0], expected[1], expected[2]
+        )));
+    }
+
+    #[test]
+    fn function_arrays_preserve_narrow_sample_table_peaks() {
+        let mut sampled = sampled_function(8, &[0, 255, 0]);
+        sampled
+            .dict
+            .set("Encode", Object::Array(vec![0.into(), 100000.into()]));
+        let function = Object::Array(vec![Object::Stream(sampled)]);
+        let segments = pdf_shading_segments(
+            &PdfDocument::new(),
+            &function,
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        assert!(segments
+            .iter()
+            .any(|stop| (stop.position.unwrap() - 1e-5).abs() < 1e-12 && stop.color == [255; 3]));
+        assert_eq!(segments.first().unwrap().color, [0; 3]);
+        assert_eq!(segments.last().unwrap().color, [0; 3]);
+    }
+
+    #[test]
+    fn function_arrays_match_single_sampled_functions_at_all_bit_depths() {
+        for bits in [1, 2, 4, 8, 12, 16, 24, 32] {
+            let maximum = ((1u64 << bits) - 1) as u32;
+            for order in [1, 3] {
+                let mut sampled = sampled_function(bits, &[0, maximum / 3, maximum, 0]);
+                sampled.dict.set("Order", order);
+                sampled
+                    .dict
+                    .set("Encode", Object::Array(vec![3.into(), 0.into()]));
+                sampled
+                    .dict
+                    .set("Decode", Object::Array(vec![1.into(), 0.into()]));
+                let single = Object::Stream(sampled);
+                let array = Object::Array(vec![single.clone()]);
+                for input in [0.1, 0.25, 0.5, 0.9] {
+                    let pdf = PdfDocument::new();
+                    let expected = pdf_shading_segments(
+                        &pdf,
+                        &single,
+                        &PdfColorSpace::Gray,
+                        RenderingIntent::RelativeColorimetric,
+                        [input, input],
+                    )
+                    .unwrap();
+                    let actual = pdf_shading_segments(
+                        &pdf,
+                        &array,
+                        &PdfColorSpace::Gray,
+                        RenderingIntent::RelativeColorimetric,
+                        [input, input],
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "bits={bits}, order={order}, input={input}"
+                    );
+                }
+            }
+        }
+        for samples in [vec![127], vec![0, 255], vec![0, 127, 255]] {
+            let mut sampled = sampled_function(8, &samples);
+            sampled.dict.set("Order", 3);
+            let single = Object::Stream(sampled);
+            let array = Object::Array(vec![single.clone()]);
+            let pdf = PdfDocument::new();
+            let expected = pdf_shading_segments(
+                &pdf,
+                &single,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.25, 0.25],
+            )
+            .unwrap();
+            let actual = pdf_shading_segments(
+                &pdf,
+                &array,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.25, 0.25],
+            )
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn function_arrays_preserve_reversed_jumps_nested_ranges_and_clipping_stops() {
+        let leaf = Object::Stream(calculator_function(b"{.5 lt {0} {1} ifelse}", 1));
+        let nested = single_stitching_function(leaf, &[0.2, 0.8], [1.0, 0.0]);
+        let function = Object::Array(vec![nested]);
+        let segments = pdf_shading_segments(
+            &PdfDocument::new(),
+            &function,
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        let jump = segments
+            .windows(2)
+            .find(|pair| pair[0].position == pair[1].position && pair[0].color != pair[1].color)
+            .unwrap();
+        assert!((jump[0].position.unwrap() - 0.5).abs() < 1e-9);
+        assert_eq!([jump[0].color, jump[1].color], [[204; 3], [51; 3]]);
+        let mut ramp = scalar_exponential(-1.0, 2.0, 1.0);
+        ramp.as_dict_mut()
+            .unwrap()
+            .set("Range", Object::Array(vec![0.2.into(), 0.8.into()]));
+        let stops = pdf_shading_segments(
+            &PdfDocument::new(),
+            &Object::Array(vec![ramp]),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        assert!(stops
+            .iter()
+            .any(|stop| (stop.position.unwrap() - 0.4).abs() < 1e-6 && stop.color == [51; 3]));
+        assert!(stops
+            .iter()
+            .any(|stop| (stop.position.unwrap() - 0.6).abs() < 1e-6 && stop.color == [204; 3]));
+    }
+
+    #[test]
+    fn function_arrays_preserve_scalar_metadata_validation() {
+        let mut invalid_functions = vec![Object::Integer(1), Object::Array(vec![])];
+        let mut multi_output = scalar_exponential(0.0, 1.0, 1.0);
+        multi_output
+            .as_dict_mut()
+            .unwrap()
+            .set("C0", Object::Array(vec![0.into(), 1.into()]));
+        invalid_functions.push(multi_output);
+        for key in ["Domain", "Range", "Size", "BitsPerSample"] {
+            let mut sampled = sampled_function(8, &[0, 255]);
+            sampled.dict.remove(key.as_bytes());
+            invalid_functions.push(Object::Stream(sampled));
+        }
+        for (key, value) in [
+            ("Size", Object::Array(vec![0.into()])),
+            ("Size", Object::Array(vec![Object::Real(1.5)])),
+            ("Size", Object::Array(vec![10001.into()])),
+            ("BitsPerSample", 3.into()),
+            ("Order", 2.into()),
+            ("Encode", Object::Array(vec![0.into()])),
+            ("Decode", Object::Array(vec![0.into()])),
+        ] {
+            let mut sampled = sampled_function(8, &[0, 255]);
+            sampled.dict.set(key, value);
+            invalid_functions.push(Object::Stream(sampled));
+        }
+        let mut truncated = sampled_function(8, &[0, 255]);
+        truncated.content.clear();
+        invalid_functions.push(Object::Stream(truncated));
+        let mut unknown = scalar_exponential(0.0, 1.0, 1.0);
+        unknown.as_dict_mut().unwrap().set("FunctionType", 99);
+        invalid_functions.push(unknown);
+        let mut no_range = calculator_function(b"{}", 1);
+        no_range.dict.remove(b"Range");
+        invalid_functions.push(Object::Stream(no_range));
+        invalid_functions.push(Object::Stream(calculator_function(b"{exec}", 1)));
+        let mut no_stream = sampled_function(8, &[0, 255]);
+        no_stream.dict.set("FunctionType", 4);
+        invalid_functions.push(Object::Dictionary(no_stream.dict));
+        for function in invalid_functions {
+            assert!(pdf_shading_segments(
+                &PdfDocument::new(),
+                &Object::Array(vec![function]),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            )
+            .is_err());
+        }
+        for functions in [vec![], vec![scalar_exponential(0.0, 1.0, 1.0); 2]] {
+            assert!(pdf_shading_segments(
+                &PdfDocument::new(),
+                &Object::Array(functions),
+                &PdfColorSpace::Rgb,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn function_arrays_reject_cyclic_and_unresolved_component_references() {
+        let mut pdf = PdfDocument::new();
+        let id = pdf.new_object_id();
+        pdf.objects.insert(
+            id,
+            single_stitching_function(Object::Reference(id), &[0.0, 1.0], [0.0, 1.0]),
+        );
+        for function in [Object::Reference(id), Object::Reference((99999, 0))] {
+            assert!(pdf_shading_segments(
+                &pdf,
+                &Object::Array(vec![function]),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            )
+            .is_err());
+        }
+        let mut function = scalar_exponential(0.0, 1.0, 1.0);
+        for _ in 0..16 {
+            function = single_stitching_function(function, &[0.0, 1.0], [0.0, 1.0]);
+        }
+        assert!(pdf_shading_segments(
+            &pdf,
+            &Object::Array(vec![function.clone()]),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0]
+        )
+        .is_ok());
+        let function = single_stitching_function(function, &[0.0, 1.0], [0.0, 1.0]);
+        assert!(matches!(
+            pdf_shading_segments(
+                &pdf,
+                &Object::Array(vec![function]),
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            ),
+            Err(OfdError::Limit(_))
+        ));
+    }
+
+    #[test]
+    fn function_arrays_accept_indirect_component_parameters_and_direct_array_container() {
+        let source = include_bytes!("../tests/fixtures/shading-function-array-axial.pdf");
+        let expected = OfdDocument::from_pdf_bytes(source).unwrap();
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        for function in 7..=10 {
+            for key in [
+                "FunctionType",
+                "Domain",
+                "Range",
+                "Size",
+                "BitsPerSample",
+                "Order",
+                "Functions",
+                "Bounds",
+                "Encode",
+                "C0",
+                "C1",
+                "N",
+            ] {
+                let Ok(mut value) = shading_function_dictionary_mut(&mut pdf, function)
+                    .get(key.as_bytes())
+                    .cloned()
+                else {
+                    continue;
+                };
+                if let Object::Array(values) = &mut value {
+                    for value in values {
+                        if !matches!(value, Object::Reference(_)) {
+                            *value = Object::Reference(pdf.add_object(value.clone()));
+                        }
+                    }
+                }
+                let reference = pdf.add_object(value);
+                shading_function_dictionary_mut(&mut pdf, function)
+                    .set(key, Object::Reference(reference));
+            }
+        }
+        let functions = pdf.get_object((6, 0)).unwrap().clone();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Function", functions);
+        let mut encoded = Vec::new();
+        pdf.save_to(&mut encoded).unwrap();
+        let actual = OfdDocument::from_pdf_bytes(&encoded).unwrap();
+        assert_eq!(actual.page_svg(0).unwrap(), expected.page_svg(0).unwrap());
+        assert_eq!(
+            actual.page_png(0, 72.0).unwrap(),
+            expected.page_png(0, 72.0).unwrap()
+        );
+    }
+
+    fn repeated_scalar_stitch(child: Object, count: usize) -> Object {
+        Object::Dictionary(dictionary! {
+            "FunctionType" => 3,
+            "Domain" => Object::Array(vec![0.into(), 1.into()]),
+            "Functions" => Object::Array(vec![child; count]),
+            "Bounds" => Object::Array((1..count).map(|i| Object::Real(i as f32 / count as f32)).collect()),
+            "Encode" => Object::Array((0..count).flat_map(|_| [0.into(), 1.into()]).collect()),
+        })
+    }
+
+    #[test]
+    fn function_arrays_enforce_aggregate_resources_and_accept_the_sample_limit() {
+        let mut pdf = PdfDocument::new();
+        let samples = pdf.add_object(sampled_function(8, &vec![0; 10000]));
+        assert!(pdf_shading_segments(
+            &pdf,
+            &Object::Array(vec![Object::Reference(samples)]),
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0]
+        )
+        .is_ok());
+        let excessive_samples = repeated_scalar_stitch(Object::Reference(samples), 11);
+        assert!(
+            matches!(pdf_shading_segments(&pdf, &Object::Array(vec![excessive_samples]), &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Limit(message)) if message.contains("100000 samples"))
+        );
+        let excessive_stops = repeated_scalar_stitch(Object::Reference(samples), 3);
+        assert!(
+            matches!(pdf_shading_segments(&pdf, &Object::Array(vec![excessive_stops]), &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Limit(message)) if message.contains("color stops"))
+        );
+        let leaf = pdf.add_object(scalar_exponential(0.0, 1.0, 1.0));
+        let wide = pdf.add_object(repeated_scalar_stitch(Object::Reference(leaf), 256));
+        let excessive_nodes = repeated_scalar_stitch(Object::Reference(wide), 256);
+        assert!(
+            matches!(pdf_shading_segments(&pdf, &Object::Array(vec![excessive_nodes]), &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Limit(message)) if message.contains("function nodes"))
+        );
+        let mut code = b"{}".to_vec();
+        code.resize(65536, b' ');
+        let calculator = pdf.add_object(calculator_function(&code, 1));
+        let excessive_code = repeated_scalar_stitch(Object::Reference(calculator), 17);
+        assert!(
+            matches!(pdf_shading_segments(&pdf, &Object::Array(vec![excessive_code]), &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Limit(message)) if message.contains("1 MiB"))
+        );
+    }
+
+    #[test]
+    fn function_arrays_keep_exponential_clipping_and_reject_undefined_results() {
+        let mut overflow = scalar_exponential(0.0, 1.0, 1000000.0);
+        overflow
+            .as_dict_mut()
+            .unwrap()
+            .set("Domain", Object::Array(vec![1.into(), 2.into()]));
+        let points = pdf_array_function_points(
+            &PdfDocument::new(),
+            &[overflow.clone()],
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [2.0, 2.0],
+        )
+        .unwrap();
+        assert!(points.iter().all(|(_, color)| *color == [255; 3]));
+        overflow
+            .as_dict_mut()
+            .unwrap()
+            .set("C1", Object::Array(vec![0.into()]));
+        assert!(pdf_array_function_points(
+            &PdfDocument::new(),
+            &[overflow],
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [2.0, 2.0]
+        )
+        .is_err());
+        let invalid_child = single_stitching_function(
+            Object::Array(vec![scalar_exponential(0.0, 1.0, 1.0)]),
+            &[0.0, 1.0],
+            [0.0, 1.0],
+        );
+        assert!(pdf_shading_segments(
+            &PdfDocument::new(),
+            &invalid_child,
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0]
+        )
+        .is_err());
     }
 
     fn calculator_function(code: &[u8], channels: usize) -> lopdf::Stream {

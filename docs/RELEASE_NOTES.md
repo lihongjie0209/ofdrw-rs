@@ -1,5 +1,13 @@
 Unreleased source changes after v0.1.0:
 
+- PDF axial and radial shading accept arrays of independent component
+  functions, mixing sampled, exponential, nested stitching and calculator
+  functions. Values remain in component space through Lab/ICC conversion;
+  knots, extrema and discontinuities are retained before bounded sampling.
+  New numerical, independent-render and binding tests cover this form.
+  Linear single-function gradients also retain nonlinear calibrated, Lab and
+  ICC conversion curves; single and array forms have equivalence regressions.
+
 - PDF Type 4 calculator functions support the 42 standard operators, bounded
   typed evaluation, and adaptive axial/radial gradient import. Conditional and
   integer-step jumps are retained as separate color stops; finite sampling

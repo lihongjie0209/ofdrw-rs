@@ -1690,6 +1690,23 @@ PDF axial (type 2) and radial (type 3) `sh` shading import as OFD gradients
 for type 2 exponential functions, one-input type 0 sampled functions,
 and type 4 calculator functions,
 including nested type 3 stitching functions composed of these subfunctions.
+The shading Function may also be an array containing one scalar function per
+color component, mixing types 0, 2, 3 and 4. Direct or indirect containers and
+component parameters are accepted. Each component retains real values and
+its own Domain and Range until the combined color-space conversion, including
+Lab and ICC rendering intents. Component count and single-output dimensions
+are checked before conversion. Nested function arrays are rejected.
+Single exponential functions with a linear component mapping also sample
+calibrated, Lab and ICC color conversions before writing their color stops.
+
+Function arrays retain the union of sample-table knots, cubic extrema,
+function-domain boundaries and stitching bounds before adaptive sampling.
+Calculator and stitching region changes preserve separate colors at jumps.
+The same finite-sampling limitations described below apply. Array-wide parse
+limits are 4,096 function nodes, 100,000 samples and 1 MiB of calculator code;
+each component retains its existing individual limits. Evaluation is bounded
+at 65,536 composite samples per array interval and 10,000 resulting color stops.
+
 Stitching supports up to 16 nesting levels, preserves discontinuities under
 reversed encoding, and applies every enclosing output `Range` in component
 space before color conversion. Constant encodings select the right-hand
