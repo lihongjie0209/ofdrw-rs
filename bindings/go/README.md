@@ -7,11 +7,11 @@ not require cgo. Install the module:
 go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.0
 ```
 
-Pull native ZIPs from GitHub Packages with [ORAS](https://oras.land/docs/installation/):
+Download native ZIPs from [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases):
 
 ```sh
-oras pull ghcr.io/lihongjie0209/ofdrw-rs-native:0.1.0 -o packages/native
-unzip packages/native/ofdrw-native-linux-x64-v0.1.0.zip -d native
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.0/ofdrw-native-linux-x64-v0.1.0.zip
+unzip native.zip -d native
 ```
 
 Select the ZIP for your OS/CPU.

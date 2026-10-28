@@ -71,6 +71,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           python scripts/check_c_header.py
+          python -m unittest discover -s scripts/tests -v
           python scripts/check_binding_ffi_parity.py
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -89,6 +90,10 @@ jobs:
         run: |
           python -m pip install build
           python -m build --wheel --outdir dist bindings/python
+          python -c "import subprocess,sys; subprocess.check_call([sys.executable,'-m','pip','install','auditwheel','patchelf']) if sys.platform=='linux' else None"
+          python -c "import subprocess,sys; subprocess.check_call([sys.executable,'scripts/repair_python_wheel.py','dist']) if sys.platform=='linux' else None"
+          python -m pip install twine
+          python -m twine check --strict dist/*.whl
           python -c "import glob,subprocess,sys; wheels=glob.glob('dist/*-py3-none-*.whl'); assert len(wheels)==1, wheels; subprocess.check_call([sys.executable,'-m','pip','install',wheels[0]])"
           python -c "from ofdrw_rs import Document; s=Document.open('../ofdrw-reader/src/test/resources/发票示例.ofd'); png=s.page_image_data(0,0); s.close(); d=Document.new(); d.add_text_page('wheel'); assert d.page_text_objects(0)[0]['codes'][0]['text']=='wheel'; assert d.page_png(0,25.4).startswith(b'\x89PNG'); assert d.to_pdf().startswith(b'%PDF-'); i=d.add_path_object(0,'M 0 0 L 10 10',(0,0,10,10)); assert d.page_paths(0)[0]['id']==str(i); j=d.add_image_object(0,png,'png',(0,0,10,10)); assert d.page_images(0)[0]['id']==str(j); k=d.add_text_watermark(0,'mark',(0,0,10,10)); assert d.annotations()[0]['id']==str(k); assert d.add_outline('Root')==0; assert d.outlines()[0]['title']=='Root'; d.remove_page_object(0,i); assert d.page_paths(0)==[]; assert d.validate_references()==[]; d.close()"
           python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('A\x00B',40,30); assert d.page_text(0)==['A\x00B']; i=d.page_text_objects(0)[0]['id']; d.set_page_text_code(0,i,0,'C\x00D'); assert d.page_text(0)==['C\x00D']; d.close()"
@@ -180,11 +185,11 @@ jobs:
           mkdir "$RUNNER_TEMP/ofdrw-node-smoke"
           cd "$RUNNER_TEMP/ofdrw-node-smoke"
           npm install "$RUNNER_TEMP/$package_file"
-          env -u OFDRW_LIB_PATH node -e "const {Document}=require('@lihongjie0209/ofdrw-rs'); const d=Document.create(); d.addTextPage('packed'); if(d.pageText(0)[0]!=='packed') process.exitCode=1; d.close()"
+          env -u OFDRW_LIB_PATH node -e "const {Document}=require('ofdrw-rs'); const d=Document.create(); d.addTextPage('packed'); if(d.pageText(0)[0]!=='packed') process.exitCode=1; d.close()"
       - uses: actions/upload-artifact@v7
         with:
           name: ofdrw-node-package
-          path: ${{ runner.temp }}/lihongjie0209-ofdrw-rs-*.tgz
+          path: ${{ runner.temp }}/ofdrw-rs-*.tgz
           if-no-files-found: error
 
   coverage:

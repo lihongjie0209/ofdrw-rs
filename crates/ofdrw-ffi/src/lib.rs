@@ -5693,6 +5693,53 @@ pub unsafe extern "C" fn ofd_add_ses_signature_with_stamp_and_distids(
 }
 
 #[derive(Deserialize)]
+struct SesStampInput {
+    signature_datetime: String,
+    page_index: usize,
+    boundary: [f64; 4],
+    signature_distid: String,
+    seal_distid: String,
+}
+
+/// Add a positioned SES stamp using JSON placement and distinguishing IDs.
+/// This variant keeps the argument count within Windows FFI limits.
+///
+/// # Safety
+/// `handle` must be live, byte pointers readable for their lengths, `options_json`
+/// NUL-terminated, and `output_index` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_ses_signature_with_stamp_json(
+    handle: *mut OfdDocument,
+    private_key: *const u8,
+    private_key_len: usize,
+    signer_certificate: *const u8,
+    signer_certificate_len: usize,
+    seal: *const u8,
+    seal_len: usize,
+    options_json: *const c_char,
+    output_index: *mut usize,
+) -> i32 {
+    run(|| {
+        let output = output_index.as_mut().ok_or("null signature index output")?;
+        let input: SesStampInput = serde_json::from_str(input_string(options_json)?)
+            .map_err(|error| format!("invalid SES stamp options JSON: {error}"))?;
+        *output = document_mut(handle)?
+            .add_ses_signature_with_stamp_and_distids(
+                input_bytes(private_key, private_key_len)?,
+                input_bytes(signer_certificate, signer_certificate_len)?,
+                input_bytes(seal, seal_len)?,
+                &input.signature_datetime,
+                input.page_index,
+                input.boundary,
+                &input.signature_distid,
+                &input.seal_distid,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+}
+
+#[derive(Deserialize)]
 struct SesSealSpecInput {
     version: u8,
     vendor_id: String,
@@ -16533,6 +16580,95 @@ mod tests {
             unsafe { ofd_add_digital_signature(handle, ptr::null(), 0, date.as_ptr(), &mut index) },
             0
         );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_creates_positioned_ses_signature_through_json_options() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        assert_eq!(
+            unsafe { ofd_add_text_page(handle, c"stamp".as_ptr(), 210.0, 297.0) },
+            0
+        );
+        let key = include_bytes!("../../ofdrw/tests/fixtures/user-private-key.bin");
+        let certificate = include_bytes!("../../ofdrw/tests/fixtures/user-cert.der");
+        let seal = include_bytes!("../../../../ofdrw-gm/src/test/resources/UserV4.esl");
+        let options = CString::new(
+            serde_json::json!({
+                "signature_datetime": "2020-09-13 12:26:40",
+                "page_index": 0,
+                "boundary": [10.0, 20.0, 40.0, 40.0],
+                "signature_distid": "1234567812345678",
+                "seal_distid": "1234567812345678",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut index = usize::MAX;
+        for invalid in [ptr::null(), c"{}".as_ptr(), c"not json".as_ptr()] {
+            assert_ne!(
+                unsafe {
+                    ofd_add_ses_signature_with_stamp_json(
+                        handle,
+                        key.as_ptr(),
+                        key.len(),
+                        certificate.as_ptr(),
+                        certificate.len(),
+                        seal.as_ptr(),
+                        seal.len(),
+                        invalid,
+                        &mut index,
+                    )
+                },
+                0
+            );
+            assert_eq!(index, usize::MAX);
+        }
+        assert_ne!(
+            unsafe {
+                ofd_add_ses_signature_with_stamp_json(
+                    handle,
+                    key.as_ptr(),
+                    key.len(),
+                    certificate.as_ptr(),
+                    certificate.len(),
+                    seal.as_ptr(),
+                    seal.len(),
+                    options.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                ofd_add_ses_signature_with_stamp_json(
+                    handle,
+                    key.as_ptr(),
+                    key.len(),
+                    certificate.as_ptr(),
+                    certificate.len(),
+                    seal.as_ptr(),
+                    seal.len(),
+                    options.as_ptr(),
+                    &mut index,
+                )
+            },
+            0
+        );
+        assert_eq!(index, 0);
+        let mut valid = 0;
+        assert_eq!(
+            unsafe { ofd_check_ses_signature_value(handle, index, &mut valid) },
+            0
+        );
+        assert_eq!(valid, 1);
+        assert_eq!(
+            unsafe { ofd_check_signature_seal_match(handle, index, &mut valid) },
+            0
+        );
+        assert_eq!(valid, 1);
         unsafe { ofd_close(handle) };
     }
 

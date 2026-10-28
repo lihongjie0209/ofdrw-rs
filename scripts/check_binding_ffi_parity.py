@@ -29,6 +29,7 @@ NODE_ALIASES = {
 GO_ALIASES = {
     "ofd_add_ses_signature": "ofd_add_ses_signature_with_distids",
     "ofd_buffer_free": "ofd_buffer_free_parts",
+    "ofd_add_ses_signature_with_stamp_and_distids": "ofd_add_ses_signature_with_stamp_json",
 }
 
 exports = set(re.findall(r'pub (?:unsafe )?extern "C" fn (ofd_\w+)', RUST))

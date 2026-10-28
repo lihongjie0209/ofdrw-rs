@@ -1,5 +1,5 @@
 {
-  "name": "@lihongjie0209/ofdrw-rs",
+  "name": "ofdrw-rs",
   "version": "0.1.0",
   "description": "Node.js bindings for the Rust OFD core",
   "main": "index.js",
@@ -36,7 +36,7 @@
     "url": "https://github.com/lihongjie0209/ofdrw-rs/issues"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
+    "registry": "https://registry.npmjs.org",
     "access": "public"
   }
 }

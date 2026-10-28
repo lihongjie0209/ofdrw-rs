@@ -1,0 +1,65 @@
+# 原生仓库发布维护
+
+Python 发布到 PyPI（`ofdrw-rs`），Node.js 发布到 npm（`ofdrw-rs`），
+Rust 核心发布到 crates.io（`ofdrw`），Go 使用 GitHub 子模块标签。
+C ABI 的六个平台原生 ZIP 和所有语言的备份文件放在 GitHub Releases。
+
+## 凭据
+
+| 服务 | passman 引用 | GitHub Actions Secret |
+| --- | --- | --- |
+| PyPI | `registry/pypi#token` | `PYPI_API_TOKEN` |
+| crates.io | `registry/crates-io#token` | `CARGO_REGISTRY_TOKEN` |
+| npm | `registry/npm#token` | `NPM_TOKEN` |
+
+Go 标签和 GitHub Release 使用内置 `GITHUB_TOKEN`，不需要额外凭据。
+不要把 token 写入源码、命令参数或聊天记录。
+
+首次发布新项目时，在各服务生成凭据：
+
+- [PyPI API token](https://pypi.org/manage/account/token/)：项目不存在时选择 Entire account；
+  项目建立后可改用项目范围的 token 或 Trusted Publishing。
+- [crates.io token](https://crates.io/settings/tokens)：允许发布新 crate 和更新 `ofdrw`。
+  发布流程不需要修改 owner 或 yank 版本的权限。
+- [npm Granular token](https://www.npmjs.com/settings/~/tokens)：选择包的
+  Read and write (publish and stage)，CI 无交互发布需允许 Bypass 2FA。
+  尚不存在的包首次发布需授予创建该包的权限。
+
+在本机终端交互保存：
+
+```sh
+passman entry set registry/pypi#token
+passman entry set registry/crates-io#token
+passman entry set registry/npm#token
+```
+
+通过标准输入同步到仓库 Secrets，避免显示密钥：
+
+```sh
+passman run --stdin registry/pypi#token -- gh secret set PYPI_API_TOKEN --repo lihongjie0209/ofdrw-rs
+passman run --stdin registry/crates-io#token -- gh secret set CARGO_REGISTRY_TOKEN --repo lihongjie0209/ofdrw-rs
+passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongjie0209/ofdrw-rs
+```
+
+长期维护建议使用各仓库的 Trusted Publishing。npm 已宣布在 2027 年 1 月
+取消绕过 2FA 的 token 直接发布能力，需在此前迁移到可信发布或采用 staged publish 的人工确认流程。
+配置可信发布时，仓库为 `lihongjie0209/ofdrw-rs`，工作流文件为 `release.yml`；
+配置完成后还需相应更新本仓库的认证步骤。
+参考 [npm token 规则](https://docs.npmjs.com/about-access-tokens/)、
+[PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)。
+
+## 发布步骤
+
+1. 更新 Rust 核心、C ABI、Python 和 Node.js 的版本，运行 `scripts/check_release_version.py vX.Y.Z`。
+2. 将提交推送到 `main`，等待该提交的完整 CI 成功。
+3. 创建并推送相同提交的 `vX.Y.Z` 标签。
+4. Release 工作流使用该提交的已验证产物，检查全部凭据，上传原生仓库并校验公开资产摘要。
+5. 工作流从 PyPI 和 npm 安装并验证库，创建 `bindings/go/vX.Y.Z` 标签，再发布 GitHub Release。
+
+Linux wheel 经过 auditwheel 修复，CI 会安装修复后的 manylinux wheel。
+原始 `linux_*` 标签的 wheel 不上传 PyPI。
+
+同一版本重跑会验证已发布文件的摘要，仅补传缺失的 Python wheels。
+若已有版本的文件字节不同，工作流失败，避免覆盖或误认不可变版本。
+发布中断时可用 Release 工作流的 Run workflow 按钮，输入原有标签继续；
+不要移动已对外发布的版本标签。

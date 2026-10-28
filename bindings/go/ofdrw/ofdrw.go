@@ -212,7 +212,7 @@ type nativeAPI struct {
 	addDigitalSign                  func(uintptr, *byte, uintptr, *byte, *uintptr) int32
 	addDigitalWithID                func(uintptr, *byte, uintptr, *byte, *byte, *uintptr) int32
 	addSESWithIDs                   func(uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, *byte, *byte, *uintptr) int32
-	addSESWithStamp                 func(uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, float64, float64, float64, float64, *byte, *byte, *uintptr) int32
+	addSESWithStamp                 func(uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, *uintptr) int32
 	createSESSeal                   func(*byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, uintptr, *byte, *nativeBuffer) int32
 	attachData                      func(uintptr, uintptr, *nativeBuffer) int32
 	getEntry                        func(uintptr, *byte, *nativeBuffer) int32
@@ -575,7 +575,7 @@ func loadAPI() error {
 			{"ofd_add_digital_signature", &api.addDigitalSign},
 			{"ofd_add_digital_signature_with_distid", &api.addDigitalWithID},
 			{"ofd_add_ses_signature_with_distids", &api.addSESWithIDs},
-			{"ofd_add_ses_signature_with_stamp_and_distids", &api.addSESWithStamp},
+			{"ofd_add_ses_signature_with_stamp_json", &api.addSESWithStamp},
 			{"ofd_create_ses_seal_json", &api.createSESSeal},
 			{"ofd_get_entry", &api.getEntry}, {"ofd_set_entry", &api.setEntry}, {"ofd_remove_entry", &api.removeEntry},
 			{"ofd_add_text_page", &api.addTextPage}, {"ofd_save", &api.save},
@@ -6788,18 +6788,22 @@ func (doc *Document) AddSESSignatureAtPageWithDistIDs(privateKey, signerCertific
 	if pageIndex < 0 {
 		return 0, fmt.Errorf("negative page index: %d", pageIndex)
 	}
-	date, err := cString(signatureDatetime)
-	if err != nil {
-		return 0, err
+	for _, value := range []string{signatureDatetime, signatureDistID, sealDistID} {
+		if _, err := cString(value); err != nil {
+			return 0, err
+		}
 	}
-	signatureID, err := cString(signatureDistID)
+	options, err := json.Marshal(struct {
+		Datetime    string     `json:"signature_datetime"`
+		Page        int        `json:"page_index"`
+		Boundary    [4]float64 `json:"boundary"`
+		SignatureID string     `json:"signature_distid"`
+		SealID      string     `json:"seal_distid"`
+	}{signatureDatetime, pageIndex, boundary, signatureDistID, sealDistID})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("encode SES stamp options: %w", err)
 	}
-	sealID, err := cString(sealDistID)
-	if err != nil {
-		return 0, err
-	}
+	options = append(options, 0)
 	var keyPtr, certificatePtr, sealPtr *byte
 	if len(privateKey) > 0 {
 		keyPtr = &privateKey[0]
@@ -6813,7 +6817,7 @@ func (doc *Document) AddSESSignatureAtPageWithDistIDs(privateKey, signerCertific
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	var index uintptr
-	if err := nativeError(api.addSESWithStamp(doc.handle, keyPtr, uintptr(len(privateKey)), certificatePtr, uintptr(len(signerCertificateDER)), sealPtr, uintptr(len(sealDER)), &date[0], uintptr(pageIndex), boundary[0], boundary[1], boundary[2], boundary[3], &signatureID[0], &sealID[0], &index)); err != nil {
+	if err := nativeError(api.addSESWithStamp(doc.handle, keyPtr, uintptr(len(privateKey)), certificatePtr, uintptr(len(signerCertificateDER)), sealPtr, uintptr(len(sealDER)), &options[0], &index)); err != nil {
 		return 0, fmt.Errorf("add positioned SES signature: %w", err)
 	}
 	return int(index), nil

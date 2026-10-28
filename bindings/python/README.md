@@ -1,12 +1,10 @@
 # ofdrw-rs for Python
 
 Python 3.10+ bindings to the Rust OFD core through CFFI.
-Pull wheels from GitHub Packages with [ORAS](https://oras.land/docs/installation/),
-then install the matching OS/CPU wheel:
+Install from PyPI:
 
 ```sh
-oras pull ghcr.io/lihongjie0209/ofdrw-rs-python:0.1.0 -o packages/python
-python -m pip install ./packages/python/ofdrw_rs-0.1.0-py3-none-linux_x86_64.whl
+python -m pip install ofdrw-rs==0.1.0
 ```
 
 The wheel includes the native library; a Rust toolchain is not needed.

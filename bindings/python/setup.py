@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
@@ -45,4 +45,13 @@ class BinaryWheel(bdist_wheel):
         return "py3", "none", platform
 
 
-setup(cmdclass={"build_py": BuildRust, "bdist_wheel": BinaryWheel})
+class BinaryDistribution(Distribution):
+    def has_ext_modules(self):
+        # Native C ABI files must be installed into platlib for auditwheel.
+        return True
+
+
+setup(
+    distclass=BinaryDistribution,
+    cmdclass={"build_py": BuildRust, "bdist_wheel": BinaryWheel},
+)

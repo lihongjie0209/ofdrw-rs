@@ -67,7 +67,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-      packages: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -82,11 +82,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-          registry-url: https://npm.pkg.github.com
-          scope: '@lihongjie0209'
-      - uses: oras-project/setup-oras@v2
-        with:
-          version: 1.3.6
+          registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v8
         with:
           run-id: ${{ needs.verify.outputs.run_id }}
@@ -105,24 +101,48 @@ jobs:
           cargo package -p ofdrw --locked --no-verify
           cp target/package/ofdrw-*.crate dist/
           python scripts/assemble_release.py "$RELEASE_TAG" dist
-      - name: Publish Node.js library to GitHub npm Packages
+      - name: Check native registry credentials
         env:
-          NODE_AUTH_TOKEN: ${{ github.token }}
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          version="${RELEASE_TAG#v}"
-          package="@lihongjie0209/ofdrw-rs@$version"
-          if ! npm view "$package" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            npm publish "dist/lihongjie0209-ofdrw-rs-$version.tgz" --registry=https://npm.pkg.github.com --access public
-          fi
-          npm view "$package" version dist.integrity --registry=https://npm.pkg.github.com
-          mkdir "$RUNNER_TEMP/github-package-smoke"
-          cd "$RUNNER_TEMP/github-package-smoke"
-          npm install "$package"
-          node -e "const {Document}=require('@lihongjie0209/ofdrw-rs'); const d=Document.create(); d.addTextPage('GitHub Packages'); if(d.pageText(0)[0]!=='GitHub Packages') throw new Error('Package smoke failed'); d.close()"
-      - name: Publish Python, Go, Rust and native libraries to GitHub Container Packages
+          missing=0
+          for name in PYPI_API_TOKEN CARGO_REGISTRY_TOKEN NPM_TOKEN; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing repository secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Validate Python distributions
         run: |
-          printf '%s' "$GH_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
-          python scripts/publish_github_packages.py "$RELEASE_TAG" dist
+          python -m pip install twine
+          python -m twine check --strict dist/*.whl
+      - name: Publish Rust core to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: python scripts/publish_native_registry.py cargo "$RELEASE_TAG" dist
+      - name: Publish Python wheels to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python scripts/publish_native_registry.py pypi "$RELEASE_TAG" dist
+      - name: Publish Node.js library to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: python scripts/publish_native_registry.py npm "$RELEASE_TAG" dist
+      - name: Install Node.js library from npm
+        run: |
+          mkdir "$RUNNER_TEMP/npm-package-smoke"
+          cd "$RUNNER_TEMP/npm-package-smoke"
+          npm install "ofdrw-rs@${RELEASE_TAG#v}"
+          node -e "const {Document}=require('ofdrw-rs'); const d=Document.create(); d.addTextPage('npm registry'); if(d.pageText(0)[0]!=='npm registry') throw new Error('Package smoke failed'); d.close()"
+      - name: Install Python library from PyPI
+        run: |
+          python -m pip install --only-binary=:all: "ofdrw-rs==${RELEASE_TAG#v}"
+          cd "$RUNNER_TEMP"
+          python -c "from ofdrw_rs import Document; d=Document.new(); d.add_text_page('PyPI registry',40,30); assert d.page_text(0)==['PyPI registry']; d.close()"
       - name: Create matching Go module tag
         uses: actions/github-script@v9
         env:
@@ -149,3 +169,22 @@ jobs:
               --title "$RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md "${flags[@]}"
           fi
           gh release edit "$RELEASE_TAG" --draft=false
+
+  verify-registry-consumers:
+    needs: [verify, publish]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install and run the published Rust and Go libraries
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python scripts/check_registry_consumers.py "$RELEASE_TAG"

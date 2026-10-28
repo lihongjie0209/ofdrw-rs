@@ -20,6 +20,24 @@ import (
 	"unicode/utf16"
 )
 
+func TestNativeBindingsFitWindowsCallingConvention(t *testing.T) {
+	apiType := reflect.TypeOf(nativeAPI{})
+	for i := 0; i < apiType.NumField(); i++ {
+		field := apiType.Field(i)
+		if field.Name == "bufferFree" { // Go helper, never registered with purego.
+			continue
+		}
+		if field.Type.NumIn() > 15 {
+			t.Errorf("%s exceeds purego's Windows argument capacity", field.Name)
+		}
+		for argument := 0; argument < field.Type.NumIn(); argument++ {
+			if field.Type.In(argument).Kind() == reflect.Struct {
+				t.Errorf("%s passes a struct by value, unsupported on Windows", field.Name)
+			}
+		}
+	}
+}
+
 func TestNativeHandlesSurviveGarbageCollection(t *testing.T) {
 	documents := make([]*Document, 24)
 	for i := range documents {

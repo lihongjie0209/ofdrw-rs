@@ -2601,8 +2601,8 @@ rectangle regions can be edited, and actions can be removed by index.
 SVG, PNG, and PDF exports accept an optional image-substitution preference;
 composite resource thumbnail and substitution IDs can be edited through Node.js.
 Root integrity manifest reading, SM2 signing, and verification are available.
-Python, Go, and Node.js declare the current C ABI operations. Go uses one newer
-SES signing entry point in place of an older alias; Node.js uses newer JSON or
+Python, Go, and Node.js declare the current C ABI operations. Go uses scalar buffer release, JSON positioned SES stamping, and a newer
+SES signing entry point in place of older aliases; Node.js uses newer JSON or
 configurable entry points for 13 older aliases. CI checks these bindings with
 `scripts/check_binding_ffi_parity.py`.
 
