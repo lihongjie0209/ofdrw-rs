@@ -2211,12 +2211,49 @@ fn pdf_function_type(pdf: &PdfDocument, function: &lopdf::Dictionary) -> Result<
         .map_err(|_| OfdError::Invalid("invalid PDF FunctionType".into()))
 }
 
-fn pdf_function_domain(function: &lopdf::Dictionary) -> Result<[f64; 2], OfdError> {
-    let domain = if let Ok(domain) = function.get(b"Domain") {
-        let values = domain
-            .as_array()
-            .map_err(|_| OfdError::Invalid("invalid PDF shading Function Domain".into()))?;
-        let values = numbers(&Operation::new("Function Domain", values.clone()), 2)?;
+fn pdf_function_array<'a>(
+    pdf: &'a PdfDocument,
+    function: &'a lopdf::Dictionary,
+    key: &[u8],
+) -> Result<&'a [Object], OfdError> {
+    let name = String::from_utf8_lossy(key);
+    let value = function
+        .get(key)
+        .map_err(|_| OfdError::Invalid(format!("PDF shading Function has no {name}")))?;
+    let (_, value) = pdf.dereference(value).map_err(|error| {
+        OfdError::Invalid(format!("invalid PDF shading Function {name}: {error}"))
+    })?;
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .map_err(|_| OfdError::Invalid(format!("invalid PDF shading Function {name} array")))
+}
+
+fn pdf_function_numbers(
+    pdf: &PdfDocument,
+    function: &lopdf::Dictionary,
+    key: &[u8],
+    count: usize,
+) -> Result<Vec<f64>, OfdError> {
+    let values = pdf_function_array(pdf, function, key)?;
+    if values.len() != count {
+        return Err(OfdError::Invalid(format!(
+            "invalid PDF shading Function {} array length",
+            String::from_utf8_lossy(key)
+        )));
+    }
+    values
+        .iter()
+        .map(|value| pdf_link_number(pdf, value))
+        .collect()
+}
+
+fn pdf_function_domain(
+    pdf: &PdfDocument,
+    function: &lopdf::Dictionary,
+) -> Result<[f64; 2], OfdError> {
+    let domain = if function.has(b"Domain") {
+        let values = pdf_function_numbers(pdf, function, b"Domain", 2)?;
         [values[0], values[1]]
     } else {
         [0.0, 1.0]
@@ -2274,24 +2311,10 @@ fn pdf_shading_function_range(
     function: &lopdf::Dictionary,
     channels: usize,
 ) -> Result<Option<Vec<f64>>, OfdError> {
-    let Ok(range) = function.get(b"Range") else {
+    if !function.has(b"Range") {
         return Ok(None);
-    };
-    let (_, range) = pdf.dereference(range).map_err(|error| {
-        OfdError::Invalid(format!("invalid PDF shading Function Range: {error}"))
-    })?;
-    let values = range
-        .as_array()
-        .map_err(|_| OfdError::Invalid("invalid PDF shading Function Range".into()))?;
-    if values.len() != channels * 2 {
-        return Err(OfdError::Invalid(
-            "invalid PDF shading Function Range".into(),
-        ));
     }
-    let values = values
-        .iter()
-        .map(|value| pdf_link_number(pdf, value))
-        .collect::<Result<Vec<_>, _>>()?;
+    let values = pdf_function_numbers(pdf, function, b"Range", channels * 2)?;
     if values.chunks_exact(2).any(|pair| pair[0] > pair[1]) {
         return Err(OfdError::Invalid(
             "invalid PDF shading Function Range".into(),
@@ -2343,25 +2366,10 @@ fn pdf_sampled_function_points(
 ) -> Result<Vec<(f64, [u8; 3])>, OfdError> {
     let dictionary = &stream.dict;
     let array = |key: &[u8], count: usize| -> Result<Option<Vec<f64>>, OfdError> {
-        let Ok(value) = dictionary.get(key) else {
+        if !dictionary.has(key) {
             return Ok(None);
-        };
-        let (_, value) = pdf.dereference(value).map_err(|error| {
-            OfdError::Invalid(format!("invalid PDF sampled Function array: {error}"))
-        })?;
-        let values = value
-            .as_array()
-            .map_err(|_| OfdError::Invalid("invalid PDF sampled Function array".into()))?;
-        if values.len() != count {
-            return Err(OfdError::Invalid(
-                "invalid PDF sampled Function array length".into(),
-            ));
         }
-        values
-            .iter()
-            .map(|value| pdf_link_number(pdf, value))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some)
+        pdf_function_numbers(pdf, dictionary, key, count).map(Some)
     };
     let domain = array(b"Domain", 2)?
         .ok_or_else(|| OfdError::Invalid("PDF sampled Function has no Domain".into()))?;
@@ -2595,11 +2603,16 @@ fn pdf_linear_function_points(
             "unsupported PDF shading FunctionType".into(),
         ));
     }
-    let domain = pdf_function_domain(function)?;
+    let domain = pdf_function_domain(pdf, function)?;
     let exponent = function
         .get(b"N")
-        .and_then(Object::as_float)
-        .map_err(|_| OfdError::Invalid("PDF shading Function has no N".into()))?
+        .map_err(|_| OfdError::Invalid("PDF shading Function has no N".into()))?;
+    let exponent = pdf
+        .dereference(exponent)
+        .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function N: {error}")))?
+        .1
+        .as_float()
+        .map_err(|_| OfdError::Invalid("invalid PDF shading Function N".into()))?
         as f64;
     if !exponent.is_finite()
         || exponent.abs() > 1e6
@@ -2611,14 +2624,8 @@ fn pdf_linear_function_points(
         ));
     }
     let endpoint = |key: &[u8], default: f64| -> Result<Vec<f64>, OfdError> {
-        if let Ok(value) = function.get(key) {
-            let values = value
-                .as_array()
-                .map_err(|_| OfdError::Invalid("invalid PDF shading color endpoint".into()))?;
-            numbers(
-                &Operation::new("shading color", values.clone()),
-                color_space.channels(),
-            )
+        if function.has(key) {
+            pdf_function_numbers(pdf, function, key, color_space.channels())
         } else {
             Ok(vec![default; color_space.channels()])
         }
@@ -2801,7 +2808,7 @@ fn pdf_shading_segments_inner(
             "unsupported PDF shading FunctionType".into(),
         ));
     }
-    let domain = pdf_function_domain(dictionary)?;
+    let domain = pdf_function_domain(pdf, dictionary)?;
     let mut range = pdf_shading_function_range(pdf, dictionary, color_space.channels())?;
     if let Some(outer) = output_range {
         if let Some(inner) = &mut range {
@@ -2815,23 +2822,13 @@ fn pdf_shading_segments_inner(
             range = Some(outer.to_vec());
         }
     }
-    let functions = dictionary
-        .get(b"Functions")
-        .and_then(Object::as_array)
-        .map_err(|_| OfdError::Invalid("PDF stitching Function has no Functions".into()))?;
+    let functions = pdf_function_array(pdf, dictionary, b"Functions")?;
     if functions.is_empty() || functions.len() > 256 {
         return Err(OfdError::Invalid(
             "PDF stitching Function has invalid count".into(),
         ));
     }
-    let bounds = dictionary
-        .get(b"Bounds")
-        .and_then(Object::as_array)
-        .map_err(|_| OfdError::Invalid("PDF stitching Function has no Bounds".into()))?;
-    let bounds = numbers(
-        &Operation::new("stitching Bounds", bounds.clone()),
-        functions.len() - 1,
-    )?;
+    let bounds = pdf_function_numbers(pdf, dictionary, b"Bounds", functions.len() - 1)?;
     let mut previous = domain[0];
     for &bound in &bounds {
         if bound <= previous || bound >= domain[1] {
@@ -2839,14 +2836,7 @@ fn pdf_shading_segments_inner(
         }
         previous = bound;
     }
-    let encode = dictionary
-        .get(b"Encode")
-        .and_then(Object::as_array)
-        .map_err(|_| OfdError::Invalid("PDF stitching Function has no Encode".into()))?;
-    let encode = numbers(
-        &Operation::new("stitching Encode", encode.clone()),
-        functions.len() * 2,
-    )?;
+    let encode = pdf_function_numbers(pdf, dictionary, b"Encode", functions.len() * 2)?;
     if shading_domain[0] == shading_domain[1] {
         let input = shading_domain[0].clamp(domain[0], domain[1]);
         let index = bounds.partition_point(|bound| *bound <= input);
@@ -11164,6 +11154,229 @@ mod tests {
         assert!(
             matches!(pdf_shading_segments(&pdf, &Object::Reference(id), &PdfColorSpace::Gray, RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Invalid(message)) if message.contains("truncated PDF sampled"))
         );
+    }
+
+    fn shading_function_dictionary_mut(pdf: &mut PdfDocument, id: u32) -> &mut lopdf::Dictionary {
+        match pdf.get_object_mut((id, 0)).unwrap() {
+            Object::Dictionary(dictionary) => dictionary,
+            Object::Stream(stream) => &mut stream.dict,
+            _ => panic!("fixture function is not a dictionary or stream"),
+        }
+    }
+
+    #[test]
+    fn imports_indirect_shading_function_parameters_without_changing_pixels() {
+        for (direct, indirect) in [
+            (
+                include_bytes!("../tests/fixtures/shading-nested-stitching-axial.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/shading-indirect-functions-axial.pdf").as_slice(),
+            ),
+            (
+                include_bytes!("../tests/fixtures/shading-nested-stitching-radial.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/shading-indirect-functions-radial.pdf")
+                    .as_slice(),
+            ),
+        ] {
+            let expected = OfdDocument::from_pdf_bytes(direct).unwrap();
+            let actual = OfdDocument::from_pdf_bytes(indirect).unwrap();
+            assert_eq!(actual.page_svg(0).unwrap(), expected.page_svg(0).unwrap());
+            assert_eq!(
+                actual.page_png(0, 72.0).unwrap(),
+                expected.page_png(0, 72.0).unwrap()
+            );
+            assert!(actual.validate_references().unwrap().is_empty());
+            let reopened = OfdDocument::from_bytes(&actual.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), actual.page_svg(0).unwrap());
+            assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn shading_function_parameter_reference_chains_are_bounded_and_equivalent() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../tests/fixtures/shading-nested-stitching-axial.pdf"
+        ))
+        .unwrap();
+        let expected = pdf_shading_segments(
+            &pdf,
+            &Object::Reference((6, 0)),
+            &PdfColorSpace::Rgb,
+            RenderingIntent::RelativeColorimetric,
+            [-1.0, 1.0],
+        )
+        .unwrap();
+        for id in 6..=10 {
+            for key in [
+                "FunctionType",
+                "Domain",
+                "Range",
+                "Functions",
+                "Bounds",
+                "Encode",
+                "Size",
+                "Order",
+                "BitsPerSample",
+                "N",
+                "C0",
+                "C1",
+            ] {
+                let Ok(value) = shading_function_dictionary_mut(&mut pdf, id)
+                    .get(key.as_bytes())
+                    .cloned()
+                else {
+                    continue;
+                };
+                let mut reference = pdf.add_object(value);
+                for _ in 0..3 {
+                    reference = pdf.add_object(Object::Reference(reference));
+                }
+                shading_function_dictionary_mut(&mut pdf, id)
+                    .set(key, Object::Reference(reference));
+            }
+        }
+        let actual = pdf_shading_segments(
+            &pdf,
+            &Object::Reference((6, 0)),
+            &PdfColorSpace::Rgb,
+            RenderingIntent::RelativeColorimetric,
+            [-1.0, 1.0],
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rejects_unresolved_cyclic_and_wrong_type_shading_function_parameters() {
+        for (source, keys) in [
+            (
+                include_bytes!("../tests/fixtures/shading-axial.pdf").as_slice(),
+                ["FunctionType", "Domain", "N", "C0", "C1", "Range"],
+            ),
+            (
+                include_bytes!("../tests/fixtures/shading-nested-stitching-axial.pdf").as_slice(),
+                [
+                    "FunctionType",
+                    "Domain",
+                    "Range",
+                    "Functions",
+                    "Bounds",
+                    "Encode",
+                ],
+            ),
+        ] {
+            for key in keys {
+                for fault in 0..3 {
+                    let mut pdf = PdfDocument::load_mem(source).unwrap();
+                    let id = match fault {
+                        0 => (999_999, 0),
+                        1 => {
+                            let id = pdf.new_object_id();
+                            pdf.objects.insert(id, Object::Reference(id));
+                            id
+                        }
+                        _ => pdf.add_object(Object::Name(b"not-a-function-parameter".to_vec())),
+                    };
+                    shading_function_dictionary_mut(&mut pdf, 6).set(key, Object::Reference(id));
+                    assert!(
+                        pdf_shading_segments(
+                            &pdf,
+                            &Object::Reference((6, 0)),
+                            &PdfColorSpace::Rgb,
+                            RenderingIntent::RelativeColorimetric,
+                            [0.0, 1.0]
+                        )
+                        .is_err(),
+                        "{key}, fault {fault}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_damaged_references_inside_shading_function_arrays() {
+        let source = include_bytes!("../tests/fixtures/shading-nested-stitching-axial.pdf");
+        for (function, keys) in [
+            (6, &["Domain", "Range", "Functions", "Bounds", "Encode"][..]),
+            (9, &["Domain", "Range", "Size"][..]),
+            (10, &["Domain", "C0", "C1"][..]),
+        ] {
+            for key in keys {
+                for cyclic in [false, true] {
+                    let mut pdf = PdfDocument::load_mem(source).unwrap();
+                    let invalid = if cyclic {
+                        let id = pdf.new_object_id();
+                        pdf.objects.insert(id, Object::Reference(id));
+                        id
+                    } else {
+                        (999_999, 0)
+                    };
+                    let mut values = shading_function_dictionary_mut(&mut pdf, function)
+                        .get(key.as_bytes())
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .clone();
+                    values[0] = Object::Reference(invalid);
+                    let array = pdf.add_object(Object::Array(values));
+                    shading_function_dictionary_mut(&mut pdf, function)
+                        .set(*key, Object::Reference(array));
+                    assert!(
+                        pdf_shading_segments(
+                            &pdf,
+                            &Object::Reference((function, 0)),
+                            &PdfColorSpace::Rgb,
+                            RenderingIntent::RelativeColorimetric,
+                            [-1.0, 1.0]
+                        )
+                        .is_err(),
+                        "{function}/{key}, cyclic={cyclic}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indirect_shading_parameters_retain_length_order_and_numeric_limits() {
+        let source = include_bytes!("../tests/fixtures/shading-nested-stitching-axial.pdf");
+        for (function, key, value) in [
+            (6, "Domain", Object::Array(vec![1.into(), 0.into()])),
+            (6, "Bounds", Object::Array(vec![2.into()])),
+            (6, "Encode", Object::Array(vec![0.into(), 1.into()])),
+            (6, "Functions", Object::Array(vec![])),
+            (
+                6,
+                "Range",
+                Object::Array(vec![
+                    1.into(),
+                    0.into(),
+                    0.into(),
+                    1.into(),
+                    0.into(),
+                    1.into(),
+                ]),
+            ),
+            (9, "Size", Object::Array(vec![10001.into()])),
+            (9, "BitsPerSample", 3.into()),
+            (10, "C0", Object::Array(vec![0.into(), 1.into()])),
+            (10, "N", 1000001.into()),
+        ] {
+            let mut pdf = PdfDocument::load_mem(source).unwrap();
+            let id = pdf.add_object(value);
+            shading_function_dictionary_mut(&mut pdf, function).set(key, Object::Reference(id));
+            assert!(
+                pdf_shading_segments(
+                    &pdf,
+                    &Object::Reference((function, 0)),
+                    &PdfColorSpace::Rgb,
+                    RenderingIntent::RelativeColorimetric,
+                    [0.0, 1.0]
+                )
+                .is_err(),
+                "{function}/{key}"
+            );
+        }
     }
 
     fn single_stitching_function(function: Object, range: &[f64], encode: [f64; 2]) -> Object {

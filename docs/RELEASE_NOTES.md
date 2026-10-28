@@ -1,5 +1,10 @@
 Unreleased source changes after v0.1.0:
 
+- PDF sampled, exponential and stitching functions resolve indirect parameters
+  and numeric array members. Reference validation retains type, array-length,
+  range and size checks, and rejects dangling or cyclic references. New axial
+  and radial fixtures exercise the behavior in Rust, Python, Go and Node.js.
+
 - PDF gradients support nested stitching functions with reversed and constant
   encodings, sequential component-range clipping, discontinuity preservation,
   and bounded recursion. New numerical and Ghostscript-rendered regressions

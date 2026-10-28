@@ -294,6 +294,7 @@ func TestImportsSampledShadingPDFAcrossBinding(t *testing.T) {
 		"shading-sampled-axial.pdf", "shading-sampled-radial.pdf",
 		"shading-sampled-cubic-axial.pdf", "shading-sampled-cubic-radial.pdf",
 		"shading-nested-stitching-axial.pdf", "shading-nested-stitching-radial.pdf",
+		"shading-indirect-functions-axial.pdf", "shading-indirect-functions-radial.pdf",
 	} {
 		t.Run(filename, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", filename))

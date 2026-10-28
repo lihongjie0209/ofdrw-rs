@@ -13,18 +13,18 @@ def stream(dictionary, data):
             + data + b"\nendstream")
 
 
-values = [4095, 0, 0, 0, 4095, 0, 0, 0, 4095, 4095, 4095, 4095, 4095, 0, 0]
-bits = "".join(f"{value:012b}" for value in values)
-bits += "0" * (-len(bits) % 8)
-samples = int(bits, 2).to_bytes(len(bits) // 8, "big")
-fixtures = Path(__file__).resolve().parents[1] / "crates/ofdrw/tests/fixtures"
-# Keep branch boundaries on pixel edges and cubic intervals at least 24 pixels
-# wide at 72 dpi for comparison between independent rasterizers.
-for kind, shading in [
-    ("axial", b"/ShadingType 2 /Coords [0 16 384 16]"),
-    ("radial", b"/ShadingType 3 /Coords [192 16 0 192 16 192]"),
-]:
-    objects = [
+def nested_stitching_objects(kind):
+    # Keep branch boundaries on pixel edges and cubic intervals at least 24 pixels
+    # wide at 72 dpi for comparison between independent rasterizers.
+    shading = {
+        "axial": b"/ShadingType 2 /Coords [0 16 384 16]",
+        "radial": b"/ShadingType 3 /Coords [192 16 0 192 16 192]",
+    }[kind]
+    values = [4095, 0, 0, 0, 4095, 0, 0, 0, 4095, 4095, 4095, 4095, 4095, 0, 0]
+    bits = "".join(f"{value:012b}" for value in values)
+    bits += "0" * (-len(bits) % 8)
+    samples = int(bits, 2).to_bytes(len(bits) // 8, "big")
+    return [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 384 32] "
@@ -42,6 +42,9 @@ for kind, shading in [
                b"/Size [5] /Order 3 /BitsPerSample 12 /Filter /FlateDecode", zlib.compress(samples)),
         b"<< /FunctionType 2 /Domain [0 1] /C0 [.2 .1 .9] /C1 [.9 .8 .2] /N 2 >>",
     ]
+
+
+def pdf_bytes(objects):
     pdf = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offsets = [0]
     for index, obj in enumerate(objects, 1):
@@ -53,4 +56,11 @@ for kind, shading in [
         pdf.extend(f"{offset:010d} 00000 n \n".encode())
     pdf.extend((f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\n"
                 f"startxref\n{xref}\n%%EOF\n").encode())
-    (fixtures / f"shading-nested-stitching-{kind}.pdf").write_bytes(pdf)
+    return bytes(pdf)
+
+
+if __name__ == "__main__":
+    fixtures = Path(__file__).resolve().parents[1] / "crates/ofdrw/tests/fixtures"
+    for kind in ["axial", "radial"]:
+        (fixtures / f"shading-nested-stitching-{kind}.pdf").write_bytes(
+            pdf_bytes(nested_stitching_objects(kind)))

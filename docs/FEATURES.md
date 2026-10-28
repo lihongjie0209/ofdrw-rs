@@ -1694,6 +1694,12 @@ reversed encoding, and applies every enclosing output `Range` in component
 space before color conversion. Constant encodings select the right-hand
 subfunction at an internal bound. Cyclic function references and results
 exceeding the shared 10,000-color-stop limit return errors.
+Function parameters and numeric array members may be indirect objects,
+including exponential `N/C0/C1/Domain`, sampled parameters, and stitching
+`Functions/Bounds/Encode/Domain`. Unresolved or cyclic references and invalid
+array dimensions return errors; explicit malformed endpoints do not fall back
+to default colors. Axial and radial indirect-reference fixtures produce the
+same OFD SVG and PNG output as their direct-value counterparts.
 
 Sampled functions support linear and cubic (Order 3) interpolation, 1/2/4/8/12/16/24/32-bit
 samples, bounded byte-filter chains, reversed `Encode` and `Decode` mappings,
