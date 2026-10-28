@@ -7323,7 +7323,11 @@ fn table_cells_write_bold_and_italic_text_in_outer_and_nested_grids() {
 #[test]
 fn table_cells_select_fonts_and_nested_cells_inherit_or_override_them() {
     let mut document = OfdDocument::new();
-    let default_id = document.fonts().unwrap()[0].id.clone();
+    // Use two embedded fonts so width comparisons do not depend on system fallback fonts.
+    let default_id = document
+        .add_embedded_font("DejaVu Serif", include_bytes!("fixtures/dejavu-serif.ttf"))
+        .unwrap()
+        .to_string();
     let bytes = std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dejavu-sans.ttf"),
     )
