@@ -1688,7 +1688,12 @@ Flate and LZW predictor parameters are applied to filtered inline images.
 The importer also handles filtered inline images in Form XObjects.
 PDF axial (type 2) and radial (type 3) `sh` shading import as OFD gradients
 for type 2 exponential functions and one-input type 0 sampled functions,
-including type 3 stitching functions composed of these subfunctions.
+including nested type 3 stitching functions composed of these subfunctions.
+Stitching supports up to 16 nesting levels, preserves discontinuities under
+reversed encoding, and applies every enclosing output `Range` in component
+space before color conversion. Constant encodings select the right-hand
+subfunction at an internal bound. Cyclic function references and results
+exceeding the shared 10,000-color-stop limit return errors.
 
 Sampled functions support linear and cubic (Order 3) interpolation, 1/2/4/8/12/16/24/32-bit
 samples, bounded byte-filter chains, reversed `Encode` and `Decode` mappings,

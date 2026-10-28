@@ -1700,8 +1700,12 @@ test('import JBIG2 PDF images with and without global dictionaries through the C
 });
 
 test('import PDF axial and radial sampled shading functions through the C ABI', () => {
-  for (const kind of ['axial', 'radial', 'cubic-axial', 'cubic-radial']) {
-    const document = Document.fromPdfBytes(fs.readFileSync(fixture(`shading-sampled-${kind}.pdf`)));
+  for (const filename of [
+    'shading-sampled-axial.pdf', 'shading-sampled-radial.pdf',
+    'shading-sampled-cubic-axial.pdf', 'shading-sampled-cubic-radial.pdf',
+    'shading-nested-stitching-axial.pdf', 'shading-nested-stitching-radial.pdf',
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(filename)));
     try {
       const svg = document.pageSvg(0);
       for (const color of ['#ff0000', '#00ff00', '#0000ff']) assert.ok(svg.includes(color));

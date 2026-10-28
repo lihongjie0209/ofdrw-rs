@@ -1,5 +1,10 @@
 Unreleased source changes after v0.1.0:
 
+- PDF gradients support nested stitching functions with reversed and constant
+  encodings, sequential component-range clipping, discontinuity preservation,
+  and bounded recursion. New numerical and Ghostscript-rendered regressions
+  cover nested axial and radial import through all three language bindings.
+
 - PDF sampled shading functions now support cubic (Order 3) interpolation,
   including table edges, interior extrema, reversed mappings and output clipping.
   Axial and radial import fixtures exercise the C ABI through Python, Go and

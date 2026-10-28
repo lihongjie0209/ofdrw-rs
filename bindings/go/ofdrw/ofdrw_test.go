@@ -290,9 +290,13 @@ func TestImportsJBIG2PDFImageAcrossBinding(t *testing.T) {
 }
 
 func TestImportsSampledShadingPDFAcrossBinding(t *testing.T) {
-	for _, kind := range []string{"axial", "radial", "cubic-axial", "cubic-radial"} {
-		t.Run(kind, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "shading-sampled-"+kind+".pdf"))
+	for _, filename := range []string{
+		"shading-sampled-axial.pdf", "shading-sampled-radial.pdf",
+		"shading-sampled-cubic-axial.pdf", "shading-sampled-cubic-radial.pdf",
+		"shading-nested-stitching-axial.pdf", "shading-nested-stitching-radial.pdf",
+	} {
+		t.Run(filename, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", filename))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -285,10 +285,14 @@ def test_imports_jbig2_pdf_image_across_binding(name):
             assert reopened.page_image_data(0, 0) == document.page_image_data(0, 0)
 
 
-@pytest.mark.parametrize("kind", ["axial", "radial", "cubic-axial", "cubic-radial"])
-def test_imports_sampled_shading_pdf_across_binding(kind):
+@pytest.mark.parametrize("filename", [
+    "shading-sampled-axial.pdf", "shading-sampled-radial.pdf",
+    "shading-sampled-cubic-axial.pdf", "shading-sampled-cubic-radial.pdf",
+    "shading-nested-stitching-axial.pdf", "shading-nested-stitching-radial.pdf",
+])
+def test_imports_sampled_shading_pdf_across_binding(filename):
     fixture = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" /
-               "tests" / "fixtures" / f"shading-sampled-{kind}.pdf")
+               "tests" / "fixtures" / filename)
     with Document.from_pdf_bytes(fixture.read_bytes()) as document:
         svg = document.page_svg(0)
         assert all(color in svg for color in ["#ff0000", "#00ff00", "#0000ff"])

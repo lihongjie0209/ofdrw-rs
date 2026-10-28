@@ -2727,6 +2727,47 @@ fn pdf_shading_segments(
     rendering_intent: RenderingIntent,
     shading_domain: [f64; 2],
 ) -> Result<Vec<GradientSegment>, OfdError> {
+    pdf_shading_segments_inner(
+        pdf,
+        function,
+        color_space,
+        rendering_intent,
+        shading_domain,
+        None,
+        0,
+    )
+}
+
+fn pdf_shading_segments_inner(
+    pdf: &PdfDocument,
+    function: &Object,
+    color_space: &PdfColorSpace,
+    rendering_intent: RenderingIntent,
+    shading_domain: [f64; 2],
+    output_range: Option<&[f64]>,
+    depth: usize,
+) -> Result<Vec<GradientSegment>, OfdError> {
+    if depth > 16 {
+        return Err(OfdError::Limit(
+            "PDF stitching Function nesting exceeds 16".into(),
+        ));
+    }
+    if shading_domain[0] > shading_domain[1] {
+        let mut segments = pdf_shading_segments_inner(
+            pdf,
+            function,
+            color_space,
+            rendering_intent,
+            [shading_domain[1], shading_domain[0]],
+            output_range,
+            depth,
+        )?;
+        segments.reverse();
+        for segment in &mut segments {
+            segment.position = segment.position.map(|position| 1.0 - position);
+        }
+        return Ok(segments);
+    }
     let (_, resolved) = pdf
         .dereference(function)
         .map_err(|error| OfdError::Invalid(format!("invalid PDF shading Function: {error}")))?;
@@ -2744,7 +2785,7 @@ fn pdf_shading_segments(
             color_space,
             rendering_intent,
             shading_domain,
-            None,
+            output_range,
         )?;
         return Ok(points
             .into_iter()
@@ -2761,7 +2802,19 @@ fn pdf_shading_segments(
         ));
     }
     let domain = pdf_function_domain(dictionary)?;
-    let range = pdf_shading_function_range(pdf, dictionary, color_space.channels())?;
+    let mut range = pdf_shading_function_range(pdf, dictionary, color_space.channels())?;
+    if let Some(outer) = output_range {
+        if let Some(inner) = &mut range {
+            // Compose successive clamps rather than intersecting ranges: disjoint
+            // ranges yield a constant at the nearest outer bound, not an error.
+            for (inner, outer) in inner.chunks_exact_mut(2).zip(outer.chunks_exact(2)) {
+                inner[0] = inner[0].clamp(outer[0], outer[1]);
+                inner[1] = inner[1].clamp(outer[0], outer[1]);
+            }
+        } else {
+            range = Some(outer.to_vec());
+        }
+    }
     let functions = dictionary
         .get(b"Functions")
         .and_then(Object::as_array)
@@ -2794,6 +2847,31 @@ fn pdf_shading_segments(
         &Operation::new("stitching Encode", encode.clone()),
         functions.len() * 2,
     )?;
+    if shading_domain[0] == shading_domain[1] {
+        let input = shading_domain[0].clamp(domain[0], domain[1]);
+        let index = bounds.partition_point(|bound| *bound <= input);
+        let start = if index == 0 {
+            domain[0]
+        } else {
+            bounds[index - 1]
+        };
+        let end = if index == bounds.len() {
+            domain[1]
+        } else {
+            bounds[index]
+        };
+        let encoded = encode[2 * index]
+            + (input - start) / (end - start) * (encode[2 * index + 1] - encode[2 * index]);
+        return pdf_shading_segments_inner(
+            pdf,
+            &functions[index],
+            color_space,
+            rendering_intent,
+            [encoded, encoded],
+            range.as_deref(),
+            depth + 1,
+        );
+    }
     let mut segments = Vec::with_capacity(functions.len() * 2);
     for (index, function) in functions.iter().enumerate() {
         let start = if index == 0 {
@@ -2817,15 +2895,18 @@ fn pdf_shading_segments(
             encode[2 * index]
                 + (value - start) / (end - start) * (encode[2 * index + 1] - encode[2 * index])
         };
-        let points = pdf_linear_function_points(
+        let points = pdf_shading_segments_inner(
             pdf,
             function,
             color_space,
             rendering_intent,
             [interpolate(visible_start), interpolate(visible_end)],
             range.as_deref(),
+            depth + 1,
         )?;
-        for (local, color) in points {
+        for point in points {
+            let local = point.position.unwrap_or(0.0);
+            let color = point.color;
             let value = visible_start + local * (visible_end - visible_start);
             segments.push(GradientSegment {
                 position: Some(
@@ -2845,15 +2926,16 @@ fn pdf_shading_segments(
         let at_start = shading_domain[1] <= domain[0];
         let index = if at_start { 0 } else { functions.len() - 1 };
         let encoded = encode[2 * index + usize::from(!at_start)];
-        let color = pdf_linear_function_points(
+        let color = pdf_shading_segments_inner(
             pdf,
             &functions[index],
             color_space,
             rendering_intent,
             [encoded, encoded],
             range.as_deref(),
+            depth + 1,
         )?[0]
-            .1;
+            .color;
         return Ok([0.0, 1.0]
             .map(|position| GradientSegment {
                 position: Some(position),
@@ -11082,6 +11164,242 @@ mod tests {
         assert!(
             matches!(pdf_shading_segments(&pdf, &Object::Reference(id), &PdfColorSpace::Gray, RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Invalid(message)) if message.contains("truncated PDF sampled"))
         );
+    }
+
+    fn single_stitching_function(function: Object, range: &[f64], encode: [f64; 2]) -> Object {
+        Object::Dictionary(dictionary! {
+            "FunctionType" => 3,
+            "Domain" => Object::Array(vec![0.into(), 1.into()]),
+            "Range" => Object::Array(range.iter().map(|value| Object::Real(*value as f32)).collect()),
+            "Bounds" => Object::Array(vec![]),
+            "Encode" => Object::Array(encode.into_iter().map(|value| Object::Real(value as f32)).collect()),
+            "Functions" => Object::Array(vec![function]),
+        })
+    }
+
+    #[test]
+    fn nested_stitching_composes_overlapping_and_disjoint_ranges() {
+        for (inner, outer, expected) in [
+            ([0.1, 0.9], [0.2, 0.8], [51, 204]),
+            ([0.2, 0.4], [0.6, 0.8], [153, 153]),
+            ([0.6, 0.8], [0.2, 0.4], [102, 102]),
+        ] {
+            let function = single_stitching_function(
+                single_stitching_function(
+                    Object::Stream(sampled_function(8, &[0, 255])),
+                    &inner,
+                    [0.0, 1.0],
+                ),
+                &outer,
+                [0.0, 1.0],
+            );
+            let segments = pdf_shading_segments(
+                &PdfDocument::new(),
+                &function,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0],
+            )
+            .unwrap();
+            assert_eq!(segments.first().unwrap().color, [expected[0]; 3]);
+            assert_eq!(segments.last().unwrap().color, [expected[1]; 3]);
+            if expected[0] == expected[1] {
+                assert!(segments
+                    .iter()
+                    .all(|segment| segment.color == [expected[0]; 3]));
+            }
+        }
+    }
+
+    #[test]
+    fn nested_stitching_clips_lab_components_before_color_conversion() {
+        let leaf = Object::Dictionary(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => Object::Array(vec![0.into(), 1.into()]),
+            "C0" => Object::Array(vec![50.into(), (-100).into(), 100.into()]),
+            "C1" => Object::Array(vec![50.into(), 100.into(), (-100).into()]),
+            "N" => 1,
+        });
+        let function = single_stitching_function(
+            single_stitching_function(leaf, &[20.0, 80.0, -50.0, -40.0, -20.0, 20.0], [0.0, 1.0]),
+            &[40.0, 60.0, 10.0, 20.0, -70.0, 70.0],
+            [0.0, 1.0],
+        );
+        let lab = parse_color_space(None, None, &lab_space(), 0).unwrap();
+        let segments = pdf_shading_segments(
+            &PdfDocument::new(),
+            &function,
+            &lab,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        assert_eq!(
+            segments.first().unwrap().color,
+            lab.color(&[50.0, 10.0, 20.0]).unwrap()
+        );
+        assert_eq!(
+            segments.last().unwrap().color,
+            lab.color(&[50.0, 10.0, -20.0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn nested_stitching_constant_encoding_selects_the_right_hand_interval() {
+        let pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-stitching.pdf"))
+            .unwrap();
+        let function = single_stitching_function(
+            Object::Reference((6, 0)),
+            &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            [0.5, 0.5],
+        );
+        let segments = pdf_shading_segments(
+            &pdf,
+            &function,
+            &PdfColorSpace::Rgb,
+            RenderingIntent::RelativeColorimetric,
+            [-1.0, 2.0],
+        )
+        .unwrap();
+        assert_eq!(segments.first().unwrap().position, Some(0.0));
+        assert_eq!(segments.last().unwrap().position, Some(1.0));
+        assert!(segments.iter().all(|segment| segment.color == [0, 0, 255]));
+    }
+
+    #[test]
+    fn nested_stitching_reverses_mapping_and_preserves_discontinuities() {
+        let pdf = PdfDocument::load_mem(include_bytes!("../tests/fixtures/shading-stitching.pdf"))
+            .unwrap();
+        let function = single_stitching_function(
+            Object::Reference((6, 0)),
+            &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0],
+        );
+        let segments = pdf_shading_segments(
+            &pdf,
+            &function,
+            &PdfColorSpace::Rgb,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0],
+        )
+        .unwrap();
+        assert_eq!(segments.first().unwrap().color, [255; 3]);
+        assert_eq!(segments.last().unwrap().color, [255, 0, 0]);
+        let seam = segments
+            .iter()
+            .filter(|segment| segment.position == Some(0.5))
+            .map(|segment| segment.color)
+            .collect::<Vec<_>>();
+        assert_eq!(seam, [[0, 0, 255], [0, 255, 0]]);
+        assert!(segments
+            .windows(2)
+            .all(|pair| pair[0].position <= pair[1].position));
+    }
+
+    #[test]
+    fn nested_stitching_rejects_cycles_and_excessive_depth() {
+        let mut pdf = PdfDocument::new();
+        let id = pdf.new_object_id();
+        pdf.objects.insert(
+            id,
+            single_stitching_function(Object::Reference(id), &[0.0, 1.0], [0.0, 1.0]),
+        );
+        for domain in [[0.0, 1.0], [1.0, 0.0], [0.5, 0.5], [-2.0, -1.0]] {
+            assert!(matches!(pdf_shading_segments(
+                &pdf, &Object::Reference(id), &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric, domain,
+            ), Err(OfdError::Limit(message)) if message.contains("nesting")));
+        }
+        let mut function = Object::Stream(sampled_function(8, &[0, 255]));
+        for _ in 0..16 {
+            function = single_stitching_function(function, &[0.0, 1.0], [0.0, 1.0]);
+        }
+        assert!(pdf_shading_segments(
+            &pdf,
+            &function,
+            &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric,
+            [0.0, 1.0]
+        )
+        .is_ok());
+        function = single_stitching_function(function, &[0.0, 1.0], [0.0, 1.0]);
+        assert!(matches!(
+            pdf_shading_segments(
+                &pdf,
+                &function,
+                &PdfColorSpace::Gray,
+                RenderingIntent::RelativeColorimetric,
+                [0.0, 1.0]
+            ),
+            Err(OfdError::Limit(_))
+        ));
+    }
+
+    #[test]
+    fn nested_stitching_retains_the_global_color_stop_limit() {
+        let mut pdf = PdfDocument::new();
+        let mut child = pdf.add_object(sampled_function(8, &[0, 255]));
+        for _ in 0..2 {
+            child = pdf.add_object(dictionary! {
+                "FunctionType" => 3,
+                "Domain" => Object::Array(vec![0.into(), 1.into()]),
+                "Functions" => Object::Array(vec![Object::Reference(child); 256]),
+                "Bounds" => Object::Array((1..256).map(|i| Object::Real(i as f32 / 256.0)).collect()),
+                "Encode" => Object::Array((0..256).flat_map(|_| [0.into(), 1.into()]).collect()),
+            });
+        }
+        assert!(
+            matches!(pdf_shading_segments(&pdf, &Object::Reference(child), &PdfColorSpace::Gray,
+            RenderingIntent::RelativeColorimetric, [0.0, 1.0]), Err(OfdError::Limit(message)) if message.contains("color stops"))
+        );
+    }
+
+    #[test]
+    fn nested_stitching_imports_and_matches_independent_reference() {
+        for (source, radial) in [
+            (
+                include_bytes!("../tests/fixtures/shading-nested-stitching-axial.pdf").as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/shading-nested-stitching-radial.pdf").as_slice(),
+                true,
+            ),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(source).unwrap();
+            let svg = document.page_svg(0).unwrap();
+            assert!(svg.contains(if radial {
+                "radialGradient"
+            } else {
+                "linearGradient"
+            }));
+            assert!(document.validate_references().unwrap().is_empty());
+            if !radial {
+                let actual = image::load_from_memory(&document.page_png(0, 72.0).unwrap())
+                    .unwrap()
+                    .to_rgb8();
+                let expected = image::load_from_memory(include_bytes!(
+                    "../tests/fixtures/shading-nested-stitching-reference.png"
+                ))
+                .unwrap()
+                .to_rgb8();
+                assert_eq!(actual.dimensions(), expected.dimensions());
+                let maximum = actual
+                    .as_raw()
+                    .iter()
+                    .zip(expected.as_raw())
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                assert!(
+                    maximum <= 6,
+                    "Nested stitching differs from Ghostscript by {maximum}"
+                );
+            }
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_svg(0).unwrap(), svg);
+            assert!(PdfDocument::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        }
     }
 
     #[test]
