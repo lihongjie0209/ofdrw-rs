@@ -1,0 +1,47 @@
+"""Offline provenance and distribution checks for bundled Adobe resources."""
+import hashlib
+import json
+from pathlib import Path
+import re
+import unittest
+import zipfile
+
+
+ROOT = Path(__file__).resolve().parents[2]
+ASSETS = ROOT / "crates/ofdrw/assets/cmaps"
+
+
+class AdobeCmapResourcesTest(unittest.TestCase):
+    def test_manifest_matches_original_git_blobs_and_runtime_resource_names(self):
+        manifest = json.loads((ASSETS / "manifest.json").read_text())
+        payload = (ASSETS / "horizontal.zip").read_bytes()
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), manifest["archive_sha256"])
+        names = re.findall(r'\("([^"]+)", "([^"]+)"\)', (ASSETS / "names.rs").read_text())
+        self.assertEqual(names, [(item["name"], item["ordering"]) for item in manifest["resources"]])
+        self.assertEqual([name for name, _ in names], sorted({name for name, _ in names}))
+        with zipfile.ZipFile(ASSETS / "horizontal.zip") as archive:
+            self.assertEqual(archive.namelist(), [name for name, _ in names])
+            dependencies = set()
+            for item in manifest["resources"]:
+                with self.subTest(name=item["name"]):
+                    data = archive.read(item["name"])
+                    self.assertEqual(len(data), item["bytes"])
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), item["sha256"])
+                    self.assertEqual(hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest(), item["git_blob_sha1"])
+                    self.assertIn(b"Copyright", data)
+                    self.assertRegex(data, rb"/WMode\s+0\s+def")
+                    self.assertRegex(data, rb"/Ordering\s+\(" + re.escape(item["ordering"].encode()) + rb"\)")
+                    dependencies.update(name.decode() for name in re.findall(rb"/(\S+)\s+usecmap", data))
+            self.assertLessEqual(dependencies, {name for name, _ in names})
+
+    def test_adobe_notice_is_retained_in_each_native_language_distribution(self):
+        notice = (ASSETS / "NOTICE").read_text()
+        manifest = json.loads((ASSETS / "manifest.json").read_text())
+        self.assertIn(manifest["commit"], notice)
+        for name in ["NOTICE", "bindings/python/NOTICE", "bindings/node/NOTICE"]:
+            with self.subTest(name=name):
+                self.assertIn(notice, (ROOT / name).read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()

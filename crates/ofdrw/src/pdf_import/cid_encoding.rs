@@ -1,6 +1,11 @@
 //! Horizontal PDF CMaps: source byte codes and CID selectors stay distinct.
 
-use std::collections::HashMap;
+mod named;
+
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use lopdf::{content::Content, Object};
 
@@ -10,12 +15,15 @@ const MAX_BYTES: usize = 1024 * 1024;
 const MAX_ASSIGNMENTS: usize = 100_000;
 const MAX_SPACES: usize = 128;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct CidEncoding {
     spaces: Vec<CodeSpace>,
-    mappings: HashMap<(u8, u32), u16>,
-    notdefs: HashMap<(u8, u32), u16>,
+    mappings: Arc<HashMap<(u8, u32), u16>>,
+    notdefs: Arc<HashMap<(u8, u32), u16>>,
     identity: bool,
+    ordering: Option<&'static str>,
+    height: usize,
+    cost: Budget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,11 +57,13 @@ pub(super) struct DecodedCode {
     pub cid: u16,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Budget {
     bytes: usize,
     assignments: usize,
 }
+
+static NAMED_CACHE: OnceLock<Mutex<VecDeque<(&'static str, CidEncoding)>>> = OnceLock::new();
 
 fn invalid(message: &str) -> OfdError {
     OfdError::Invalid(format!("invalid PDF Encoding CMap: {message}"))
@@ -64,6 +74,56 @@ fn limit() -> OfdError {
 }
 
 impl CidEncoding {
+    pub fn ordering(&self) -> Option<&'static str> {
+        self.ordering
+    }
+
+    fn named(
+        pdf: &PdfDocument,
+        name: &[u8],
+        depth: usize,
+        budget: &mut Budget,
+    ) -> Result<Self, OfdError> {
+        let cache = NAMED_CACHE.get_or_init(Mutex::default);
+        let cached = cache.lock().ok().and_then(|maps| {
+            maps.iter()
+                .find(|(candidate, _)| candidate.as_bytes() == name)
+                .map(|(_, map)| map.clone())
+        });
+        if let Some(map) = cached {
+            budget.bytes = budget.bytes.saturating_add(map.cost.bytes);
+            budget.assignments = budget.assignments.saturating_add(map.cost.assignments);
+            if budget.bytes > MAX_BYTES
+                || budget.assignments > MAX_ASSIGNMENTS
+                || depth + map.height > 8
+            {
+                return Err(limit());
+            }
+            return Ok(map);
+        }
+        let (name, ordering, data) = named::data(name)?;
+        let before = *budget;
+        let mut map = Self::parse_inner(
+            pdf,
+            &Object::Stream(lopdf::Stream::new(lopdf::Dictionary::new(), data)),
+            depth,
+            budget,
+        )?;
+        map.ordering = Some(ordering);
+        map.cost = Budget {
+            bytes: budget.bytes - before.bytes,
+            assignments: budget.assignments - before.assignments,
+        };
+        // Share immutable mappings; inheritance clones only the tables it overrides.
+        if let Ok(mut maps) = cache.lock() {
+            if maps.len() >= 16 {
+                maps.pop_front();
+            }
+            maps.push_back((name, map.clone()));
+        }
+        Ok(map)
+    }
+
     pub fn parse(pdf: &PdfDocument, value: &Object) -> Result<Self, OfdError> {
         Self::parse_inner(pdf, value, 0, &mut Budget::default())
     }
@@ -80,7 +140,7 @@ impl CidEncoding {
         let value = pdf_resolved_value(Some(pdf), value, "Type0 Encoding CMap")?;
         if let Object::Name(name) = value {
             if name != b"Identity-H" {
-                return Err(invalid("unsupported named or vertical CMap"));
+                return Self::named(pdf, name, depth, budget);
             }
             return Ok(Self {
                 identity: true,
@@ -116,7 +176,10 @@ impl CidEncoding {
             .map(|base| Self::parse_inner(pdf, base, depth + 1, budget))
             .transpose()?
             .unwrap_or_default();
-        let operations = Content::decode(&data)
+        if base.is_some() {
+            result.height += 1;
+        }
+        let operations = Content::decode(&cmap_source(&data)?)
             .map_err(|_| invalid("malformed CMap syntax"))?
             .operations;
         let mut index = 0;
@@ -190,6 +253,7 @@ impl CidEncoding {
                         }
                         result =
                             Self::parse_inner(pdf, &Object::Name(name.clone()), depth + 1, budget)?;
+                        result.height += 1;
                     }
                 }
                 "usefont" if in_cmap => {
@@ -219,6 +283,9 @@ impl CidEncoding {
         }
         if !finished || in_cmap || result.spaces.is_empty() {
             return Err(invalid("incomplete CMap definition"));
+        }
+        if depth + result.height > 8 {
+            return Err(limit());
         }
         for &(length, source) in result.mappings.keys().chain(result.notdefs.keys()) {
             let bytes = source.to_be_bytes();
@@ -292,9 +359,9 @@ impl CidEncoding {
                 return Err(invalid("CID range overflows"));
             }
             let target = if notdef {
-                &mut self.notdefs
+                Arc::make_mut(&mut self.notdefs)
             } else {
-                &mut self.mappings
+                Arc::make_mut(&mut self.mappings)
             };
             for source in first_code..=last_code {
                 let value = if notdef {
@@ -353,6 +420,78 @@ fn code_number(bytes: &[u8]) -> u32 {
     bytes
         .iter()
         .fold(0, |value, byte| (value << 8) | u32::from(*byte))
+}
+
+fn cmap_source(data: &[u8]) -> Result<Vec<u8>, OfdError> {
+    // lopdf's content decoder can stop at a comment followed by an empty line,
+    // and does not accept comments between section operands. Keep literal and
+    // hexadecimal strings intact while removing only lexical comments.
+    let mut output = Vec::with_capacity(data.len());
+    let mut containers = Vec::new();
+    let mut literal = 0_usize;
+    let mut escaped = false;
+    let mut hex = false;
+    let mut index = 0;
+    while index < data.len() {
+        let byte = data[index];
+        if literal > 0 {
+            output.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'(' {
+                literal += 1;
+            } else if byte == b')' {
+                literal -= 1;
+            }
+        } else if hex {
+            output.push(byte);
+            if byte == b'>' {
+                hex = false;
+            }
+        } else {
+            match byte {
+                b'%' => {
+                    while index < data.len() && !matches!(data[index], b'\r' | b'\n') {
+                        index += 1;
+                    }
+                    output.push(b' ');
+                    continue;
+                }
+                b'(' => literal = 1,
+                b'[' => containers.push(b']'),
+                b'<' if data.get(index + 1) == Some(&b'<') => {
+                    containers.push(b'>');
+                    output.push(byte);
+                    index += 1;
+                }
+                b'<' => hex = true,
+                b']' => {
+                    if containers.pop() != Some(b']') {
+                        return Err(invalid("unbalanced CMap array"));
+                    }
+                }
+                b'>' => {
+                    if data.get(index + 1) != Some(&b'>') || containers.pop() != Some(b'>') {
+                        return Err(invalid("unbalanced CMap dictionary"));
+                    }
+                    output.push(byte);
+                    index += 1;
+                }
+                _ => {}
+            }
+            output.push(byte);
+        }
+        if literal + containers.len() > 64 {
+            return Err(limit());
+        }
+        index += 1;
+    }
+    if literal != 0 || hex || !containers.is_empty() {
+        return Err(invalid("unterminated CMap operand"));
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -495,7 +634,7 @@ mod tests {
         for value in [
             Object::Null,
             Object::Name(b"Identity-V".to_vec()),
-            Object::Name(b"UniGB-UCS2-H".to_vec()),
+            Object::Name(b"Unknown-CMap".to_vec()),
         ] {
             assert!(CidEncoding::parse(&PdfDocument::new(), &value).is_err());
         }
@@ -525,5 +664,71 @@ mod tests {
             CidEncoding::parse(&pdf, &huge),
             Err(OfdError::Limit(_))
         ));
+    }
+
+    #[test]
+    fn every_bundled_horizontal_adobe_cmap_parses_without_network_access() {
+        let pdf = PdfDocument::new();
+        for (name, ordering) in named::NAMES {
+            let map = CidEncoding::parse(&pdf, &Object::Name(name.as_bytes().to_vec()))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                map.ordering(),
+                (*name != "Identity-H").then_some(*ordering),
+                "{name}"
+            );
+        }
+        assert_eq!(named::NAMES.len(), 116);
+    }
+
+    #[test]
+    fn named_cmap_inheritance_preserves_base_and_charges_cached_work() {
+        let pdf = PdfDocument::new();
+        let name = Object::Name(b"GBK-EUC-H".to_vec());
+        let first = CidEncoding::parse(&pdf, &name).unwrap();
+        let second = CidEncoding::parse(&pdf, &name).unwrap();
+        assert!(first.cost.assignments > 10_000);
+        let child = Object::Stream(Stream::new(
+            dictionary! {"UseCMap" => name.clone()},
+            b"begincmap /GBK-EUC-H usecmap 1 begincidchar <d6d0> 123 endcidchar endcmap".to_vec(),
+        ));
+        let child = CidEncoding::parse(&pdf, &child).unwrap();
+        assert_eq!(child.decode(&[0xd6, 0xd0]).unwrap()[0].cid, 123);
+        assert_eq!(first.decode(&[0xd6, 0xd0]).unwrap()[0].cid, 4559);
+        assert_eq!(second.decode(&[0xd6, 0xd0]).unwrap()[0].cid, 4559);
+        let mut full_budget = Budget {
+            bytes: MAX_BYTES,
+            assignments: 0,
+        };
+        assert!(matches!(
+            CidEncoding::parse_inner(&pdf, &name, 0, &mut full_budget),
+            Err(OfdError::Limit(_))
+        ));
+    }
+
+    #[test]
+    fn cmap_comments_do_not_change_strings_or_split_section_operands() {
+        let source = b"% header\n\n/Label (50% \\(nested\\)) def % trailer\n/Hex <25> def";
+        let cleaned = cmap_source(source).unwrap();
+        assert!(cleaned
+            .windows(b"(50% \\(nested\\))".len())
+            .any(|bytes| bytes == b"(50% \\(nested\\))"));
+        assert!(cleaned.windows(b"<25>".len()).any(|bytes| bytes == b"<25>"));
+        let cmap = parse("% section\n\n1 begincodespacerange <00> % low bound\n<ff> endcodespacerange\n1 begincidchar <41> % source\n12 endcidchar").unwrap();
+        assert_eq!(cmap.decode(b"A").unwrap()[0].cid, 12);
+        for bytes in [
+            b"[".as_slice(),
+            b"<<",
+            b"(unterminated",
+            b"<00",
+            b"]",
+            b">>",
+            b"[>>",
+        ] {
+            assert!(cmap_source(bytes).is_err());
+        }
+        for bytes in [b"[".repeat(65), b"(".repeat(65), b"<<".repeat(65)] {
+            assert!(matches!(cmap_source(&bytes), Err(OfdError::Limit(_))));
+        }
     }
 }

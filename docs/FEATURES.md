@@ -1747,8 +1747,26 @@ when ToUnicode gives it a different character; two-byte codes do not gain
 word spacing merely because they map to a space. These rules follow
 [ISO 32000-1, sections 9.3.3 and 9.7.5](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
+The native library also bundles 116 horizontal Adobe CMap resources,
+including GBK-EUC-H, UniGB-UTF16-H, UniCNS-UTF16-H, UniJIS-UTF16-H and
+UniKS-UTF16-H. They cover the current Adobe CNS1, GB1, Japan1, Korea1, KR,
+Identity and Manga1 collections and require no runtime downloads. Named
+maps and embedded UseCMap bases use the same bounded parser. A named map's
+Adobe Registry and Ordering must match the descendant CIDFont's
+CIDSystemInfo; indirect collection metadata is accepted. Identity-H remains
+collection-neutral. ToUnicode is still required for text extraction.
+Up to sixteen parsed named maps share immutable tables; local overrides
+copy only the table being changed, and cache hits still charge parsing budgets.
+Comments may appear between mapping operands without changing percent signs
+inside literal strings. Literal/array/dictionary nesting is limited to 64.
+
+Sources are pinned to [Adobe cmap-resources](https://github.com/adobe-type-tools/cmap-resources/tree/f5cf3bca7fdfeaceb77aa82847e974f2306c20b4).
+The [manifest](../crates/ofdrw/assets/cmaps/manifest.json) lists all names,
+Git blob hashes and SHA-256 digests; original source headers and the
+[BSD notice](../crates/ofdrw/assets/cmaps/NOTICE) are retained in distributions.
+
 Other source fonts use the document's fallback font for previews. Vertical
-writing and named CID CMaps other than Identity-H remain unsupported. The `'` and `"` line operators
+writing and unbundled named CID CMaps remain unsupported. The `'` and `"` line operators
 are supported.
 Text-state operators such as `Tr` and `Tf` are accepted before `BT`; text
 positioning and drawing still require an active text object. ToUnicode CMaps

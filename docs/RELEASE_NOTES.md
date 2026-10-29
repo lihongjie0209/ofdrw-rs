@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- The native library includes 116 pinned horizontal Adobe CMap resources for
+  named CJK encodings. Named maps validate CIDFont collection metadata and
+  retain independent Unicode/CID lookups. A bounded cache shares immutable
+  mappings across text runs while preserving copy-on-write inheritance and
+  parsing limits. Comment handling accepts official Adobe source headers and
+  comments between section operands; nested operands are bounded. Tests parse
+  every bundled resource and verify Chinese, Japanese, Korean, malformed
+  metadata, package/render round trips and three language bindings.
+
 - Type0 text accepts embedded horizontal Encoding CMaps with mixed one- to
   four-byte source codes, CID character/range mappings, notdef fallbacks and
   bounded UseCMap inheritance. Unicode lookup uses the source code while

@@ -15,6 +15,10 @@ test('decode mixed-length Type0 source codes independently of CID widths', () =>
   for (const [name, text] of [
     ['type0-mixed-cmap.pdf', ['中文']],
     ['type0-four-byte-cmap.pdf', ['中文AB', '中']],
+    ['type0-gbk-cmap.pdf', ['中文']],
+    ['type0-cns-cmap.pdf', ['中文']],
+    ['type0-jis-cmap.pdf', ['日本']],
+    ['type0-ks-cmap.pdf', ['한국']],
   ]) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
     try {

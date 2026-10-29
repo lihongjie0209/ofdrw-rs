@@ -6870,6 +6870,31 @@ fn import_type0_text(
     {
         return Err(OfdError::Invalid("unsupported PDF CID font subtype".into()));
     }
+    if let Some(ordering) = encoding.ordering() {
+        let info = descendant.get(b"CIDSystemInfo").map_err(|_| {
+            OfdError::Invalid("PDF named CMap descendant has no CIDSystemInfo".into())
+        })?;
+        let info = pdf_resolved_value(Some(page.pdf), info, "CIDSystemInfo")?
+            .as_dict()
+            .map_err(|_| OfdError::Invalid("PDF CIDSystemInfo is not a dictionary".into()))?;
+        for (key, expected) in [
+            (b"Registry".as_slice(), b"Adobe".as_slice()),
+            (b"Ordering".as_slice(), ordering.as_bytes()),
+        ] {
+            let value = info
+                .get(key)
+                .map_err(|_| OfdError::Invalid("PDF CIDSystemInfo is incomplete".into()))?;
+            if pdf_resolved_value(Some(page.pdf), value, "CIDSystemInfo field")?
+                .as_str()
+                .ok()
+                != Some(expected)
+            {
+                return Err(OfdError::Invalid(
+                    "PDF named CMap and CIDFont character collections differ".into(),
+                ));
+            }
+        }
+    }
     let (default_width, widths) = pdf_cid_widths(page.pdf, descendant)?;
 
     let mut text = String::new();
@@ -25336,6 +25361,103 @@ mod tests {
             mixed.page_text_objects(0).unwrap()
         );
         assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn named_cjk_cmaps_use_source_unicode_and_collection_specific_cid_widths() {
+        for (bytes, text) in [
+            (
+                include_bytes!("../tests/fixtures/type0-gbk-cmap.pdf").as_slice(),
+                "中文",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-cns-cmap.pdf").as_slice(),
+                "中文",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-jis-cmap.pdf").as_slice(),
+                "日本",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-ks-cmap.pdf").as_slice(),
+                "한국",
+            ),
+        ] {
+            let document = OfdDocument::from_pdf_bytes(bytes).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), [text]);
+            let objects = document.page_text_objects(0).unwrap();
+            let advance: f64 = objects[0].codes[0]
+                .delta_x
+                .as_deref()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((advance - 6.0 * MM_PER_PT).abs() < 1e-6);
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+            assert_eq!(
+                reopened.page_png(0, 72.0).unwrap(),
+                document.page_png(0, 72.0).unwrap()
+            );
+            assert!(reopened.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn named_cmaps_require_compatible_indirect_cidfont_collection_metadata() {
+        let source = include_bytes!("../tests/fixtures/type0-gbk-cmap.pdf");
+        let mut pdf = PdfDocument::load_mem(source).unwrap();
+        let registry = pdf.add_object(Object::string_literal("Adobe"));
+        let ordering = pdf.add_object(Object::string_literal("GB1"));
+        let info = pdf.add_object(
+            dictionary! {"Registry" => registry, "Ordering" => ordering, "Supplement" => 6},
+        );
+        pdf.get_object_mut((7, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("CIDSystemInfo", Object::Reference(info));
+        let name = pdf.add_object(Object::Name(b"GBK-EUC-H".to_vec()));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", Object::Reference(name));
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["中文"]
+        );
+        for invalid in [
+            Object::string_literal("Japan1"),
+            Object::Name(b"GB1".to_vec()),
+            Object::Reference((999, 0)),
+        ] {
+            let mut bad = pdf.clone();
+            bad.get_object_mut(info)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Ordering", invalid);
+            let mut bytes = Vec::new();
+            bad.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+        for invalid in [Object::Integer(1), Object::Reference((999, 0))] {
+            let mut bad = pdf.clone();
+            bad.get_object_mut((7, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("CIDSystemInfo", invalid);
+            let mut bytes = Vec::new();
+            bad.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
     }
 
     #[test]

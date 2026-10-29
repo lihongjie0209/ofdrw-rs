@@ -637,6 +637,8 @@ def test_mixed_password_and_certificate_recipients(tmp_path):
     "type0-identity-tounicode.pdf",
     "type0-indirect-widths.pdf",
     "type0-mixed-cmap.pdf",
+    "type0-gbk-cmap.pdf",
+    "type0-cns-cmap.pdf",
     "encoding-differences.pdf",
     "custom-type1-differences.pdf",
     "simple-indirect-widths.pdf",
