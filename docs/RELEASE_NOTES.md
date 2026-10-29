@@ -1,5 +1,15 @@
 Unreleased source changes after v0.1.0:
 
+- Embedded Type1 and CIDFontType0 CFF programs import from raw FontFile3
+  streams or OpenType CFF tables. CID charset selectors stay independent of
+  Unicode and TrueType CIDToGIDMap. Raw programs are retained unchanged in
+  deterministic sfnt wrappers for mapped outline rendering. Internal CFF
+  encodings also recover simple-font text when PDF Encoding/ToUnicode are
+  absent. Tests cover seven independent Ghostscript rasters, CID/GID differences,
+  ligatures, vertical text, bounded parsing, checksums and language bindings.
+  Nonuniform/translated/per-FD font matrices and other listed CFF limitations
+  remain unsupported.
+
 - All 189 current Adobe CMap resources are bundled, including 73 vertical
   maps. Tests parse every resource offline, verify original source digests
   and licenses, check vertical punctuation CID substitutions through embedded

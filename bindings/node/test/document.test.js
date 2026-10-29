@@ -14,6 +14,13 @@ const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/t
 test('import Unicode sequences with original embedded PDF glyphs', () => {
   for (const [name, text, glyphs] of [
     ['type0-ligature-glyph.pdf', ['fiA', 'fi'], [3315, 36]],
+    ['type1-opentype-cff.pdf', ['fiA', 'fi'], [2, 1]],
+    ['type1-raw-cff.pdf', ['fiA', 'fi'], [2, 1]],
+    ['type0-opentype-cid-cff.pdf', ['fiA', 'fi'], [2, 1]],
+    ['type0-raw-cid-cff.pdf', ['fiA', 'fi'], [2, 1]],
+    ['type0-name-cff.pdf', ['fiA', 'fi'], [2, 1]],
+    ['type0-vertical-cid-cff.pdf', ['fiA', 'fi'], [2, 1]],
+    ['type1-internal-cff.pdf', ['ﬁA', 'ﬁ'], [2, 1]],
     ['truetype-glyph-name-sequence.pdf', ['fiA', 'fi'], [3315, 36]],
     ['type0-vertical-default.pdf', ['fiA', 'fi'], [3315, 36]],
     ['type0-vertical-metrics.pdf', ['fiA', 'fi'], [3315, 36]],

@@ -1,5 +1,6 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
+mod cff_font;
 mod cid_encoding;
 mod cid_unicode;
 mod font_style;
@@ -6464,7 +6465,8 @@ fn embedded_pdf_font(
 ) -> Result<Option<EmbeddedPdfFont>, OfdError> {
     let true_type =
         font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"TrueType".as_slice());
-    if cids.is_none() && (!true_type || simple_codes.is_none()) {
+    let type1 = font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Type1".as_slice());
+    if cids.is_none() && (!(true_type || type1) || simple_codes.is_none()) {
         return Ok(None);
     }
     let descendant = if font.get(b"Subtype").and_then(Object::as_name).ok()
@@ -6490,7 +6492,11 @@ fn embedded_pdf_font(
     } else {
         font
     };
+    let cid_cff = descendant.get(b"Subtype").and_then(Object::as_name).ok()
+        == Some(b"CIDFontType0".as_slice());
     if !true_type
+        && !type1
+        && !cid_cff
         && descendant.get(b"Subtype").and_then(Object::as_name).ok()
             != Some(b"CIDFontType2".as_slice())
     {
@@ -6518,22 +6524,38 @@ fn embedded_pdf_font(
         .1
         .as_stream()
         .map_err(|_| OfdError::Invalid("PDF embedded font is not a stream".into()))?;
-    if is_opentype
-        && stream.dict.get(b"Subtype").and_then(Object::as_name).ok()
-            != Some(b"OpenType".as_slice())
+    let subtype = stream.dict.get(b"Subtype").and_then(Object::as_name).ok();
+    let raw_cff = is_opentype
+        && ((type1 && subtype == Some(b"Type1C".as_slice()))
+            || (cid_cff && matches!(subtype, Some(b"CIDFontType0C" | b"Type1C"))));
+    if (!is_opentype && (type1 || cid_cff))
+        || (is_opentype && !raw_cff && subtype != Some(b"OpenType".as_slice()))
     {
         return Ok(None);
     }
-    let Ok(bytes) = stream.get_plain_content() else {
-        return Ok(None);
-    };
+    let mut bytes = pdf_byte_stream_data(stream, Some(pdf), "embedded font")?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
         return Err(OfdError::Limit("PDF embedded font is too large".into()));
+    }
+    if raw_cff {
+        bytes = cff_font::wrap(&bytes)?;
     }
     let Ok(face) = ttf_parser::Face::parse(&bytes, 0) else {
         return Ok(None);
     };
-    let cid_to_gid = if let Some(value) = descendant.get(b"CIDToGIDMap").ok().filter(|_| !true_type)
+    let cff_data = face.raw_face().table(ttf_parser::Tag::from_bytes(b"CFF "));
+    if type1 || cid_cff {
+        let Some(data) = cff_data else {
+            return Ok(None);
+        };
+        cff_font::validate_matrix(data, face.units_per_em())?;
+    } else if face.tables().glyf.is_none() {
+        return Ok(None);
+    }
+    let cid_to_gid = if let Some(value) = descendant
+        .get(b"CIDToGIDMap")
+        .ok()
+        .filter(|_| !true_type && !cid_cff)
     {
         let (_, value) = pdf
             .dereference(value)
@@ -6560,31 +6582,49 @@ fn embedded_pdf_font(
                 "PDF CIDToGIDMap has an odd byte length".into(),
             ));
         }
-        cids.iter()
-            .map(|cid| {
-                cid_to_gid.as_ref().map_or(*cid, |map| {
-                    map.get(usize::from(*cid) * 2..usize::from(*cid) * 2 + 2)
-                        .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        if cid_cff {
+            cff_font::glyphs(
+                cff_data.ok_or_else(|| OfdError::Invalid("PDF CFF table is missing".into()))?,
+                cids,
+            )?
+        } else {
+            cids.iter()
+                .map(|cid| {
+                    cid_to_gid.as_ref().map_or(*cid, |map| {
+                        map.get(usize::from(*cid) * 2..usize::from(*cid) * 2 + 2)
+                            .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    })
                 })
-            })
-            .collect::<Vec<_>>()
+                .collect::<Vec<_>>()
+        }
     } else {
         let codes = simple_codes.unwrap_or_default();
         if font.get(b"Encoding").is_err() {
-            return Ok(None);
+            if let Some(cff) = face.tables().cff {
+                codes
+                    .iter()
+                    .map(|code| cff.glyph_index(*code).map_or(0, |glyph| glyph.0))
+                    .collect()
+            } else {
+                return Ok(None);
+            }
+        } else {
+            let Ok(encoding) = simple_encoding::SimpleEncoding::parse(pdf, font, false) else {
+                return Ok(None);
+            };
+            let Some(glyphs) = encoding.glyph_ids(&face, codes) else {
+                return Ok(None);
+            };
+            glyphs
         }
-        let Ok(encoding) = simple_encoding::SimpleEncoding::parse(pdf, font, false) else {
-            return Ok(None);
-        };
-        let Some(glyphs) = encoding.glyph_ids(&face, codes) else {
-            return Ok(None);
-        };
-        glyphs
     };
     if glyphs.iter().any(|glyph| *glyph >= face.number_of_glyphs()) {
         return Err(OfdError::Invalid(
             "PDF glyph index exceeds the embedded font".into(),
         ));
+    }
+    if let Some(cff) = face.tables().cff {
+        cff_font::validate_glyphs(cff, &glyphs)?;
     }
     let direct = glyphs.len() == text.chars().count()
         && text
@@ -6613,7 +6653,11 @@ fn embedded_pdf_font(
         if existing.embedded_path.is_some() && output.font_data(index)? == bytes {
             return Ok(Some(EmbeddedPdfFont {
                 id: existing.id.clone(),
-                style: font_style::FontStyle::from_face(&face),
+                style: if raw_cff {
+                    font_style::FontStyle::read(pdf, font)?
+                } else {
+                    font_style::FontStyle::from_face(&face)
+                },
                 glyphs: mapped_glyphs,
                 glyph_bounds,
             }));
@@ -6639,7 +6683,11 @@ fn embedded_pdf_font(
         .unwrap_or_else(|| "PDF embedded font".into());
     Ok(Some(EmbeddedPdfFont {
         id: output.add_embedded_font(&name, &bytes)?.to_string(),
-        style: font_style::FontStyle::from_face(&face),
+        style: if raw_cff {
+            font_style::FontStyle::read(pdf, font)?
+        } else {
+            font_style::FontStyle::from_face(&face)
+        },
         glyphs: mapped_glyphs,
         glyph_bounds,
     }))

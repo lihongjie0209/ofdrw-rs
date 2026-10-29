@@ -1302,8 +1302,9 @@ from the font outlines, regardless of the resource filename extension. Glyph
 mappings use UTF-16 positions across adjacent `TextCode` runs, including a
 mapping that consumes characters in more than one run; overlapping mappings
 and mappings that split a UTF-16 character are rejected. Text remains
-available for extraction. Raw CFF data without an sfnt wrapper still uses the
-text fallback.
+available for extraction. Raw CFF data already present in an OFD package still
+uses the text fallback; the PDF importer now encapsulates supported raw CFF
+programs in an sfnt wrapper so their mapped glyphs use this outline path.
 
 ## PNG 渲染
 
@@ -1673,7 +1674,8 @@ and CodeCount measures the unescaped text in UTF-16 units. This includes
 ligatures, variation selectors and CID fonts without a Unicode sfnt `cmap`.
 Object boundaries include transformed source glyph bounds, retaining negative
 bearings and other outline overhangs instead of clipping them at the baseline.
-Embedded font bytes remain unchanged and repeated runs reuse their resource.
+Existing sfnt font bytes remain unchanged and repeated runs reuse their resource.
+Raw CFF programs retain every original byte inside a generated sfnt CFF table.
 Invalid glyph indices and odd CIDToGIDMap byte lengths return errors.
 Mapped runs require known PDF advances for multiple glyphs and are limited
 to 10,000 glyphs per object; decoded Unicode expansion is bounded to 200,000
@@ -1681,6 +1683,28 @@ UTF-16 units per text-showing run. Without a usable embedded program,
 multi-character mappings remain unsupported rather than losing text or
 guessing glyphs. The mapping follows
 [ISO 32000-1, section 9.10.3](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
+
+Embedded Type1 CFF programs (FontFile3 Type1C/OpenType) and CIDFontType0
+programs (CIDFontType0C/Type1C/OpenType) import through their actual outlines.
+CID-keyed CFF charset formats 0/1/2 map source CIDs to GIDs in one bounded pass;
+name-keyed CFF descendants use CIDs directly as GIDs. CIDToGIDMap belongs to
+CIDFontType2 and does not override these CFF selectors. Missing charset CIDs
+select glyph zero, while duplicate CIDs and malformed ranges return errors.
+Without a PDF Encoding, simple CFF fonts use the embedded encoding and glyph
+names; ToUnicode still takes precedence for text semantics when present.
+Raw CFF is encapsulated in a deterministic sfnt wrapper with the original CFF
+table unchanged. Its generated horizontal metrics are placeholders for outline
+rendering; source PDF widths and deltas continue to determine imported layout,
+and the wrapper supplies no Unicode cmap for creating new shaped text.
+FontMatrix must match uniform sfnt units (16–16,384 units per em), without
+skew or translation; per-FD matrices must be absent or identity. Other matrices,
+font sets, stroked CFF PaintType, SyntheticBase and embedded PostScript remain
+unsupported. DICT operands/operators and INDEX object counts are bounded.
+Tests cover independently rendered Ghostscript references, Unicode ligatures,
+CID/GID differences, vertical text, malformed tables, checksum integrity,
+font-resource reuse, package round trips and Python/Go/Node calls.
+These selectors follow
+[ISO 32000-1, sections 9.7.4.2 and 9.9](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
 Simple-font `Encoding` dictionaries may provide a named `BaseEncoding`
 (`StandardEncoding`, `WinAnsiEncoding`, `MacRomanEncoding` or `MacExpertEncoding`) and a

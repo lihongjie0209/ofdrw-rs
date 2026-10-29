@@ -27,6 +27,11 @@ impl SimpleEncoding {
             .ok()
             .map(|value| pdf_resolved_value(Some(pdf), value, "font Encoding"))
             .transpose()?;
+        if encoding.is_none() {
+            if let Some(encoding) = super::cff_font::builtin_encoding(pdf, font)? {
+                return Ok(encoding);
+            }
+        }
         #[derive(Clone, Copy)]
         enum Base<'a> {
             Named(&'a [u8]),
@@ -148,6 +153,24 @@ impl SimpleEncoding {
             }
         }
         Ok(result)
+    }
+
+    pub(super) fn from_cff(table: ttf_parser::cff::Table<'_>) -> Self {
+        let glyph_names: [Option<Vec<u8>>; 256] = std::array::from_fn(|code| {
+            table
+                .glyph_index(code as u8)
+                .and_then(|glyph| table.glyph_name(glyph))
+                .map(|name| name.as_bytes().to_vec())
+        });
+        Self {
+            characters: std::array::from_fn(|code| {
+                glyph_names[code]
+                    .as_ref()
+                    .and_then(|name| glyph_character(name, false))
+            }),
+            glyph_names,
+            dingbats: false,
+        }
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<String, OfdError> {
