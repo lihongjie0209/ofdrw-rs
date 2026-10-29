@@ -20319,6 +20319,35 @@ impl OfdDocument {
         boundary: [f64; 4],
         child_xml: impl FnOnce(usize, f64, f64) -> String,
     ) -> Result<String, OfdError> {
+        let mut staged = self.clone();
+        let resource = staged.add_composite_graphic_resource(
+            page_index,
+            [boundary[2], boundary[3]],
+            child_xml,
+        )?;
+        let id = staged.add_composite_object(
+            page_index,
+            &resource,
+            boundary,
+            CompositeStyle::default(),
+        )?;
+        *self = staged;
+        Ok(id)
+    }
+
+    // Pattern cells need the same vector resource without a page placement.
+    fn add_composite_graphic_resource(
+        &mut self,
+        page_index: usize,
+        size: [f64; 2],
+        child_xml: impl FnOnce(usize, f64, f64) -> String,
+    ) -> Result<String, OfdError> {
+        let [width, height] = size;
+        if size.iter().any(|value| !value.is_finite() || *value <= 0.) {
+            return Err(OfdError::Invalid(
+                "composite resource dimensions are invalid".into(),
+            ));
+        }
         let pages = self.pages()?;
         let page = pages.get(page_index).ok_or(OfdError::PageIndex {
             index: page_index,
@@ -20377,7 +20406,6 @@ impl OfdDocument {
             element_content_range(updated_max, &updated_document)?,
             &child_id.to_string(),
         );
-        let [_, _, width, height] = boundary;
         let child_xml = child_xml(child_id, width, height);
         let namespace = parsed_document
             .root_element()
@@ -20388,19 +20416,12 @@ impl OfdDocument {
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Res xmlns:ofd=\"{}\"><ofd:CompositeGraphicUnits><ofd:CompositeGraphicUnit ID=\"{unit_id}\" Width=\"{width}\" Height=\"{height}\"><ofd:Content><ofd:Layer ID=\"{layer_id}\">{child_xml}</ofd:Layer></ofd:Content></ofd:CompositeGraphicUnit></ofd:CompositeGraphicUnits></ofd:Res>",
             escape_xml(namespace)
         );
-        let mut staged = self.clone();
-        staged.apply_entries(vec![
+        parse_xml(&resource_path, resource_xml.as_bytes())?;
+        self.apply_entries(vec![
             (resource_path, resource_xml.into_bytes()),
             (root, updated_document.into_bytes()),
         ])?;
-        let id = staged.add_composite_object(
-            page_index,
-            &unit_id.to_string(),
-            boundary,
-            CompositeStyle::default(),
-        )?;
-        *self = staged;
-        Ok(id)
+        Ok(unit_id.to_string())
     }
 
     /// Add a PNG, JPEG, GIF, BMP, TIFF, JBIG2, or JPEG2000 image object to a page.
@@ -37172,6 +37193,80 @@ fn attachments_xml(attachments: &[AttachmentInfo]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn independent_composite_resource_can_be_shared_by_a_pattern_and_page_object() {
+        let mut document = OfdDocument::new();
+        document.add_blank_page(20., 20.).unwrap();
+        let resource = document.add_composite_graphic_resource(0,[4.,4.],|id,width,height| format!(
+            "<ofd:PathObject ID=\"{id}\" Boundary=\"0 0 {width} {height}\" Fill=\"true\" Stroke=\"false\"><ofd:FillColor Value=\"255 0 0\"/><ofd:AbbreviatedData>M 0 0 L 4 0 L 4 4 L 0 4 C</ofd:AbbreviatedData></ofd:PathObject>"
+        )).unwrap();
+        assert!(document.page_object_paints(0).unwrap().is_empty());
+        let target = document
+            .add_path_object(
+                0,
+                "M 0 0 L 20 0 L 20 20 L 0 20 C",
+                [0., 0., 20., 20.],
+                PathStyle {
+                    fill: true,
+                    stroke: false,
+                    ..PathStyle::default()
+                },
+            )
+            .unwrap();
+        document
+            .set_page_object_pattern_fill(
+                0,
+                &target,
+                &PatternStyle {
+                    width: 4.,
+                    height: 4.,
+                    x_step: Some(8.),
+                    y_step: Some(8.),
+                    reflect: PatternReflectMethod::Normal,
+                    relative_to: PatternRelativeTo::Page,
+                    ctm: None,
+                    alpha: None,
+                    thumbnail: None,
+                    cells: vec![PatternCell::Composite {
+                        resource_id: resource.clone(),
+                        boundary: [0., 0., 4., 4.],
+                    }],
+                },
+            )
+            .unwrap();
+        let image = image::load_from_memory(&document.page_png(0, 25.4).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(image.get_pixel(2, 2).0, [255, 0, 0]);
+        assert_eq!(image.get_pixel(6, 6).0, [255; 3]);
+        document
+            .add_composite_object(0, &resource, [5., 5., 4., 4.], CompositeStyle::default())
+            .unwrap();
+        let png = document.page_png(0, 25.4).unwrap();
+        let image = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(image.get_pixel(6, 6).0, [255, 0, 0]);
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_png(0, 25.4).unwrap(), png);
+    }
+
+    #[test]
+    fn invalid_independent_composite_resources_leave_the_package_unchanged() {
+        let mut document = OfdDocument::new();
+        document.add_blank_page(20., 20.).unwrap();
+        let before = document.to_bytes().unwrap();
+        for size in [[0., 4.], [4., -1.], [f64::NAN, 4.]] {
+            assert!(document
+                .add_composite_graphic_resource(0, size, |_, _, _| String::new())
+                .is_err());
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+        assert!(document
+            .add_composite_graphic_resource(0, [4., 4.], |_, _, _| "<ofd:PathObject>".into())
+            .is_err());
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
     #[test]
     fn affine_glyph_coordinates_detect_overflow_after_finite_matrix_scaling() {
         let mut outline = super::SvgGlyphOutline {
