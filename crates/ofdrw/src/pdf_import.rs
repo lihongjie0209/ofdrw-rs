@@ -6354,6 +6354,11 @@ fn import_text(
                                 OfdError::Invalid("PDF font has no usable text encoding".into())
                             })?
                             .decode(&[*byte])?;
+                        unicode_units =
+                            unicode_units.saturating_add(decoded.encode_utf16().count());
+                        if unicode_units > 200_000 {
+                            return Err(OfdError::Limit("PDF decoded text is too long".into()));
+                        }
                         if decoded.contains('\u{fffd}') {
                             return Err(OfdError::Invalid(
                                 "PDF text cannot be decoded losslessly".into(),

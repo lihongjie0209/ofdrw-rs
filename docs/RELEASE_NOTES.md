@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- Simple-font Differences without ToUnicode decode Adobe glyph-name sequences,
+  including underscore components, multiple BMP groups and AGL combining
+  sequences. Embedded source glyphs and advances remain intact; decoding
+  shares the 200,000 UTF-16-unit run limit. Tests cover Adobe examples,
+  original ligature rendering, package round trips and Python integration.
+
 - Embedded TrueType/OpenType text keeps source glyph IDs independently of
   ToUnicode text, using OFD CGTransform when the mappings differ. Ligatures,
   multi-character aliases and registered Unicode variation sequences retain

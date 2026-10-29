@@ -36,6 +36,44 @@ def without_unicode_cmap(font):
     return bytes(font)
 
 
+def with_sequence_glyph_name(font):
+    """Rename fi in post format 2 and rebuild sfnt offsets and checksums."""
+    count = int.from_bytes(font[4:6], "big")
+    tables = []
+    for index in range(count):
+        tag, _, offset, length = struct.unpack(">4sIII", font[12 + index * 16:28 + index * 16])
+        data = bytearray(font[offset:offset + length])
+        if tag == b"post":
+            assert data[:4] == bytes([0, 2, 0, 0])
+            start = 34 + 2 * int.from_bytes(data[32:34], "big")
+            names = []
+            while start < len(data):
+                size = data[start]
+                name = bytes(data[start + 1:start + 1 + size])
+                names.append(name)
+                start += size + 1
+            data[34 + 2 * 3315:36 + 2 * 3315] = (258 + len(names)).to_bytes(2, "big")
+            names.append(b"uni00660069")
+            start = 34 + 2 * int.from_bytes(data[32:34], "big")
+            data = data[:start] + b"".join(bytes([len(name)]) + name for name in names)
+        if tag == b"head":
+            data[8:12] = bytes(4)
+        tables.append((tag, data))
+    result = bytearray(font[:12] + bytes(16 * count))
+    head_offset = None
+    for index, (tag, data) in enumerate(tables):
+        offset = len(result)
+        padded = data + bytes((-len(data)) % 4)
+        checksum = sum(struct.unpack(f">{len(padded) // 4}I", padded)) & 0xffffffff
+        result[12 + index * 16:28 + index * 16] = struct.pack(">4sIII", tag, checksum, offset, len(data))
+        result.extend(padded)
+        if tag == b"head":
+            head_offset = offset
+    checksum = sum(struct.unpack(f">{len(result) // 4}I", result)) & 0xffffffff
+    result[head_offset + 8:head_offset + 12] = ((0xb1b0afba - checksum) & 0xffffffff).to_bytes(4, "big")
+    return bytes(result)
+
+
 def objects(font, simple=False, variation=False):
     first = b"41" if simple else (b"00e6" if variation else b"0001")
     second = b"42" if simple else b"0002"
@@ -81,6 +119,9 @@ if __name__ == "__main__":
                                     ("type0-variation-glyph.pdf", False, True)]:
         (fixtures / name).write_bytes(pdf_bytes(objects(font, simple, variation)))
     (fixtures / "type0-no-unicode-cmap-glyph.pdf").write_bytes(pdf_bytes(objects(without_unicode_cmap(font))))
+    sequence = objects(with_sequence_glyph_name(font), simple=True)
+    sequence[4] = sequence[4].replace(b"/ToUnicode 6 0 R ", b"").replace(b"/fi /A", b"/uni00660069 /A")
+    (fixtures / "truetype-glyph-name-sequence.pdf").write_bytes(pdf_bytes(sequence))
     if args.references:
         overhang = objects(font)
         overhang[9] = stream(b"", bytes([0, 0, 0, 77, 0, 36]))

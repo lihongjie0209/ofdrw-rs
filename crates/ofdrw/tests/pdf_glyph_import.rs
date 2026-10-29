@@ -203,3 +203,54 @@ fn mapped_glyph_overhangs_expand_the_boundary_and_match_ghostscript() {
         include_bytes!("fixtures/pdf-overhang-reference.png"),
     );
 }
+
+#[test]
+fn adobe_glyph_name_sequences_without_tounicode_keep_source_ligatures() {
+    let document =
+        OfdDocument::from_pdf_bytes(include_bytes!("fixtures/truetype-glyph-name-sequence.pdf"))
+            .unwrap();
+    let reference = OfdDocument::from_pdf_bytes(TYPE0).unwrap();
+    assert_eq!(document.page_text(0).unwrap(), ["fiA", "fi"]);
+    let objects = document.page_text_objects(0).unwrap();
+    assert_eq!(objects[0].cg_transforms[0].glyphs, [3315, 36]);
+    assert_eq!(objects[0].cg_transforms[0].code_count, 3);
+    assert_eq!(
+        document.page_png(0, 72.0).unwrap(),
+        reference.page_png(0, 72.0).unwrap()
+    );
+    let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+    assert!(reopened.validate_references().unwrap().is_empty());
+}
+
+#[test]
+fn glyph_name_expansion_is_bounded_before_font_fallback() {
+    let mut pdf =
+        lopdf::Document::load_mem(include_bytes!("fixtures/truetype-glyph-name-sequence.pdf"))
+            .unwrap();
+    let font = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+    font.get_mut(b"Encoding")
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "Differences",
+            lopdf::Object::Array(vec![
+                65.into(),
+                lopdf::Object::Name(b"uni006600690041".to_vec()),
+            ]),
+        );
+    let mut content = b"BT /F1 24 Tf 10 60 Td (".to_vec();
+    content.extend(std::iter::repeat_n(b'A', 70_000));
+    content.extend_from_slice(b") Tj ET");
+    pdf.get_object_mut((4, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(content);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    assert!(
+        matches!(OfdDocument::from_pdf_bytes(&bytes), Err(ofdrw::OfdError::Limit(message)) if message.contains("decoded text"))
+    );
+}

@@ -1688,13 +1688,15 @@ Simple-font `Encoding` dictionaries may provide a named `BaseEncoding`
 dictionary omits its base; custom Type1 and TrueType fonts require an explicit
 encoding/base or a ToUnicode map. Unavailable built-in font encodings are not
 inferred from the font name. Adobe glyph-list names, variant suffixes, `uniXXXX` and
-`uXXXX`–`uXXXXXX` names recover a single Unicode scalar per source code,
-including supplementary-plane characters. Source codes still select widths
+`uXXXX`–`uXXXXXX` names recover Unicode text, including supplementary-plane
+characters. Underscore-separated names, multi-group `uni` names and Adobe
+glyph-list sequences retain multiple characters per source glyph when an
+embedded font supplies the exact glyph and source advances. Source codes still select widths
 and word spacing. ToUnicode retains precedence when present.
 
 Encoding dictionaries, base names, difference arrays and their members may
-be indirect. Unknown or multi-character mappings fail only if used by the
-text. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
+be indirect. Unmapped names fail only if used by the text; sequence mappings
+without a usable embedded font fail rather than changing the glyph layout. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
 glyph name. Embedded TrueType reuse resolves overridden glyph names in the
 actual program; an unavailable source glyph name retains the font fallback.
 ToUnicode aliases change text semantics without replacing source outlines.

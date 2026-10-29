@@ -8,6 +8,7 @@ use super::{
 
 pub(super) struct SimpleEncoding {
     characters: [Option<char>; 256],
+    dingbats: bool,
     glyph_names: [Option<Vec<u8>>; 256],
 }
 
@@ -77,6 +78,7 @@ impl SimpleEncoding {
                     .encoding_names()
                     .ok_or_else(|| invalid("built-in encoding is unavailable"))?;
                 Self {
+                    dingbats,
                     characters: std::array::from_fn(|index| {
                         names[index].and_then(|name| glyph_character(name.as_bytes(), dingbats))
                     }),
@@ -105,6 +107,7 @@ impl SimpleEncoding {
                     return Err(invalid("BaseEncoding is not single-byte"));
                 };
                 Self {
+                    dingbats,
                     characters: std::array::from_fn(|index| {
                         table[index].and_then(|value| char::from_u32(u32::from(value)))
                     }),
@@ -148,13 +151,25 @@ impl SimpleEncoding {
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<String, OfdError> {
-        bytes
-            .iter()
-            .map(|code| {
-                self.characters[usize::from(*code)]
-                    .ok_or_else(|| invalid("character has no single Unicode mapping"))
-            })
-            .collect()
+        let mut text = String::new();
+        for code in bytes {
+            let index = usize::from(*code);
+            if let Some(name) = &self.glyph_names[index] {
+                let decoded = self.characters[index]
+                    .map(|ch| ch.to_string())
+                    .unwrap_or_else(|| glyph_sequence(name, self.dingbats));
+                if decoded.is_empty() {
+                    return Err(invalid("character has no Unicode mapping"));
+                }
+                text.push_str(&decoded);
+            } else {
+                text.push(
+                    self.characters[index]
+                        .ok_or_else(|| invalid("character has no Unicode mapping"))?,
+                );
+            }
+        }
+        Ok(text)
     }
 
     pub fn width(&self, font: StandardFont, code: u8) -> f64 {
@@ -182,45 +197,64 @@ impl SimpleEncoding {
 }
 
 fn glyph_character(name: &[u8], dingbats: bool) -> Option<char> {
-    let name = std::str::from_utf8(name).ok()?;
-    let base = name.split('.').next()?;
-    let mut result = None;
-    for component in base.split('_') {
-        if let Some(character) = dingbats
+    let sequence = glyph_sequence(name, dingbats);
+    let mut chars = sequence.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
+}
+
+// Adobe Glyph List specification §2: suffix removal, component expansion,
+// then concatenation. A malformed component contributes an empty sequence.
+fn glyph_sequence(name: &[u8], dingbats: bool) -> String {
+    let Ok(name) = std::str::from_utf8(name) else {
+        return String::new();
+    };
+    let mut result = String::new();
+    for component in name.split('.').next().unwrap_or_default().split('_') {
+        if let Some(ch) = dingbats
             .then(|| standard_fonts::dingbat_character(component))
             .flatten()
         {
-            if result.replace(character).is_some() {
-                return None;
-            }
+            result.push(ch);
             continue;
         }
         let uppercase_hex = |digits: &str| {
-            digits
-                .bytes()
-                .all(|value| value.is_ascii_digit() || (b'A'..=b'F').contains(&value))
+            !digits.is_empty()
+                && digits
+                    .bytes()
+                    .all(|value| value.is_ascii_digit() || (b'A'..=b'F').contains(&value))
         };
-        if let Some(digits) = component.strip_prefix("uni").filter(|digits| {
-            digits
-                .bytes()
-                .next()
-                .is_some_and(|value| value.is_ascii_hexdigit())
-        }) {
-            if digits.len() != 4 || !uppercase_hex(digits) {
-                continue;
+        if let Some(digits) = component
+            .strip_prefix("uni")
+            .filter(|digits| uppercase_hex(digits))
+        {
+            if digits.len() % 4 == 0 {
+                let values: Option<String> = digits
+                    .as_bytes()
+                    .chunks_exact(4)
+                    .map(|chunk| {
+                        let digits = std::str::from_utf8(chunk).ok()?;
+                        char::from_u32(u32::from_str_radix(digits, 16).ok()?)
+                    })
+                    .collect();
+                if let Some(values) = values {
+                    result.push_str(&values);
+                }
             }
-        } else if let Some(digits) = component.strip_prefix('u').filter(|digits| {
-            !digits.is_empty() && digits.bytes().all(|value| value.is_ascii_hexdigit())
-        }) {
-            if !(4..=6).contains(&digits.len()) || !uppercase_hex(digits) {
-                continue;
+        } else if let Some(digits) = component
+            .strip_prefix('u')
+            .filter(|digits| uppercase_hex(digits))
+        {
+            if (4..=6).contains(&digits.len()) {
+                if let Some(ch) = u32::from_str_radix(digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                {
+                    result.push(ch);
+                }
             }
-        }
-        for ch in read_fonts::ps::agl::name_to_chars(component) {
-            // The importer's positioned text path requires one Unicode scalar per code.
-            if result.replace(ch).is_some() {
-                return None;
-            }
+        } else {
+            result.extend(read_fonts::ps::agl::name_to_chars(component));
         }
     }
     result
@@ -280,6 +314,32 @@ mod tests {
             assert_eq!(glyph_character(name.as_bytes(), false), None, "{name}");
         }
         assert_eq!(glyph_character(&[255], false), None);
+    }
+
+    #[test]
+    fn adobe_sequences_expand_components_and_discard_invalid_components() {
+        for (name, expected) in [
+            ("A_B", "AB"),
+            ("uni20AC0308", "€\u{0308}"),
+            ("Lcommaaccent_uni20AC0308_u1040C.alternate", "Ļ€\u{0308}𐐌"),
+            ("uniD801DC0C_A", "A"),
+            ("unknown_f_i", "fi"),
+            ("dalethatafpatah", "דֲ"),
+        ] {
+            assert_eq!(glyph_sequence(name.as_bytes(), false), expected, "{name}");
+        }
+        let pdf = PdfDocument::new();
+        let definition = font(vec![65.into(), Object::Name(b"uni00660069".to_vec())]);
+        let encoding = SimpleEncoding::parse(&pdf, &definition, false).unwrap();
+        assert_eq!(encoding.decode(b"ABA").unwrap(), "fiBfi");
+        let definition = dictionary! {
+            "BaseFont" => Object::Name(b"ZapfDingbats".to_vec()),
+            "Encoding" => dictionary! {
+                "Differences" => Object::Array(vec![65.into(), Object::Name(b"a1_a2".to_vec())]),
+            },
+        };
+        let encoding = SimpleEncoding::parse(&pdf, &definition, true).unwrap();
+        assert_eq!(encoding.decode(b"A").unwrap(), "✁✂");
     }
 
     #[test]
@@ -423,7 +483,7 @@ mod tests {
         let encoding = SimpleEncoding::parse(&pdf, &definition, true).unwrap();
         assert_eq!(encoding.decode(b"AB").unwrap(), "AB");
         assert!(encoding.decode(&[1]).is_err());
-        assert!(encoding.decode(&[2]).is_err());
+        assert_eq!(encoding.decode(&[2]).unwrap(), "AB");
     }
 
     #[test]
