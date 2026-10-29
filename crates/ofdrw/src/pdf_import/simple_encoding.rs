@@ -36,6 +36,7 @@ impl SimpleEncoding {
         enum Base<'a> {
             Named(&'a [u8]),
             Builtin(StandardFont),
+            Embedded,
         }
         let builtin = standard_builtin
             .then(|| {
@@ -50,6 +51,7 @@ impl SimpleEncoding {
         let default = builtin
             .filter(|font| font.encoding_names().is_some())
             .map_or(Base::Named(b"StandardEncoding"), Base::Builtin);
+        let mut embedded = None;
         let (base, differences) = match encoding {
             Some(Object::Name(name)) => (Base::Named(name.as_slice()), None),
             Some(Object::Dictionary(dictionary)) => {
@@ -68,8 +70,16 @@ impl SimpleEncoding {
                             .as_name()
                             .map_err(|_| invalid("BaseEncoding is not a name"))?,
                     ),
-                    Err(_) if standard_builtin => default,
-                    Err(_) => return Err(invalid("requires an explicit BaseEncoding")),
+                    Err(_) => {
+                        embedded = super::cff_font::builtin_encoding(pdf, font)?;
+                        if embedded.is_some() {
+                            Base::Embedded
+                        } else if standard_builtin {
+                            default
+                        } else {
+                            return Err(invalid("requires an explicit BaseEncoding"));
+                        }
+                    }
                 };
                 (base, dictionary.get(b"Differences").ok())
             }
@@ -78,6 +88,9 @@ impl SimpleEncoding {
             _ => return Err(invalid("is not a name or dictionary")),
         };
         let mut result = match base {
+            Base::Embedded => {
+                embedded.ok_or_else(|| invalid("embedded encoding is unavailable"))?
+            }
             Base::Builtin(font) => {
                 let names = font
                     .encoding_names()
@@ -144,7 +157,7 @@ impl SimpleEncoding {
                                 "PDF Encoding glyph name is too long".into(),
                             ));
                         }
-                        result.characters[code] = glyph_character(name, dingbats);
+                        result.characters[code] = glyph_character(name, result.dingbats);
                         result.glyph_names[code] = Some(name.clone());
                         next = Some(code + 1);
                     }
@@ -155,22 +168,33 @@ impl SimpleEncoding {
         Ok(result)
     }
 
-    pub(super) fn from_cff(table: ttf_parser::cff::Table<'_>) -> Self {
-        let glyph_names: [Option<Vec<u8>>; 256] = std::array::from_fn(|code| {
-            table
+    pub(super) fn from_cff(
+        table: ttf_parser::cff::Table<'_>,
+        dingbats: bool,
+    ) -> Result<Self, OfdError> {
+        let mut glyph_names: [Option<Vec<u8>>; 256] = std::array::from_fn(|_| None);
+        for (code, name) in glyph_names.iter_mut().enumerate() {
+            if let Some(value) = table
                 .glyph_index(code as u8)
                 .and_then(|glyph| table.glyph_name(glyph))
-                .map(|name| name.as_bytes().to_vec())
-        });
-        Self {
+            {
+                if value.len() > 1024 {
+                    return Err(OfdError::Limit(
+                        "PDF Encoding glyph name is too long".into(),
+                    ));
+                }
+                *name = Some(value.as_bytes().to_vec());
+            }
+        }
+        Ok(Self {
             characters: std::array::from_fn(|code| {
                 glyph_names[code]
                     .as_ref()
-                    .and_then(|name| glyph_character(name, false))
+                    .and_then(|name| glyph_character(name, dingbats))
             }),
             glyph_names,
-            dingbats: false,
-        }
+            dingbats,
+        })
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<String, OfdError> {
@@ -363,6 +387,132 @@ mod tests {
         };
         let encoding = SimpleEncoding::parse(&pdf, &definition, true).unwrap();
         assert_eq!(encoding.decode(b"A").unwrap(), "✁✂");
+    }
+
+    #[test]
+    fn cff_differences_inherit_embedded_base_and_explicit_base_takes_precedence() {
+        let mut pdf = PdfDocument::new();
+        let data = include_bytes!("../../tests/fixtures/test-name.cff");
+        let program = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"Subtype" => Object::Name(b"Type1C".to_vec())},
+            data.to_vec(),
+        ));
+        let descriptor = pdf.add_object(dictionary! {"FontFile3" => program});
+        let differences =
+            pdf.add_object(Object::Array(vec![65.into(), Object::Name(b"fi".to_vec())]));
+        let encoding = pdf.add_object(dictionary! {"Differences" => differences});
+        let mut definition = dictionary! {
+            "Subtype" => Object::Name(b"Type1".to_vec()),
+            "BaseFont" => Object::Name(b"OFDTestCFF".to_vec()),
+            "FontDescriptor" => descriptor,
+            "Encoding" => encoding,
+        };
+        let parsed = SimpleEncoding::parse(&pdf, &definition, false).unwrap();
+        assert_eq!(parsed.decode(&[65, 174]).unwrap(), "ﬁﬁ");
+        let wrapped = super::super::cff_font::wrap(data).unwrap();
+        let face = ttf_parser::Face::parse(&wrapped, 0).unwrap();
+        assert_eq!(parsed.glyph_ids(&face, &[65, 174]).unwrap(), [2, 2]);
+        definition.set("Encoding", dictionary! {"BaseEncoding" => Object::Name(b"WinAnsiEncoding".to_vec()), "Differences" => differences});
+        assert_eq!(
+            SimpleEncoding::parse(&pdf, &definition, false)
+                .unwrap()
+                .decode(&[65, 174])
+                .unwrap(),
+            "ﬁ®"
+        );
+        definition.set("Encoding", dictionary! {});
+        assert_eq!(
+            SimpleEncoding::parse(&pdf, &definition, false)
+                .unwrap()
+                .decode(&[65, 174])
+                .unwrap(),
+            "Aﬁ"
+        );
+        definition.set(
+            "Encoding",
+            dictionary! {"Differences" => vec![Object::Name(b"fi".to_vec())]},
+        );
+        assert!(SimpleEncoding::parse(&pdf, &definition, false).is_err());
+        definition.set(
+            "Encoding",
+            dictionary! {"Type" => Object::Name(b"WrongType".to_vec())},
+        );
+        assert!(SimpleEncoding::parse(&pdf, &definition, false).is_err());
+        definition.set("Encoding", encoding);
+        let stream = pdf
+            .get_object_mut(program)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream
+            .dict
+            .set("Subtype", Object::Name(b"OpenType".to_vec()));
+        stream.set_plain_content(include_bytes!("../../tests/fixtures/test-name-cff.otf").to_vec());
+        assert_eq!(
+            SimpleEncoding::parse(&pdf, &definition, false)
+                .unwrap()
+                .decode(&[65, 174])
+                .unwrap(),
+            "ﬁﬁ"
+        );
+        pdf.get_object_mut(descriptor)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"FontFile3");
+        assert!(SimpleEncoding::parse(&pdf, &definition, false).is_err());
+    }
+
+    #[test]
+    fn embedded_dingbats_encoding_uses_native_codes_and_differences() {
+        let mut pdf = PdfDocument::new();
+        let data = include_bytes!("../../tests/fixtures/test-dingbats.cff");
+        let program = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"Subtype" => Object::Name(b"Type1C".to_vec())},
+            data.to_vec(),
+        ));
+        let descriptor = pdf.add_object(dictionary! {"FontFile3" => program});
+        let mut definition = dictionary! {
+            "Subtype" => Object::Name(b"Type1".to_vec()),
+            "BaseFont" => Object::Name(b"ABCDEF+ZapfDingbats".to_vec()),
+            "FontDescriptor" => descriptor,
+            "Encoding" => dictionary! {},
+        };
+        assert_eq!(
+            SimpleEncoding::parse(&pdf, &definition, true)
+                .unwrap()
+                .decode(&[65, 174])
+                .unwrap(),
+            "✁✂"
+        );
+        definition.set(
+            "Encoding",
+            dictionary! {"Differences" => vec![65.into(), Object::Name(b"a2".to_vec())]},
+        );
+        for standard in [false, true] {
+            let encoding = SimpleEncoding::parse(&pdf, &definition, standard).unwrap();
+            assert_eq!(encoding.decode(&[65, 174]).unwrap(), "✂✂");
+            let wrapped = super::super::cff_font::wrap(data).unwrap();
+            let face = ttf_parser::Face::parse(&wrapped, 0).unwrap();
+            assert_eq!(encoding.glyph_ids(&face, &[65, 174]).unwrap(), [2, 2]);
+        }
+        definition.set("BaseFont", Object::Name(b"OtherFont".to_vec()));
+        assert!(SimpleEncoding::parse(&pdf, &definition, false)
+            .unwrap()
+            .decode(&[174])
+            .is_err());
+    }
+
+    #[test]
+    fn cff_builtin_glyph_names_obey_the_same_length_limit_as_differences() {
+        let table = ttf_parser::cff::Table::parse(include_bytes!(
+            "../../tests/fixtures/test-long-glyph-name.cff"
+        ))
+        .unwrap();
+        assert!(matches!(
+            SimpleEncoding::from_cff(table, false),
+            Err(OfdError::Limit(_))
+        ));
     }
 
     #[test]

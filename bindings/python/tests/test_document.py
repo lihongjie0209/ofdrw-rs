@@ -710,6 +710,8 @@ def test_imports_pdf_font_styles_and_preserves_them_after_save(tmp_path, name, w
     ("type0-name-cff.pdf", ["fiA", "fi"], [2, 1]),
     ("type0-vertical-cid-cff.pdf", ["fiA", "fi"], [2, 1]),
     ("type1-internal-cff.pdf", ["ﬁA", "ﬁ"], [2, 1]),
+    ("type1-implicit-base-cff.pdf", ["ﬁﬁ", "ﬁ"], [2, 2]),
+    ("type1-dingbats-base-cff.pdf", ["✂✂", "✂"], [2, 2]),
     ("type0-vertical-default.pdf", ["fiA", "fi"], [3315, 36]),
     ("type0-vertical-metrics.pdf", ["fiA", "fi"], [3315, 36]),
     ("type0-vertical-transformed.pdf", ["fiA", "fi"], [3315, 36]),

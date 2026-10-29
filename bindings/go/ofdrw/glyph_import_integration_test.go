@@ -24,6 +24,8 @@ func TestImportsUnicodeSequencesWithOriginalPDFGlyphs(t *testing.T) {
 		{"type0-name-cff.pdf", []string{"fiA", "fi"}, []uint32{2, 1}},
 		{"type0-vertical-cid-cff.pdf", []string{"fiA", "fi"}, []uint32{2, 1}},
 		{"type1-internal-cff.pdf", []string{"ﬁA", "ﬁ"}, []uint32{2, 1}},
+		{"type1-implicit-base-cff.pdf", []string{"ﬁﬁ", "ﬁ"}, []uint32{2, 2}},
+		{"type1-dingbats-base-cff.pdf", []string{"✂✂", "✂"}, []uint32{2, 2}},
 		{"truetype-glyph-name-sequence.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
 		{"type0-vertical-default.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
 		{"type0-vertical-metrics.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},

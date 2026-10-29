@@ -1,11 +1,18 @@
 Unreleased source changes after v0.1.0:
 
+- CFF Encoding dictionaries without BaseEncoding inherit the embedded font's
+  native encoding before applying Differences. Explicit bases retain priority;
+  subset Zapf Dingbats fonts use their special glyph-name Unicode mapping.
+  Internal glyph names share the existing 1,024-byte bound. Tests cover raw
+  and OpenType programs, indirect metadata, retained/overridden codes,
+  independent raster references and three language bindings.
+
 - Embedded Type1 and CIDFontType0 CFF programs import from raw FontFile3
   streams or OpenType CFF tables. CID charset selectors stay independent of
   Unicode and TrueType CIDToGIDMap. Raw programs are retained unchanged in
   deterministic sfnt wrappers for mapped outline rendering. Internal CFF
   encodings also recover simple-font text when PDF Encoding/ToUnicode are
-  absent. Tests cover seven independent Ghostscript rasters, CID/GID differences,
+  absent. Tests cover nine independent Ghostscript rasters, CID/GID differences,
   ligatures, vertical text, bounded parsing, checksums and language bindings.
   Nonuniform/translated/per-FD font matrices and other listed CFF limitations
   remain unsupported.

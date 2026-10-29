@@ -1691,7 +1691,10 @@ name-keyed CFF descendants use CIDs directly as GIDs. CIDToGIDMap belongs to
 CIDFontType2 and does not override these CFF selectors. Missing charset CIDs
 select glyph zero, while duplicate CIDs and malformed ranges return errors.
 Without a PDF Encoding, simple CFF fonts use the embedded encoding and glyph
-names; ToUnicode still takes precedence for text semantics when present.
+names. Encoding dictionaries without BaseEncoding also inherit this embedded
+encoding before applying Differences; an explicit BaseEncoding takes precedence.
+Zapf Dingbats glyph names use their special Unicode mappings, including subset
+font names. ToUnicode still takes precedence for text semantics when present.
 Raw CFF is encapsulated in a deterministic sfnt wrapper with the original CFF
 table unchanged. Its generated horizontal metrics are placeholders for outline
 rendering; source PDF widths and deltas continue to determine imported layout,
@@ -1708,9 +1711,10 @@ These selectors follow
 
 Simple-font `Encoding` dictionaries may provide a named `BaseEncoding`
 (`StandardEncoding`, `WinAnsiEncoding`, `MacRomanEncoding` or `MacExpertEncoding`) and a
-`Differences` array. Standard Latin Type1 faces use StandardEncoding when the
-dictionary omits its base; custom Type1 and TrueType fonts require an explicit
-encoding/base or a ToUnicode map. Unavailable built-in font encodings are not
+`Differences` array. Unembedded standard Latin Type1 faces use StandardEncoding when the
+dictionary omits its base. Embedded CFF Type1 programs supply their own implicit
+base; other custom Type1 and TrueType fonts require an explicit encoding/base
+or a ToUnicode map. Unavailable built-in font encodings are not
 inferred from the font name. Adobe glyph-list names, variant suffixes, `uniXXXX` and
 `uXXXX`–`uXXXXXX` names recover Unicode text, including supplementary-plane
 characters. Underscore-separated names, multi-group `uni` names and Adobe
@@ -1720,8 +1724,10 @@ and word spacing. ToUnicode retains precedence when present.
 
 Encoding dictionaries, base names, difference arrays and their members may
 be indirect. Unmapped names fail only if used by the text; sequence mappings
-without a usable embedded font fail rather than changing the glyph layout. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
-glyph name. Embedded TrueType reuse resolves overridden glyph names in the
+without a usable embedded font fail rather than changing the glyph layout.
+Parsing accepts at most 4,096 Differences entries and 1,024 bytes per glyph
+name, including names in built-in CFF encodings. Embedded TrueType reuse
+resolves overridden glyph names in the
 actual program; an unavailable source glyph name retains the font fallback.
 ToUnicode aliases change text semantics without replacing source outlines.
 The mapping follows the [Adobe Glyph List specification](https://github.com/adobe-type-tools/agl-specification).

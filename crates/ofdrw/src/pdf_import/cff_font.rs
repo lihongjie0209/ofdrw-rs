@@ -399,9 +399,17 @@ pub(super) fn builtin_encoding(
     if table.glyph_cid(ttf_parser::GlyphId(0)).is_some() {
         return Err(invalid());
     }
+    let dingbats = font
+        .get(b"BaseFont")
+        .ok()
+        .map(|value| pdf_resolved_value(Some(pdf), value, "BaseFont"))
+        .transpose()?
+        .and_then(|value| value.as_name().ok())
+        .and_then(super::standard_fonts::StandardFont::from_name)
+        .is_some_and(super::standard_fonts::StandardFont::is_dingbats);
     Ok(Some(super::simple_encoding::SimpleEncoding::from_cff(
-        table,
-    )))
+        table, dingbats,
+    )?))
 }
 
 #[cfg(test)]

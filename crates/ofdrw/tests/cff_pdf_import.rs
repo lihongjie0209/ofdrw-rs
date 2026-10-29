@@ -97,6 +97,14 @@ fn cff_outlines_match_independent_ghostscript_rasters() {
             include_bytes!("fixtures/type1-internal-cff.png").as_slice(),
         ),
         (
+            include_bytes!("fixtures/type1-implicit-base-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-implicit-base-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type1-dingbats-base-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-dingbats-base-cff.png").as_slice(),
+        ),
+        (
             include_bytes!("fixtures/type0-opentype-cid-cff.pdf").as_slice(),
             include_bytes!("fixtures/type0-opentype-cid-cff.png").as_slice(),
         ),
@@ -162,4 +170,36 @@ fn internal_cff_encoding_without_pdf_encoding_or_tounicode_keeps_source_glyphs()
     );
     let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
     assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+}
+
+#[test]
+fn implicit_cff_base_applies_differences_without_losing_native_codes() {
+    for (source, text) in [
+        (
+            include_bytes!("fixtures/type1-implicit-base-cff.pdf").as_slice(),
+            ["ﬁﬁ", "ﬁ"],
+        ),
+        (
+            include_bytes!("fixtures/type1-dingbats-base-cff.pdf").as_slice(),
+            ["✂✂", "✂"],
+        ),
+    ] {
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), text);
+        let objects = document.page_text_objects(0).unwrap();
+        assert_eq!(objects[0].cg_transforms[0].glyphs, [2, 2]);
+        assert_eq!(objects[0].cg_transforms[0].code_count, 2);
+        let delta: f64 = objects[0].codes[0]
+            .delta_x
+            .as_deref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((delta - 15.6 * 25.4 / 72.0).abs() < 1e-6);
+        let png = document.page_png(0, 72.0).unwrap();
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+        assert_eq!(reopened.page_png(0, 72.0).unwrap(), png);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
 }

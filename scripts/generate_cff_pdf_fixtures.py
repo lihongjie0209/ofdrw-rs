@@ -4,6 +4,7 @@ Run: uv run --with fonttools python scripts/generate_cff_pdf_fixtures.py --refer
 All glyph outlines are authored for this repository under its Apache-2.0 license.
 """
 import argparse
+import re
 from io import BytesIO
 from pathlib import Path
 import subprocess
@@ -17,8 +18,12 @@ from generate_pdf_glyph_fixtures import objects
 from generate_nested_stitching_fixture import pdf_bytes, stream
 
 
-def font(cid=False, font_matrix=None, fd_matrix=None):
+def font(cid=False, font_matrix=None, fd_matrix=None, dingbats=False, long_name=False):
     names = [".notdef", "cid00007" if cid else "A", "cid00042" if cid else "fi"]
+    if dingbats:
+        names = [".notdef", "a1", "a2"]
+    if long_name:
+        names[1] = "x" * 1025
     builder = FontBuilder(1000, isTTF=False)
     builder.setupGlyphOrder(names)
     builder.setupCharacterMap({65: names[1], 0xfb01: names[2]})
@@ -39,7 +44,11 @@ def font(cid=False, font_matrix=None, fd_matrix=None):
     info = {"FullName": "OFD Test CFF", "FamilyName": "OFD Test CFF", "Weight": "Regular"}
     if font_matrix is not None:
         info["FontMatrix"] = font_matrix
-    builder.setupCFF("OFDTestCFF", info, charstrings, {})
+    builder.setupCFF("ABCDEF+ZapfDingbats" if dingbats else "OFDTestCFF", info, charstrings, {})
+    if dingbats or long_name:
+        encoding = [".notdef"] * 256
+        encoding[65], encoding[174] = names[1], names[2]
+        builder.font["CFF "].cff.topDictIndex[0].Encoding = encoding
     builder.setupHorizontalMetrics({name: (width, 0) for name, width in zip(names, [500, 722, 750])})
     builder.setupHorizontalHeader(ascent=800, descent=-200)
     builder.setupNameTable({"familyName": "OFD Test CFF", "styleName": "Regular", "uniqueFontIdentifier": "OFD Test CFF", "fullName": "OFD Test CFF", "psName": "OFDTestCFF"})
@@ -122,6 +131,10 @@ if __name__ == "__main__":
     fixtures = Path(__file__).resolve().parents[1] / "crates/ofdrw/tests/fixtures"
     sid_otf, sid_cff = font()
     cid_otf, cid_cff = font(cid=True)
+    _, dingbats_cff = font(dingbats=True)
+    (fixtures / "test-dingbats.cff").write_bytes(dingbats_cff)
+    _, long_cff = font(long_name=True)
+    (fixtures / "test-long-glyph-name.cff").write_bytes(long_cff)
     for name, data in [("test-name-cff.otf", sid_otf), ("test-name.cff", sid_cff), ("test-cid-cff.otf", cid_otf), ("test-cid.cff", cid_cff)]:
         (fixtures / name).write_bytes(data)
     for name, options in [
@@ -136,12 +149,23 @@ if __name__ == "__main__":
         ("type1-opentype-cff", sid_otf, False, True, False, False),
         ("type1-raw-cff", sid_cff, True, True, False, False),
         ("type1-internal-cff", sid_cff, True, True, False, False),
+        ("type1-implicit-base-cff", sid_cff, True, True, False, False),
+        ("type1-dingbats-base-cff", dingbats_cff, True, True, False, False),
         ("type0-opentype-cid-cff", cid_otf, False, False, True, False),
         ("type0-raw-cid-cff", cid_cff, True, False, True, False),
         ("type0-name-cff", sid_cff, True, False, False, False),
         ("type0-vertical-cid-cff", cid_cff, True, False, True, True),
     ]:
-        source = pdf(data, raw, simple, cid, vertical, internal=name == "type1-internal-cff")
+        source = pdf(data, raw, simple, cid, vertical, internal=name in ["type1-internal-cff", "type1-implicit-base-cff", "type1-dingbats-base-cff"])
+        if name in ["type1-implicit-base-cff", "type1-dingbats-base-cff"]:
+            # CID-free CFF StandardEncoding supplies fi at 174. Only code 65 is overridden.
+            parts = re.findall(rb"\d+ 0 obj\n(.*?)\nendobj", source, re.S)
+            parts[4] = parts[4][:-2] + b" /Encoding << /Differences [65 /fi] >> >>"
+            parts[4] = parts[4].replace(b"/Widths [722 ", b"/Widths [750 ")
+            if name == "type1-dingbats-base-cff":
+                parts[4] = parts[4].replace(b"/fi", b"/a2").replace(b"OFDTestCFF", b"ABCDEF+ZapfDingbats")
+                parts[7] = parts[7].replace(b"OFDTestCFF", b"ABCDEF+ZapfDingbats").replace(b"/Flags 32", b"/Flags 4")
+            source = pdf_bytes(parts)
         (fixtures / f"{name}.pdf").write_bytes(source)
         if args.references:
             with tempfile.TemporaryDirectory() as directory:
