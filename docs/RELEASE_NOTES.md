@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- Vertical Type0 text imports with Identity-V or embedded WMode 1 CMaps.
+  DW2/W2 select two-dimensional glyph origins and vertical advances; TJ,
+  spacing, text rise, scaling and transformed baselines retain PDF geometry.
+  Tests cover inherited modes, indirect metrics, malformed/oversized tables,
+  independent Ghostscript raster references and all three language bindings.
+  Named vertical Adobe resources are not yet bundled.
+
 - Simple-font Differences without ToUnicode decode Adobe glyph-name sequences,
   including underscore components, multiple BMP groups and AGL combining
   sequences. Embedded source glyphs and advances remain intact; decoding

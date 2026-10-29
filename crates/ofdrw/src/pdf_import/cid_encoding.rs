@@ -1,4 +1,4 @@
-//! Horizontal PDF CMaps: source byte codes and CID selectors stay distinct.
+//! PDF CMaps: source byte codes and CID selectors stay distinct.
 
 mod named;
 
@@ -21,9 +21,18 @@ pub(super) struct CidEncoding {
     mappings: Arc<HashMap<(u8, u32), u16>>,
     notdefs: Arc<HashMap<(u8, u32), u16>>,
     identity: bool,
+    vertical: bool,
     ordering: Option<&'static str>,
     height: usize,
     cost: Budget,
+}
+
+fn writing_mode(value: &Object) -> Result<bool, OfdError> {
+    match value {
+        Object::Integer(0) => Ok(false),
+        Object::Integer(1) => Ok(true),
+        _ => Err(invalid("WMode must be 0 or 1")),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +133,10 @@ impl CidEncoding {
         Ok(map)
     }
 
+    pub fn is_vertical(&self) -> bool {
+        self.vertical
+    }
+
     pub fn parse(pdf: &PdfDocument, value: &Object) -> Result<Self, OfdError> {
         Self::parse_inner(pdf, value, 0, &mut Budget::default())
     }
@@ -139,11 +152,12 @@ impl CidEncoding {
         }
         let value = pdf_resolved_value(Some(pdf), value, "Type0 Encoding CMap")?;
         if let Object::Name(name) = value {
-            if name != b"Identity-H" {
+            if name != b"Identity-H" && name != b"Identity-V" {
                 return Self::named(pdf, name, depth, budget);
             }
             return Ok(Self {
                 identity: true,
+                vertical: name == b"Identity-V",
                 spaces: vec![CodeSpace {
                     low: vec![0, 0],
                     high: vec![255, 255],
@@ -162,15 +176,13 @@ impl CidEncoding {
         if budget.bytes > MAX_BYTES {
             return Err(limit());
         }
-        if let Ok(mode) = stream.dict.get(b"WMode") {
-            if pdf_resolved_value(Some(pdf), mode, "CMap WMode")?
-                .as_i64()
-                .ok()
-                != Some(0)
-            {
-                return Err(invalid("only horizontal WMode 0 is supported"));
-            }
-        }
+        let dictionary_mode = stream
+            .dict
+            .get(b"WMode")
+            .ok()
+            .map(|mode| writing_mode(pdf_resolved_value(Some(pdf), mode, "CMap WMode")?))
+            .transpose()?;
+        let mut body_mode = None;
         let base = stream.dict.get(b"UseCMap").ok();
         let mut result = base
             .map(|base| Self::parse_inner(pdf, base, depth + 1, budget))
@@ -262,10 +274,8 @@ impl CidEncoding {
                     }
                 }
                 "def" => match op.operands.as_slice() {
-                    [Object::Name(name), value]
-                        if name == b"WMode" && value.as_i64().ok() != Some(0) =>
-                    {
-                        return Err(invalid("only horizontal WMode 0 is supported"));
+                    [Object::Name(name), value] if name == b"WMode" => {
+                        body_mode = Some(writing_mode(value)?);
                     }
                     [Object::Name(name), value]
                         if name == b"CMapType" && value.as_i64().ok() != Some(1) =>
@@ -280,6 +290,14 @@ impl CidEncoding {
                 _ => return Err(invalid("unsupported operator or misplaced section")),
             }
             index += 1;
+        }
+        if let (Some(dictionary), Some(body)) = (dictionary_mode, body_mode) {
+            if dictionary != body {
+                return Err(invalid("dictionary and program WMode differ"));
+            }
+        }
+        if let Some(mode) = dictionary_mode.or(body_mode) {
+            result.vertical = mode;
         }
         if !finished || in_cmap || result.spaces.is_empty() {
             return Err(invalid("incomplete CMap definition"));
@@ -589,6 +607,33 @@ mod tests {
     }
 
     #[test]
+    fn vertical_modes_inherit_override_and_validate_metadata() {
+        let mut pdf = PdfDocument::new();
+        let identity = Object::Name(b"Identity-V".to_vec());
+        assert!(CidEncoding::parse(&pdf, &identity).unwrap().is_vertical());
+        let mode = pdf.add_object(1);
+        let stream = Stream::new(
+            dictionary! {"UseCMap" => identity.clone(), "WMode" => mode},
+            b"begincmap endcmap".to_vec(),
+        );
+        let parsed = CidEncoding::parse(&pdf, &Object::Stream(stream)).unwrap();
+        assert!(parsed.is_vertical());
+        assert_eq!(parsed.decode(&[0, 65]).unwrap()[0].cid, 65);
+        let stream = Stream::new(
+            dictionary! {"UseCMap" => identity.clone()},
+            b"begincmap /WMode 0 def endcmap".to_vec(),
+        );
+        assert!(!CidEncoding::parse(&pdf, &Object::Stream(stream))
+            .unwrap()
+            .is_vertical());
+        let stream = Stream::new(
+            dictionary! {"UseCMap" => identity, "WMode" => 0},
+            b"begincmap /WMode 1 def endcmap".to_vec(),
+        );
+        assert!(CidEncoding::parse(&pdf, &Object::Stream(stream)).is_err());
+    }
+
+    #[test]
     fn compressed_cmap_stream_and_indirect_wmode_import() {
         let mut pdf = PdfDocument::new();
         let mode = pdf.add_object(Object::Integer(0));
@@ -624,18 +669,14 @@ mod tests {
             "1 begincodespacerange <00> <ff> endcodespacerange 1 begincidchar <41> 1.5 endcidchar",
             "1 begincodespacerange <00> <ff> endcodespacerange 1 begincidrange <41> <42> 65535 endcidrange",
             "1 begincodespacerange <00> <ff> endcodespacerange 1 begincidchar 65 1 endcidchar",
-            "1 begincodespacerange <00> <ff> endcodespacerange /WMode 1 def",
+            "1 begincodespacerange <00> <ff> endcodespacerange /WMode 2 def",
             "1 begincodespacerange <00> <ff> endcodespacerange /CMapType 2 def",
             "1 begincodespacerange <00> <ff> endcodespacerange 1 usefont",
             "1 begincodespacerange <00> <ff> endcodespacerange 1 2 add",
             "1 begincodespacerange <00> <ff> endcodespacerange /Identity-H usecmap",
             "begincmap endcmap",
         ] { assert!(parse(body).is_err(), "{body}"); }
-        for value in [
-            Object::Null,
-            Object::Name(b"Identity-V".to_vec()),
-            Object::Name(b"Unknown-CMap".to_vec()),
-        ] {
+        for value in [Object::Null, Object::Name(b"Unknown-CMap".to_vec())] {
             assert!(CidEncoding::parse(&PdfDocument::new(), &value).is_err());
         }
     }

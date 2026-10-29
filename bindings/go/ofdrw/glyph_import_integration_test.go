@@ -17,6 +17,10 @@ func TestImportsUnicodeSequencesWithOriginalPDFGlyphs(t *testing.T) {
 		glyphs []uint32
 	}{
 		{"type0-ligature-glyph.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
+		{"truetype-glyph-name-sequence.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
+		{"type0-vertical-default.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
+		{"type0-vertical-metrics.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
+		{"type0-vertical-transformed.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
 		{"truetype-ligature-glyph.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
 		{"type0-no-unicode-cmap-glyph.pdf", []string{"fiA", "fi"}, []uint32{3315, 36}},
 		{"type0-variation-glyph.pdf", []string{"0\ufe00", "0\ufe00"}, []uint32{19}},

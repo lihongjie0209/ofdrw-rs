@@ -254,3 +254,161 @@ fn glyph_name_expansion_is_bounded_before_font_fallback() {
         matches!(OfdDocument::from_pdf_bytes(&bytes), Err(ofdrw::OfdError::Limit(message)) if message.contains("decoded text"))
     );
 }
+
+#[test]
+fn vertical_cid_text_keeps_two_dimensional_metrics_and_matches_ghostscript() {
+    for (source, reference) in [
+        (
+            include_bytes!("fixtures/type0-vertical-default.pdf").as_slice(),
+            include_bytes!("fixtures/type0-vertical-default.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-vertical-metrics.pdf").as_slice(),
+            include_bytes!("fixtures/type0-vertical-metrics.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-vertical-transformed.pdf").as_slice(),
+            include_bytes!("fixtures/type0-vertical-transformed.png").as_slice(),
+        ),
+    ] {
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["fiA", "fi"]);
+        let objects = document.page_text_objects(0).unwrap();
+        assert_eq!(objects[0].cg_transforms[0].glyphs, [3315, 36]);
+        assert!(objects[0].codes[0].delta_y.is_some());
+        let png = document.page_png(0, 72.0).unwrap();
+        assert_reference_ink(&png, reference);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+        assert_eq!(reopened.page_png(0, 72.0).unwrap(), png);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn vertical_metrics_keep_source_origins_spacing_and_following_text_position() {
+    let document =
+        OfdDocument::from_pdf_bytes(include_bytes!("fixtures/type0-vertical-metrics.pdf")).unwrap();
+    let objects = document.page_text_objects(0).unwrap();
+    let dx: f64 = objects[0].codes[0]
+        .delta_x
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let dy: f64 = objects[0].codes[0]
+        .delta_y
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((dx - (-4.2 * 25.4 / 72.0)).abs() < 1e-6);
+    assert!((dy - (27.8 * 25.4 / 72.0)).abs() < 1e-6);
+    assert!(
+        (objects[1].boundary.unwrap()[1] - objects[0].boundary.unwrap()[1] - 48.4 * 25.4 / 72.0)
+            .abs()
+            < 1e-6
+    );
+}
+
+#[test]
+fn embedded_vertical_cmap_can_override_horizontal_identity_base() {
+    let source = include_bytes!("fixtures/type0-vertical-metrics.pdf");
+    let reference = OfdDocument::from_pdf_bytes(source).unwrap();
+    let mut pdf = lopdf::Document::load_mem(source).unwrap();
+    let mut dictionary = lopdf::Dictionary::new();
+    dictionary.set("UseCMap", lopdf::Object::Name(b"Identity-H".to_vec()));
+    let mode = pdf.add_object(1);
+    dictionary.set("WMode", mode);
+    let cmap = pdf.add_object(lopdf::Stream::new(
+        dictionary,
+        b"begincmap /WMode 1 def endcmap".to_vec(),
+    ));
+    pdf.get_object_mut((5, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Encoding", cmap);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+    assert_eq!(
+        document.page_text_objects(0).unwrap(),
+        reference.page_text_objects(0).unwrap()
+    );
+    assert_eq!(
+        document.page_png(0, 72.0).unwrap(),
+        reference.page_png(0, 72.0).unwrap()
+    );
+}
+
+#[test]
+fn vertical_single_character_fallback_keeps_both_position_components() {
+    let mut pdf =
+        lopdf::Document::load_mem(include_bytes!("fixtures/type0-vertical-metrics.pdf")).unwrap();
+    pdf.get_object_mut((8, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .remove(b"FontFile2");
+    let map = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+    let data = String::from_utf8(map.get_plain_content().unwrap())
+        .unwrap()
+        .replace("<00660069>", "<0042>");
+    map.set_plain_content(data.into_bytes());
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+    assert_eq!(document.page_text(0).unwrap(), ["BA", "B"]);
+    let objects = document.page_text_objects(0).unwrap();
+    assert!(objects[0].cg_transforms.is_empty());
+    assert!(objects[0].codes[0].delta_y.is_some());
+    let png = document.page_png(0, 72.0).unwrap();
+    let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+    assert_eq!(reopened.page_png(0, 72.0).unwrap(), png);
+}
+
+#[test]
+fn vertical_word_spacing_uses_single_byte_source_space_before_unicode_mapping() {
+    let mut pdf =
+        lopdf::Document::load_mem(include_bytes!("fixtures/type0-vertical-metrics.pdf")).unwrap();
+    let cmap = pdf.add_object(lopdf::Stream::new(lopdf::Dictionary::new(),
+        b"begincmap /WMode 1 def 1 begincodespacerange <00> <ff> endcodespacerange 2 begincidchar <20> 1 <21> 2 endcidchar endcmap".to_vec()));
+    pdf.get_object_mut((5, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Encoding", cmap);
+    let map = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+    let data = String::from_utf8(map.get_plain_content().unwrap())
+        .unwrap()
+        .replace("<0000> <ffff>", "<00> <ff>")
+        .replace("<0001>", "<20>")
+        .replace("<0002>", "<21>");
+    map.set_plain_content(data.into_bytes());
+    pdf.get_object_mut((4, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(
+            b"BT /F1 24 Tf 70 Tz 1 Tc 3 Tw 2 Ts 60 130 Td [<20> 100 <21>] TJ <20> Tj ET".to_vec(),
+        );
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+    assert_eq!(document.page_text(0).unwrap(), ["fiA", "fi"]);
+    let objects = document.page_text_objects(0).unwrap();
+    let dy: f64 = objects[0].codes[0]
+        .delta_y
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((dy - 24.8 * 25.4 / 72.0).abs() < 1e-6);
+    assert!(
+        (objects[1].boundary.unwrap()[1] - objects[0].boundary.unwrap()[1] - 45.4 * 25.4 / 72.0)
+            .abs()
+            < 1e-6
+    );
+}

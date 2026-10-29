@@ -699,6 +699,9 @@ def test_imports_pdf_font_styles_and_preserves_them_after_save(tmp_path, name, w
 
 @pytest.mark.parametrize("name,text,glyphs", [
     ("type0-ligature-glyph.pdf", ["fiA", "fi"], [3315, 36]),
+    ("type0-vertical-default.pdf", ["fiA", "fi"], [3315, 36]),
+    ("type0-vertical-metrics.pdf", ["fiA", "fi"], [3315, 36]),
+    ("type0-vertical-transformed.pdf", ["fiA", "fi"], [3315, 36]),
     ("truetype-ligature-glyph.pdf", ["fiA", "fi"], [3315, 36]),
     ("truetype-glyph-name-sequence.pdf", ["fiA", "fi"], [3315, 36]),
     ("type0-no-unicode-cmap-glyph.pdf", ["fiA", "fi"], [3315, 36]),

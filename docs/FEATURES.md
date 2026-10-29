@@ -1662,7 +1662,7 @@ TrueType/OpenType program, a code may map to a Unicode sequence while retaining
 one source glyph and one PDF advance. Custom and subset Type1 fonts may use an explicit named
 encoding or an Encoding dictionary with a named BaseEncoding and Differences;
 a complete ToUnicode CMap retains priority when supplied. Type0 CID fonts
-with `Identity-H` or an embedded horizontal Encoding CMap and a
+with `Identity-H`/`Identity-V` or an embedded Encoding CMap and a
 `ToUnicode` CMap also import as OFD text; descendant `DW` and both forms of
 `W` determine glyph advance. Embedded TrueType/OpenType programs from
 `CIDFontType2` are copied using valid PDF `CIDToGIDMap` selectors. Simple
@@ -1739,7 +1739,7 @@ retaining font and spacing parameters. Continued strings require known font
 advances or another explicit position. This follows
 [ISO 32000-1, section 9.4.1](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
-Type0 `Identity-H` encoding names, default CID widths (`DW`), `W` arrays,
+Type0 `Identity-H`/`Identity-V` encoding names, default CID widths (`DW`), `W` arrays,
 range endpoints, per-CID width arrays and individual widths may be indirect
 objects. Width validation and `TJ` spacing apply after resolution; broken or
 cyclic references return errors. Width-table expansion is limited to 1,000,000
@@ -1750,7 +1750,7 @@ codes. `begincidchar`/`begincidrange` map source codes to CIDs, while ToUnicode
 uses the original source code and its byte length. CID widths and embedded
 CIDToGIDMap checks use the resulting CID. `beginnotdefchar`/`beginnotdefrange`
 provide fallback CIDs for otherwise unmapped codes; the final default is CID 0.
-`UseCMap` inherits another embedded stream or Identity-H with local mapping
+`UseCMap` inherits another embedded stream or Identity-H/Identity-V with local mapping
 overrides; a `usecmap` declaration must agree with its dictionary base name.
 Only descendant font number zero is accepted. Codespace matching compares
 each byte's bounds and rejects overlapping or prefix-ambiguous ranges.
@@ -1760,6 +1760,24 @@ inheritance links. Word spacing applies to a one-byte source code 32, even
 when ToUnicode gives it a different character; two-byte codes do not gain
 word spacing merely because they map to a space. These rules follow
 [ISO 32000-1, sections 9.3.3 and 9.7.5](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
+
+Vertical Identity-V and embedded CMaps with WMode 1 preserve horizontal glyph
+outlines at their vertical origins. CIDFont DW2 defaults to [880 -1000]; W2
+supports both arrays of metric triples and CID ranges, including indirect
+values. Default origin x uses half the horizontal CID width. Character/word
+spacing and TJ adjustments advance along the vertical text axis; horizontal
+scaling applies to glyph outlines and origin x, while text rise and arbitrary
+nondegenerate text matrices retain their original geometry. OFD DeltaX/DeltaY
+store both position components, with CGTransform retaining embedded glyphs.
+WMode inherits through UseCMap and local declarations override the base;
+conflicting stream/program declarations or modes other than 0/1 are rejected.
+Vertical metric values must be finite and within ±10,000 glyph units, and
+W2 expansion is limited to 1,000,000 assignments including overwrites.
+Independent Ghostscript rasters cover default/custom metrics, spacing,
+mirroring and shear; Rust and Python/Go/Node tests cover text and round trips.
+Named vertical Adobe CMaps remain unsupported until their resources are bundled.
+These metrics follow
+[ISO 32000-1, sections 9.4.4 and 9.7.4.3](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
 The native library also bundles 116 horizontal Adobe CMap resources,
 including GBK-EUC-H, UniGB-UTF16-H, UniCNS-UTF16-H, UniJIS-UTF16-H and

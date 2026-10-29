@@ -8,6 +8,7 @@ mod simple_encoding;
 mod simple_widths;
 mod standard_font_data;
 mod standard_fonts;
+mod vertical_metrics;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -6425,6 +6426,7 @@ fn import_text(
             text: &text,
             cids: None,
             simple_codes: Some(&simple_codes),
+            vertical_positions: None,
             positions: &positions,
             pen,
             has_widths,
@@ -6439,6 +6441,7 @@ struct ImportedTextRun<'a> {
     cids: Option<&'a [u16]>,
     simple_codes: Option<&'a [u8]>,
     positions: &'a [f64],
+    vertical_positions: Option<&'a [f64]>,
     pen: f64,
     has_widths: bool,
 }
@@ -6457,6 +6460,7 @@ fn embedded_pdf_font(
     text: &str,
     cids: Option<&[u16]>,
     simple_codes: Option<&[u8]>,
+    force_mapping: bool,
 ) -> Result<Option<EmbeddedPdfFont>, OfdError> {
     let true_type =
         font.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"TrueType".as_slice());
@@ -6587,7 +6591,7 @@ fn embedded_pdf_font(
             .chars()
             .zip(&glyphs)
             .all(|(ch, glyph)| face.glyph_index(ch).map(|id| id.0) == Some(*glyph));
-    let mapped_glyphs = (!direct).then_some(glyphs);
+    let mapped_glyphs = (force_mapping || !direct).then_some(glyphs);
     let glyph_bounds = mapped_glyphs.as_ref().map(|glyphs| {
         let units = f64::from(face.units_per_em());
         glyphs
@@ -6655,6 +6659,7 @@ fn finish_import_text(
         cids,
         simple_codes,
         positions,
+        vertical_positions,
         pen,
         has_widths,
     } = run;
@@ -6691,9 +6696,13 @@ fn finish_import_text(
         return Err(OfdError::Invalid("PDF text matrix is invalid".into()));
     }
     let first_offset = positions.first().copied().unwrap_or(0.0);
+    let first_y = vertical_positions
+        .and_then(|values| values.first())
+        .copied()
+        .unwrap_or(0.0);
     let (page_x, baseline_y) = graphics.point(
-        x + a * first_offset * state.h_scale + c * state.rise,
-        y + b * first_offset * state.h_scale + d * state.rise,
+        x + a * first_offset * state.h_scale + c * (state.rise + first_y),
+        y + b * first_offset * state.h_scale + d * (state.rise + first_y),
         page.box_,
     );
     if !visible && state.render_mode >= 4 && !text.is_empty() {
@@ -6703,7 +6712,15 @@ fn finish_import_text(
     }
     if visible && !text.is_empty() {
         let declared_style = font_style::FontStyle::read(page.pdf, font)?;
-        let embedded = embedded_pdf_font(output, page.pdf, font, text, cids, simple_codes)?;
+        let embedded = embedded_pdf_font(
+            output,
+            page.pdf,
+            font,
+            text,
+            cids,
+            simple_codes,
+            vertical_positions.is_some(),
+        )?;
         let glyphs = embedded.as_ref().and_then(|font| font.glyphs.as_deref());
         if glyphs.is_none() && text.chars().count() != positions.len() {
             return Err(OfdError::Invalid(
@@ -6729,6 +6746,12 @@ fn finish_import_text(
                 .map(|pair| (pair[1] - pair[0]) * horizontal_scale * scale * MM_PER_PT)
                 .collect::<Vec<_>>()
         });
+        let delta_y = vertical_positions.map(|positions| {
+            positions
+                .windows(2)
+                .map(|pair| -(pair[1] - pair[0]) * scale * MM_PER_PT)
+                .collect::<Vec<_>>()
+        });
         let page_width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
         let page_height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
         let text_width = positions
@@ -6750,6 +6773,15 @@ fn finish_import_text(
                 top_y + mb * local_width + md * local_height,
             ),
         ];
+        if let Some(vertical) = vertical_positions {
+            for (&x, &y) in positions.iter().zip(vertical) {
+                let local_x = (x - first_offset) * horizontal_scale * scale * MM_PER_PT;
+                let local_y = -(y - first_y) * scale * MM_PER_PT;
+                for (x, y) in [(local_x, local_y), (local_x + size, local_y + local_height)] {
+                    corners.push((top_x + ma * x + mc * y, top_y + mb * x + md * y));
+                }
+            }
+        }
         if let Some(bounds) = embedded
             .as_ref()
             .and_then(|font| font.glyph_bounds.as_ref())
@@ -6763,7 +6795,9 @@ fn finish_import_text(
                     [(left, bottom), (left, top), (right, bottom), (right, top)]
                 {
                     let local_x = pen + glyph_x * size * horizontal_scale;
-                    let local_y = size - glyph_y * size;
+                    let pen_y = vertical_positions
+                        .map_or(0.0, |values| -(values[index] - first_y) * scale * MM_PER_PT);
+                    let local_y = size + pen_y - glyph_y * size;
                     corners.push((
                         top_x + ma * local_x + mc * local_y,
                         top_y + mb * local_x + md * local_y,
@@ -6818,8 +6852,21 @@ fn finish_import_text(
                             .join(" ")
                     )
                 });
+            let delta_y = delta_y
+                .as_ref()
+                .filter(|values| !values.is_empty())
+                .map_or_else(String::new, |values| {
+                    format!(
+                        " DeltaY=\"{}\"",
+                        values
+                            .iter()
+                            .map(f64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                });
             output.append_page_object(page.index, |prefix, object_id| {
-                format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {width} {height}\" Font=\"{font_id}\" Size=\"{size}\"><{prefix}TextCode X=\"0\" Y=\"{size}\"{delta}>{text}</{prefix}TextCode><{prefix}CGTransform CodePosition=\"0\" CodeCount=\"{code_count}\" GlyphCount=\"{glyph_count}\"><{prefix}Glyphs>{glyph_ids}</{prefix}Glyphs></{prefix}CGTransform></{prefix}TextObject>")
+                format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {width} {height}\" Font=\"{font_id}\" Size=\"{size}\"><{prefix}TextCode X=\"0\" Y=\"{size}\"{delta}{delta_y}>{text}</{prefix}TextCode><{prefix}CGTransform CodePosition=\"0\" CodeCount=\"{code_count}\" GlyphCount=\"{glyph_count}\"><{prefix}Glyphs>{glyph_ids}</{prefix}Glyphs></{prefix}CGTransform></{prefix}TextObject>")
             })?
         } else {
             output.add_text_object_with_delta_x(
@@ -6831,6 +6878,19 @@ fn finish_import_text(
                 delta_x.as_deref(),
             )?
         };
+        if glyphs.is_none() && delta_y.as_ref().is_some_and(|values| !values.is_empty()) {
+            output.set_page_text_code_layout(
+                page.index,
+                &id,
+                0,
+                &crate::TextCodeLayout {
+                    x: Some(0.0),
+                    y: Some(size),
+                    delta_x: delta_x.clone(),
+                    delta_y,
+                },
+            )?;
+        }
         let ctm = [ma, mb, mc, md, top_x - min_x, top_y - min_y];
         if (ctm[0] - 1.0).abs() > 1e-9
             || ctm[1].abs() > 1e-9
@@ -6868,8 +6928,13 @@ fn finish_import_text(
         state.clip_requested = true;
     }
     if has_widths || text.is_empty() {
-        state.matrix[4] += a * pen * state.h_scale;
-        state.matrix[5] += b * pen * state.h_scale;
+        if vertical_positions.is_some() {
+            state.matrix[4] += c * pen;
+            state.matrix[5] += d * pen;
+        } else {
+            state.matrix[4] += a * pen * state.h_scale;
+            state.matrix[5] += b * pen * state.h_scale;
+        }
     }
     state.positioned = has_widths || text.is_empty();
     Ok(())
@@ -7028,6 +7093,11 @@ fn import_type0_text(
     };
     let (default_width, widths) = pdf_cid_widths(page.pdf, descendant)?;
 
+    let vertical = encoding.is_vertical();
+    let metrics = vertical
+        .then(|| vertical_metrics::VerticalMetrics::parse(page.pdf, descendant))
+        .transpose()?;
+    let mut vertical_positions = Vec::new();
     let mut text = String::new();
     let mut cids = Vec::new();
     let mut positions = Vec::new();
@@ -7054,11 +7124,19 @@ fn import_type0_text(
                         OfdError::Invalid("PDF Type0 Unicode mapping is incomplete".into())
                     })?;
                     let decoded = pdf_unicode_sequence(&units, &mut unicode_units)?;
-                    positions.push(pen);
+                    let width = widths.get(&cid).copied().unwrap_or(default_width);
+                    let advance = if let Some(metrics) = &metrics {
+                        let [advance, vx, vy] = metrics.get(cid, width);
+                        positions.push(-vx * state.size_pt / 1000.0);
+                        vertical_positions.push(pen - vy * state.size_pt / 1000.0);
+                        advance
+                    } else {
+                        positions.push(pen);
+                        width
+                    };
                     text.push_str(&decoded);
                     cids.push(cid);
-                    pen += widths.get(&cid).copied().unwrap_or(default_width) * state.size_pt
-                        / 1000.0
+                    pen += advance * state.size_pt / 1000.0
                         + state.char_spacing
                         + if code.length == 1 && code.source == 32 {
                             state.word_spacing
@@ -7096,6 +7174,7 @@ fn import_type0_text(
             text: &text,
             cids: Some(&cids),
             simple_codes: None,
+            vertical_positions: vertical.then_some(vertical_positions.as_slice()),
             positions: &positions,
             pen,
             has_widths: true,
@@ -25422,7 +25501,10 @@ mod tests {
             .set("Encoding", Object::Name(b"Identity-V".to_vec()));
         let mut vertical_bytes = Vec::new();
         vertical.save_to(&mut vertical_bytes).unwrap();
-        assert!(OfdDocument::from_pdf_bytes(&vertical_bytes).is_err());
+        let imported = OfdDocument::from_pdf_bytes(&vertical_bytes).unwrap();
+        assert!(imported.page_text_objects(0).unwrap()[0].codes[0]
+            .delta_y
+            .is_some());
 
         let mut odd_code = original.clone();
         let stream = odd_code
