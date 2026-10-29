@@ -19,10 +19,10 @@ COMMIT = "f5cf3bca7fdfeaceb77aa82847e974f2306c20b4"
 REPOSITORY = "adobe-type-tools/cmap-resources"
 
 
-def api(path):
+def api(path, repository=REPOSITORY):
     for attempt in range(3):
         try:
-            return json.loads(subprocess.check_output(["gh", "api", f"repos/{REPOSITORY}/{path}"]))
+            return json.loads(subprocess.check_output(["gh", "api", f"repos/{repository}/{path}"]))
         except subprocess.CalledProcessError:
             if attempt == 2:
                 raise

@@ -1754,7 +1754,7 @@ Identity and Manga1 collections and require no runtime downloads. Named
 maps and embedded UseCMap bases use the same bounded parser. A named map's
 Adobe Registry and Ordering must match the descendant CIDFont's
 CIDSystemInfo; indirect collection metadata is accepted. Identity-H remains
-collection-neutral. ToUnicode is still required for text extraction.
+collection-neutral.
 Up to sixteen parsed named maps share immutable tables; local overrides
 copy only the table being changed, and cache hits still charge parsing budgets.
 Comments may appear between mapping operands without changing percent signs
@@ -1764,6 +1764,25 @@ Sources are pinned to [Adobe cmap-resources](https://github.com/adobe-type-tools
 The [manifest](../crates/ofdrw/assets/cmaps/manifest.json) lists all names,
 Git blob hashes and SHA-256 digests; original source headers and the
 [BSD notice](../crates/ofdrw/assets/cmaps/NOTICE) are retained in distributions.
+
+When a Type0 font omits ToUnicode, an Adobe CNS1, GB1, Japan1, Korea1 or KR
+descendant collection can supply Unicode through the bundled official
+CID-to-Unicode maps. This also applies to Identity-H and embedded Encoding
+CMaps when the descendant declares a supported Adobe collection. Registry,
+Ordering and a nonnegative integer Supplement are required and may be
+indirect. Source codes first map to CIDs, then to Unicode; their numeric
+values are not assumed to be Unicode. Five immutable Unicode maps load on
+demand without network or system resources. Supplementary-plane scalars
+remain intact through UTF-16 surrogate pairs. A present ToUnicode retains
+priority, including errors for malformed or incomplete explicit maps.
+Unknown collections, undefined mappings and multi-scalar mappings still
+return errors under the current one-character-per-code layout restriction;
+Unicode variation sequences are not silently shortened. This fallback follows
+[ISO 32000-1, section 9.10.2](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+Source mappings and original notices are pinned to
+[Adobe mapping-resources-pdf](https://github.com/adobe-type-tools/mapping-resources-pdf/tree/2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5),
+with [per-file hashes](../crates/ofdrw/assets/cid_unicode/manifest.json) checked
+offline in CI. ToUnicode CMaps also accept single-line XUID metadata.
 
 Other source fonts use the document's fallback font for previews. Vertical
 writing and unbundled named CID CMaps remain unsupported. The `'` and `"` line operators

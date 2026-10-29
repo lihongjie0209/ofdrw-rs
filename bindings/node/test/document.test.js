@@ -19,6 +19,13 @@ test('decode mixed-length Type0 source codes independently of CID widths', () =>
     ['type0-cns-cmap.pdf', ['中文']],
     ['type0-jis-cmap.pdf', ['日本']],
     ['type0-ks-cmap.pdf', ['한국']],
+    ['type0-gbk-collection-unicode.pdf', ['中文']],
+    ['type0-cns-collection-unicode.pdf', ['中文']],
+    ['type0-jis-collection-unicode.pdf', ['日本']],
+    ['type0-ks-collection-unicode.pdf', ['한국']],
+    ['type0-identity-collection-unicode.pdf', ['中文']],
+    ['type0-embedded-collection-unicode.pdf', ['中文']],
+    ['type0-supplementary-collection-unicode.pdf', ['\u{31350}']],
   ]) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
     try {

@@ -1,6 +1,7 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
 mod cid_encoding;
+mod cid_unicode;
 mod font_style;
 mod scalar_function;
 mod simple_encoding;
@@ -6800,6 +6801,7 @@ fn pdf_to_unicode_map<'a>(
         let skip = metadata.is_some_and(|metadata| {
             let parts: Vec<_> = metadata.split_ascii_whitespace().collect();
             matches!(parts.as_slice(), ["/CMapVersion" | "/WMode", _, "def"])
+                || (parts.first() == Some(&"/XUID") && parts.last() == Some(&"def"))
         });
         if !skip {
             normalized.extend_from_slice(line);
@@ -6837,10 +6839,15 @@ fn import_type0_text(
         .get(b"Encoding")
         .map_err(|_| OfdError::Invalid("PDF Type0 font has no Encoding".into()))?;
     let encoding = cid_encoding::CidEncoding::parse(page.pdf, encoding)?;
-    let mut mapped_font = font.clone();
-    mapped_font.set("Encoding", Object::Name(b"Identity-H".to_vec()));
-    let Encoding::UnicodeMapEncoding(map) = pdf_to_unicode_map(&mapped_font, page.pdf)? else {
-        unreachable!("pdf_to_unicode_map only returns Unicode maps")
+    let unicode_map = if font.get(b"ToUnicode").is_ok() {
+        let mut mapped_font = font.clone();
+        mapped_font.set("Encoding", Object::Name(b"Identity-H".to_vec()));
+        let Encoding::UnicodeMapEncoding(map) = pdf_to_unicode_map(&mapped_font, page.pdf)? else {
+            unreachable!("pdf_to_unicode_map only returns Unicode maps")
+        };
+        Some(map)
+    } else {
+        None
     };
     let descendants = font
         .get(b"DescendantFonts")
@@ -6895,6 +6902,11 @@ fn import_type0_text(
             }
         }
     }
+    let collection = if unicode_map.is_none() {
+        Some(cid_unicode::for_descendant(page.pdf, descendant)?)
+    } else {
+        None
+    };
     let (default_width, widths) = pdf_cid_widths(page.pdf, descendant)?;
 
     let mut text = String::new();
@@ -6913,8 +6925,13 @@ fn import_type0_text(
                 }
                 for code in encoding.decode(bytes)? {
                     let cid = code.cid;
-                    let units = map.get(code.source, code.length).ok_or_else(|| {
-                        OfdError::Invalid("PDF Type0 ToUnicode mapping is incomplete".into())
+                    let units = if let Some(map) = &unicode_map {
+                        map.get(code.source, code.length)
+                    } else {
+                        collection.and_then(|map| map.units(cid))
+                    }
+                    .ok_or_else(|| {
+                        OfdError::Invalid("PDF Type0 Unicode mapping is incomplete".into())
                     })?;
                     let decoded = String::from_utf16(&units).map_err(|_| {
                         OfdError::Invalid("PDF Type0 ToUnicode is invalid UTF-16".into())
@@ -25401,6 +25418,111 @@ mod tests {
             );
             assert!(reopened.validate_references().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn registered_cid_collections_recover_unicode_without_explicit_tounicode() {
+        for (explicit, fallback, text) in [
+            (
+                include_bytes!("../tests/fixtures/type0-gbk-cmap.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/type0-gbk-collection-unicode.pdf").as_slice(),
+                "中文",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-cns-cmap.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/type0-cns-collection-unicode.pdf").as_slice(),
+                "中文",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-jis-cmap.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/type0-jis-collection-unicode.pdf").as_slice(),
+                "日本",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-ks-cmap.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/type0-ks-collection-unicode.pdf").as_slice(),
+                "한국",
+            ),
+            (
+                include_bytes!("../tests/fixtures/type0-gbk-cmap.pdf").as_slice(),
+                include_bytes!("../tests/fixtures/type0-identity-collection-unicode.pdf")
+                    .as_slice(),
+                "中文",
+            ),
+        ] {
+            let explicit = OfdDocument::from_pdf_bytes(explicit).unwrap();
+            let recovered = OfdDocument::from_pdf_bytes(fallback).unwrap();
+            assert_eq!(recovered.page_text(0).unwrap(), [text]);
+            assert_eq!(
+                recovered.page_text_objects(0).unwrap(),
+                explicit.page_text_objects(0).unwrap()
+            );
+            assert_eq!(
+                recovered.page_png(0, 72.0).unwrap(),
+                explicit.page_png(0, 72.0).unwrap()
+            );
+            let reopened = OfdDocument::from_bytes(&recovered.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_text(0).unwrap(), [text]);
+            assert!(reopened.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn registered_cid_collection_preserves_supplementary_unicode_scalars() {
+        let document = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/type0-supplementary-collection-unicode.pdf"
+        ))
+        .unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["\u{31350}"]);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["\u{31350}"]);
+        assert_eq!(
+            reopened.page_png(0, 72.0).unwrap(),
+            document.page_png(0, 72.0).unwrap()
+        );
+    }
+
+    #[test]
+    fn explicit_tounicode_precedes_registered_collection_and_invalid_maps_do_not_fall_back() {
+        let mut pdf =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/type0-gbk-cmap.pdf")).unwrap();
+        let map = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        let original = String::from_utf8(map.get_plain_content().unwrap()).unwrap();
+        map.set_plain_content(
+            original
+                .replace("<4E2D>", "<0041>")
+                .replace("<6587>", "<0042>")
+                .into_bytes(),
+        );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["AB"]
+        );
+        for replacement in [
+            Object::Null,
+            Object::Reference((999, 0)),
+            Object::Stream(lopdf::Stream::new(dictionary! {}, b"bad CMap".to_vec())),
+        ] {
+            let mut bad = pdf.clone();
+            bad.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("ToUnicode", replacement);
+            let mut bytes = Vec::new();
+            bad.save_to(&mut bytes).unwrap();
+            assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
+        }
+        let map = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+        map.set_plain_content(original.replace("<D6D0>", "<D6D1>").into_bytes());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(OfdDocument::from_pdf_bytes(&bytes).is_err());
     }
 
     #[test]

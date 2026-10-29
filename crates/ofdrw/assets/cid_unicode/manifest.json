@@ -1,0 +1,47 @@
+{
+  "repository": "adobe-type-tools/mapping-resources-pdf",
+  "commit": "2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5",
+  "archive_sha256": "86ee1be7c7098e1f77d96561ddad73318819d24bad876e8ee851c0062fc32eb2",
+  "resources": [
+    {
+      "name": "Adobe-CNS1-UCS2",
+      "ordering": "CNS1",
+      "path": "pdf2unicode/Adobe-CNS1-UCS2",
+      "bytes": 266531,
+      "git_blob_sha1": "d8265ce72bad27dadbd8b3617b21f5577e766b8e",
+      "sha256": "8375afd535e153a7e3bcf448be93e5012b26229547a20d52520e46e3c386351f"
+    },
+    {
+      "name": "Adobe-GB1-UCS2",
+      "ordering": "GB1",
+      "path": "pdf2unicode/Adobe-GB1-UCS2",
+      "bytes": 221211,
+      "git_blob_sha1": "72d9a1fe4d616b6c7c72acdc46b45fbed0731077",
+      "sha256": "368b40ec05568faf323cfbbddf23c60d566bbc88e366981eb6541b026381a3b8"
+    },
+    {
+      "name": "Adobe-Japan1-UCS2",
+      "ordering": "Japan1",
+      "path": "pdf2unicode/Adobe-Japan1-UCS2",
+      "bytes": 294111,
+      "git_blob_sha1": "599d35a819e162aad1eb97ddff52aa35ec6fa517",
+      "sha256": "6a9693361647a37996312cc57071bb79f8c06411207be7c730a83fda1254cd82"
+    },
+    {
+      "name": "Adobe-KR-UCS2",
+      "ordering": "KR",
+      "path": "pdf2unicode/Adobe-KR-UCS2",
+      "bytes": 203264,
+      "git_blob_sha1": "05698686f0ec900ffa67c89349548dca0dc63fa5",
+      "sha256": "6861a3208f331ecd73369c5d51eacf3b72c820fe3c87524f79c9ac1bb16830ec"
+    },
+    {
+      "name": "Adobe-Korea1-UCS2",
+      "ordering": "Korea1",
+      "path": "pdf2unicode/Adobe-Korea1-UCS2",
+      "bytes": 146807,
+      "git_blob_sha1": "4c0c00dbc80d49e0e5b69c960158a7fe5cf6dc6c",
+      "sha256": "45bcf869acdcec2507f75836919e589e7137b9f9dbaa8e4975747035024248ef"
+    }
+  ]
+}

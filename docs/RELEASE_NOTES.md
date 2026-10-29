@@ -1,5 +1,13 @@
 Unreleased source changes after v0.1.0:
 
+- Type0 fonts without ToUnicode recover text through five pinned official
+  Adobe CID-to-Unicode resources when their descendant declares a supported
+  collection. Named, embedded and Identity-H source encodings still select
+  CID widths independently. Explicit ToUnicode retains priority and errors;
+  unknown collections and unrepresentable sequences are rejected. Tests
+  cover indirect metadata, CJK text, supplementary-plane characters, raster
+  and package equivalence, source integrity and language bindings.
+
 - The native library includes 116 pinned horizontal Adobe CMap resources for
   named CJK encodings. Named maps validate CIDFont collection metadata and
   retain independent Unicode/CID lookups. A bounded cache shares immutable
