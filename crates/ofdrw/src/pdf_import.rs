@@ -6329,6 +6329,7 @@ fn import_text(
     let mut positions = Vec::new();
     let mut pen = 0.0;
     let mut bytes_seen = 0_usize;
+    let mut unicode_units = 0_usize;
     let mut has_adjustment = false;
     for element in elements {
         match element {
@@ -6340,39 +6341,28 @@ fn import_text(
                 if bytes.is_empty() {
                     continue;
                 }
-                let decoded = if let Some(map) = &unicode_map {
-                    let mut decoded = String::new();
-                    for byte in bytes {
+                for byte in bytes {
+                    let decoded = if let Some(map) = &unicode_map {
                         let units = map.get(u32::from(*byte), 1).ok_or_else(|| {
                             OfdError::Invalid("PDF ToUnicode mapping is incomplete".into())
                         })?;
-                        let mapped = String::from_utf16(&units).map_err(|_| {
-                            OfdError::Invalid("PDF ToUnicode mapping is invalid UTF-16".into())
-                        })?;
-                        if mapped.chars().count() != 1 || mapped.contains('\u{fffd}') {
+                        pdf_unicode_sequence(&units, &mut unicode_units)?
+                    } else {
+                        let decoded = encoding
+                            .as_ref()
+                            .ok_or_else(|| {
+                                OfdError::Invalid("PDF font has no usable text encoding".into())
+                            })?
+                            .decode(&[*byte])?;
+                        if decoded.contains('\u{fffd}') {
                             return Err(OfdError::Invalid(
-                                "PDF ToUnicode maps one code to multiple characters".into(),
+                                "PDF text cannot be decoded losslessly".into(),
                             ));
                         }
-                        decoded.push_str(&mapped);
-                    }
-                    decoded
-                } else {
-                    encoding
-                        .as_ref()
-                        .ok_or_else(|| {
-                            OfdError::Invalid("PDF font has no usable text encoding".into())
-                        })?
-                        .decode(bytes)?
-                };
-                if decoded.contains('\u{fffd}') || decoded.chars().count() != bytes.len() {
-                    return Err(OfdError::Invalid(
-                        "PDF text cannot be decoded losslessly".into(),
-                    ));
-                }
-                for (byte, ch) in bytes.iter().zip(decoded.chars()) {
+                        decoded
+                    };
                     positions.push(pen);
-                    text.push(ch);
+                    text.push_str(&decoded);
                     simple_codes.push(*byte);
                     let width = if let Some(widths) = &widths {
                         Some(widths.get(*byte)?)
@@ -6451,6 +6441,8 @@ struct ImportedTextRun<'a> {
 struct EmbeddedPdfFont {
     id: String,
     style: font_style::FontStyle,
+    glyphs: Option<Vec<u16>>,
+    glyph_bounds: Option<Vec<Option<[f64; 4]>>>,
 }
 
 fn embedded_pdf_font(
@@ -6553,15 +6545,20 @@ fn embedded_pdf_font(
     } else {
         None
     };
-    let mapped = if let Some(cids) = cids {
-        cids.len() == text.chars().count()
-            && text.chars().zip(cids).all(|(ch, cid)| {
-                let expected = cid_to_gid.as_ref().map_or(Some(*cid), |map| {
+    let glyphs = if let Some(cids) = cids {
+        if cid_to_gid.as_ref().is_some_and(|map| map.len() % 2 != 0) {
+            return Err(OfdError::Invalid(
+                "PDF CIDToGIDMap has an odd byte length".into(),
+            ));
+        }
+        cids.iter()
+            .map(|cid| {
+                cid_to_gid.as_ref().map_or(*cid, |map| {
                     map.get(usize::from(*cid) * 2..usize::from(*cid) * 2 + 2)
-                        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
-                });
-                face.glyph_index(ch).map(|glyph| glyph.0) == expected
+                        .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                })
             })
+            .collect::<Vec<_>>()
     } else {
         let codes = simple_codes.unwrap_or_default();
         if font.get(b"Encoding").is_err() {
@@ -6570,16 +6567,46 @@ fn embedded_pdf_font(
         let Ok(encoding) = simple_encoding::SimpleEncoding::parse(pdf, font, false) else {
             return Ok(None);
         };
-        codes.len() == text.chars().count() && encoding.matches_face(&face, codes, text)
+        let Some(glyphs) = encoding.glyph_ids(&face, codes) else {
+            return Ok(None);
+        };
+        glyphs
     };
-    if !mapped {
-        return Ok(None);
+    if glyphs.iter().any(|glyph| *glyph >= face.number_of_glyphs()) {
+        return Err(OfdError::Invalid(
+            "PDF glyph index exceeds the embedded font".into(),
+        ));
     }
+    let direct = glyphs.len() == text.chars().count()
+        && text
+            .chars()
+            .zip(&glyphs)
+            .all(|(ch, glyph)| face.glyph_index(ch).map(|id| id.0) == Some(*glyph));
+    let mapped_glyphs = (!direct).then_some(glyphs);
+    let glyph_bounds = mapped_glyphs.as_ref().map(|glyphs| {
+        let units = f64::from(face.units_per_em());
+        glyphs
+            .iter()
+            .map(|glyph| {
+                face.glyph_bounding_box(ttf_parser::GlyphId(*glyph))
+                    .map(|bounds| {
+                        [
+                            f64::from(bounds.x_min) / units,
+                            f64::from(bounds.y_min) / units,
+                            f64::from(bounds.x_max) / units,
+                            f64::from(bounds.y_max) / units,
+                        ]
+                    })
+            })
+            .collect()
+    });
     for (index, existing) in output.fonts()?.iter().enumerate() {
         if existing.embedded_path.is_some() && output.font_data(index)? == bytes {
             return Ok(Some(EmbeddedPdfFont {
                 id: existing.id.clone(),
                 style: font_style::FontStyle::from_face(&face),
+                glyphs: mapped_glyphs,
+                glyph_bounds,
             }));
         }
     }
@@ -6604,6 +6631,8 @@ fn embedded_pdf_font(
     Ok(Some(EmbeddedPdfFont {
         id: output.add_embedded_font(&name, &bytes)?.to_string(),
         style: font_style::FontStyle::from_face(&face),
+        glyphs: mapped_glyphs,
+        glyph_bounds,
     }))
 }
 
@@ -6670,6 +6699,24 @@ fn finish_import_text(
     if visible && !text.is_empty() {
         let declared_style = font_style::FontStyle::read(page.pdf, font)?;
         let embedded = embedded_pdf_font(output, page.pdf, font, text, cids, simple_codes)?;
+        let glyphs = embedded.as_ref().and_then(|font| font.glyphs.as_deref());
+        if glyphs.is_none() && text.chars().count() != positions.len() {
+            return Err(OfdError::Invalid(
+                "PDF Unicode sequences require a usable embedded font".into(),
+            ));
+        }
+        if let Some(glyphs) = glyphs {
+            if glyphs.len() > 10_000 {
+                return Err(OfdError::Limit(
+                    "PDF mapped text exceeds 10000 glyphs per object".into(),
+                ));
+            }
+            if glyphs.len() != positions.len() || (!has_widths && glyphs.len() > 1) {
+                return Err(OfdError::Invalid(
+                    "PDF mapped glyphs require known source advances".into(),
+                ));
+            }
+        }
         let style = embedded.as_ref().map_or(declared_style, |font| font.style);
         let delta_x = has_widths.then(|| {
             positions
@@ -6689,7 +6736,7 @@ fn finish_import_text(
         let [ma, mb, mc, md] = matrix;
         let top_x = page_x - mc * size;
         let top_y = baseline_y - md * size;
-        let corners = [
+        let mut corners = vec![
             (top_x, top_y),
             (top_x + ma * local_width, top_y + mb * local_width),
             (top_x + mc * local_height, top_y + md * local_height),
@@ -6698,6 +6745,27 @@ fn finish_import_text(
                 top_y + mb * local_width + md * local_height,
             ),
         ];
+        if let Some(bounds) = embedded
+            .as_ref()
+            .and_then(|font| font.glyph_bounds.as_ref())
+        {
+            for (index, bounds) in bounds.iter().enumerate() {
+                let Some([left, bottom, right, top]) = bounds else {
+                    continue;
+                };
+                let pen = (positions[index] - first_offset) * horizontal_scale * scale * MM_PER_PT;
+                for (glyph_x, glyph_y) in
+                    [(left, bottom), (left, top), (right, bottom), (right, top)]
+                {
+                    let local_x = pen + glyph_x * size * horizontal_scale;
+                    let local_y = size - glyph_y * size;
+                    corners.push((
+                        top_x + ma * local_x + mc * local_y,
+                        top_y + mb * local_x + md * local_y,
+                    ));
+                }
+            }
+        }
         let min_x = corners
             .iter()
             .map(|point| point.0)
@@ -6721,14 +6789,43 @@ fn finish_import_text(
         {
             return Err(OfdError::Invalid("PDF text boundary is invalid".into()));
         }
-        let id = output.add_text_object_with_delta_x(
-            page.index,
-            text,
-            boundary,
-            size,
-            embedded.as_ref().map(|font| font.id.as_str()),
-            delta_x.as_deref(),
-        )?;
+        let id = if let (Some(font), Some(glyphs)) = (&embedded, glyphs) {
+            let [x, y, width, height] = boundary;
+            let font_id = escape_xml(&font.id);
+            let code_count = text.encode_utf16().count();
+            let text = crate::escape_text_code(text);
+            let glyph_count = glyphs.len();
+            let glyph_ids = glyphs
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let delta = delta_x
+                .as_ref()
+                .filter(|values| !values.is_empty())
+                .map_or_else(String::new, |values| {
+                    format!(
+                        " DeltaX=\"{}\"",
+                        values
+                            .iter()
+                            .map(f64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                });
+            output.append_page_object(page.index, |prefix, object_id| {
+                format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {width} {height}\" Font=\"{font_id}\" Size=\"{size}\"><{prefix}TextCode X=\"0\" Y=\"{size}\"{delta}>{text}</{prefix}TextCode><{prefix}CGTransform CodePosition=\"0\" CodeCount=\"{code_count}\" GlyphCount=\"{glyph_count}\"><{prefix}Glyphs>{glyph_ids}</{prefix}Glyphs></{prefix}CGTransform></{prefix}TextObject>")
+            })?
+        } else {
+            output.add_text_object_with_delta_x(
+                page.index,
+                text,
+                boundary,
+                size,
+                embedded.as_ref().map(|font| font.id.as_str()),
+                delta_x.as_deref(),
+            )?
+        };
         let ctm = [ma, mb, mc, md, top_x - min_x, top_y - min_y];
         if (ctm[0] - 1.0).abs() > 1e-9
             || ctm[1].abs() > 1e-9
@@ -6826,6 +6923,23 @@ fn pdf_to_unicode_map<'a>(
     }
 }
 
+fn pdf_unicode_sequence(units: &[u16], total: &mut usize) -> Result<String, OfdError> {
+    *total = total.saturating_add(units.len());
+    if *total > 200_000 {
+        return Err(OfdError::Limit(
+            "PDF decoded Unicode text is too long".into(),
+        ));
+    }
+    let decoded = String::from_utf16(units)
+        .map_err(|_| OfdError::Invalid("PDF Unicode mapping is invalid UTF-16".into()))?;
+    if decoded.is_empty() || decoded.contains('\u{fffd}') {
+        return Err(OfdError::Invalid(
+            "PDF Unicode mapping is empty or unknown".into(),
+        ));
+    }
+    Ok(decoded)
+}
+
 fn import_type0_text(
     output: &mut OfdDocument,
     page: &PdfPageContext<'_>,
@@ -6913,6 +7027,7 @@ fn import_type0_text(
     let mut cids = Vec::new();
     let mut positions = Vec::new();
     let mut pen = 0.0;
+    let mut unicode_units = 0_usize;
     let mut bytes_seen = 0_usize;
     for element in elements {
         match element {
@@ -6933,14 +7048,7 @@ fn import_type0_text(
                     .ok_or_else(|| {
                         OfdError::Invalid("PDF Type0 Unicode mapping is incomplete".into())
                     })?;
-                    let decoded = String::from_utf16(&units).map_err(|_| {
-                        OfdError::Invalid("PDF Type0 ToUnicode is invalid UTF-16".into())
-                    })?;
-                    if decoded.chars().count() != 1 || decoded.contains('\u{fffd}') {
-                        return Err(OfdError::Invalid(
-                            "PDF Type0 code maps to multiple characters".into(),
-                        ));
-                    }
+                    let decoded = pdf_unicode_sequence(&units, &mut unicode_units)?;
                     positions.push(pen);
                     text.push_str(&decoded);
                     cids.push(cid);
@@ -24038,7 +24146,7 @@ mod tests {
     }
 
     #[test]
-    fn tounicode_precedes_differences_without_reusing_a_mismatched_font() {
+    fn tounicode_preserves_semantics_while_source_differences_select_embedded_glyphs() {
         let mut pdf = differences_truetype_pdf();
         let original =
             PdfDocument::load_mem(include_bytes!("../tests/fixtures/type1-tounicode.pdf")).unwrap();
@@ -24056,7 +24164,10 @@ mod tests {
             .fonts()
             .unwrap()
             .iter()
-            .all(|font| font.embedded_path.is_none()));
+            .any(|font| font.embedded_path.is_some()));
+        for object in document.page_text_objects(0).unwrap() {
+            assert_eq!(object.cg_transforms[0].glyphs, [37, 36]);
+        }
         assert!(document.validate_references().unwrap().is_empty());
     }
 
@@ -25483,6 +25594,22 @@ mod tests {
     }
 
     #[test]
+    fn unicode_sequence_expansion_is_bounded_and_rejects_unknown_or_invalid_text() {
+        let mut total = 199_998;
+        assert_eq!(
+            pdf_unicode_sequence(&[0xd83d, 0xde00], &mut total).unwrap(),
+            "😀"
+        );
+        assert!(matches!(
+            pdf_unicode_sequence(&[0x41], &mut total),
+            Err(OfdError::Limit(_))
+        ));
+        for units in [vec![], vec![0xfffd], vec![0xd800], vec![0xdc00]] {
+            assert!(pdf_unicode_sequence(&units, &mut 0).is_err());
+        }
+    }
+
+    #[test]
     fn explicit_tounicode_precedes_registered_collection_and_invalid_maps_do_not_fall_back() {
         let mut pdf =
             PdfDocument::load_mem(include_bytes!("../tests/fixtures/type0-gbk-cmap.pdf")).unwrap();
@@ -25863,6 +25990,9 @@ mod tests {
             .unwrap()
             .iter()
             .all(|font| font.embedded_path.is_none()));
+        assert!(document.page_text_objects(0).unwrap()[0]
+            .cg_transforms
+            .is_empty());
 
         let source = text_pdf_with_widths(
             b"BT /F1 12 Tf 10 20 Td (\x8e) Tj ET",
@@ -25927,7 +26057,11 @@ mod tests {
             .fonts()
             .unwrap()
             .iter()
-            .all(|font| font.embedded_path.is_none()));
+            .any(|font| font.embedded_path.is_some()));
+        assert_eq!(
+            document.page_text_objects(0).unwrap()[0].cg_transforms[0].glyphs,
+            [36, 37]
+        );
     }
 
     #[test]
@@ -26088,7 +26222,11 @@ mod tests {
             .fonts()
             .unwrap()
             .iter()
-            .all(|font| font.embedded_path.is_none()));
+            .any(|font| font.embedded_path.is_some()));
+        assert_eq!(
+            document.page_text_objects(0).unwrap()[0].cg_transforms[0].glyphs,
+            [0, 37]
+        );
 
         let mut missing_glyph = pdf.clone();
         let cmap = missing_glyph
@@ -26109,7 +26247,11 @@ mod tests {
             .fonts()
             .unwrap()
             .iter()
-            .all(|font| font.embedded_path.is_none()));
+            .any(|font| font.embedded_path.is_some()));
+        assert_eq!(
+            document.page_text_objects(0).unwrap()[0].cg_transforms[0].glyphs,
+            [36, 37]
+        );
     }
 
     #[test]

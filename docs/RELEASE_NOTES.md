@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- Embedded TrueType/OpenType text keeps source glyph IDs independently of
+  ToUnicode text, using OFD CGTransform when the mappings differ. Ligatures,
+  multi-character aliases and registered Unicode variation sequences retain
+  glyph advances and text semantics; CID fonts without a Unicode cmap also
+  render from their outlines. Tests cover exact source glyph selection,
+  UTF-16/escaped text spans, limits, malformed glyph maps, font/package reuse,
+  independent Ghostscript raster comparison and three language bindings.
+  Mapped glyph bounds also expand object boundaries to retain overhanging ink.
+
 - Type0 fonts without ToUnicode recover text through five pinned official
   Adobe CID-to-Unicode resources when their descendant declares a supported
   collection. Named, embedded and Identity-H source encodings still select

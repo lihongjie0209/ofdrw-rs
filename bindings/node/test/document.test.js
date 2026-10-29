@@ -11,6 +11,29 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('import Unicode sequences with original embedded PDF glyphs', () => {
+  for (const [name, text, glyphs] of [
+    ['type0-ligature-glyph.pdf', ['fiA', 'fi'], [3315, 36]],
+    ['truetype-ligature-glyph.pdf', ['fiA', 'fi'], [3315, 36]],
+    ['type0-no-unicode-cmap-glyph.pdf', ['fiA', 'fi'], [3315, 36]],
+    ['type0-variation-glyph.pdf', ['0\ufe00', '0\ufe00'], [19]],
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
+    try {
+      assert.deepEqual(document.pageText(0), text);
+      const objects = document.pageTextObjects(0);
+      assert.deepEqual(objects[0].cg_transforms[0].glyphs, glyphs);
+      assert.equal(document.fonts().filter((font) => font.embedded_path !== null).length, 1);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pageTextObjects(0), objects);
+        assert.deepEqual(reopened.pagePng(0, 72), document.pagePng(0, 72));
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
+
 test('decode mixed-length Type0 source codes independently of CID widths', () => {
   for (const [name, text] of [
     ['type0-mixed-cmap.pdf', ['中文']],

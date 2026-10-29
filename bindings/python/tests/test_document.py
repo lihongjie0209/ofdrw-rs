@@ -697,6 +697,29 @@ def test_imports_pdf_font_styles_and_preserves_them_after_save(tmp_path, name, w
         assert reopened.validate_references() == []
 
 
+@pytest.mark.parametrize("name,text,glyphs", [
+    ("type0-ligature-glyph.pdf", ["fiA", "fi"], [3315, 36]),
+    ("truetype-ligature-glyph.pdf", ["fiA", "fi"], [3315, 36]),
+    ("type0-no-unicode-cmap-glyph.pdf", ["fiA", "fi"], [3315, 36]),
+    ("type0-variation-glyph.pdf", ["0\ufe00", "0\ufe00"], [19]),
+])
+def test_imports_pdf_unicode_sequences_with_original_glyphs(tmp_path, name, text, glyphs):
+    source = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / name
+    with Document.from_pdf_bytes(source.read_bytes()) as document:
+        assert document.page_text(0) == text
+        objects = document.page_text_objects(0)
+        assert objects[0]["cg_transforms"][0]["glyphs"] == glyphs
+        assert len([font for font in document.fonts() if font["embedded_path"] is not None]) == 1
+        png = document.page_png(0, 72)
+        target = tmp_path / "glyphs.ofd"
+        document.save(target)
+    with Document.open(target) as reopened:
+        assert reopened.page_text(0) == text
+        assert reopened.page_text_objects(0) == objects
+        assert reopened.page_png(0, 72) == png
+        assert reopened.validate_references() == []
+
+
 def test_imports_macroman_truetype_pdf_with_embedded_font(tmp_path):
     fixtures = Path(__file__).resolve().parents[3] / "crates" / "ofdrw" / "tests" / "fixtures"
     source = (fixtures / "truetype-macroman.pdf").read_bytes()

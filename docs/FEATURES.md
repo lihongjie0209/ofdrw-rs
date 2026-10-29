@@ -1657,19 +1657,30 @@ imported as OFD text, using the document's fallback font. Consecutive text
 strings, `TJ` adjustments, and `Tc`/`Tw` spacing use explicit PDF font widths
 when available, or the built-in advances of the fourteen standard Type1 faces
 when `Widths` is omitted. One-byte `ToUnicode` CMaps override text decoding while
-the original character codes still determine spacing. A code mapping to more
-than one Unicode character is rejected because this layout path positions one
-character per code. Custom and subset Type1 fonts may use an explicit named
+the original character codes still determine spacing. With a usable embedded
+TrueType/OpenType program, a code may map to a Unicode sequence while retaining
+one source glyph and one PDF advance. Custom and subset Type1 fonts may use an explicit named
 encoding or an Encoding dictionary with a named BaseEncoding and Differences;
 a complete ToUnicode CMap retains priority when supplied. Type0 CID fonts
 with `Identity-H` or an embedded horizontal Encoding CMap and a
 `ToUnicode` CMap also import as OFD text; descendant `DW` and both forms of
 `W` determine glyph advance. Embedded TrueType/OpenType programs from
-`CIDFontType2` are copied when their Unicode character map agrees with the
-PDF `CIDToGIDMap`. Simple TrueType fonts with `WinAnsiEncoding`,
-`StandardEncoding`, or `MacRomanEncoding` can use their embedded TrueType/OpenType program when its
-Unicode character map agrees with the decoded text; repeated text runs reuse
-the same OFD font resource.
+`CIDFontType2` are copied using valid PDF `CIDToGIDMap` selectors. Simple
+TrueType source encodings and Differences names select their actual glyphs.
+When Unicode and source glyphs differ, OFD `CGTransform` retains both the
+original Unicode text and the PDF glyph sequence; DeltaX remains per glyph,
+and CodeCount measures the unescaped text in UTF-16 units. This includes
+ligatures, variation selectors and CID fonts without a Unicode sfnt `cmap`.
+Object boundaries include transformed source glyph bounds, retaining negative
+bearings and other outline overhangs instead of clipping them at the baseline.
+Embedded font bytes remain unchanged and repeated runs reuse their resource.
+Invalid glyph indices and odd CIDToGIDMap byte lengths return errors.
+Mapped runs require known PDF advances for multiple glyphs and are limited
+to 10,000 glyphs per object; decoded Unicode expansion is bounded to 200,000
+UTF-16 units per text-showing run. Without a usable embedded program,
+multi-character mappings remain unsupported rather than losing text or
+guessing glyphs. The mapping follows
+[ISO 32000-1, section 9.10.3](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
 Simple-font `Encoding` dictionaries may provide a named `BaseEncoding`
 (`StandardEncoding`, `WinAnsiEncoding`, `MacRomanEncoding` or `MacExpertEncoding`) and a
@@ -1684,8 +1695,9 @@ and word spacing. ToUnicode retains precedence when present.
 Encoding dictionaries, base names, difference arrays and their members may
 be indirect. Unknown or multi-character mappings fail only if used by the
 text. Parsing accepts at most 4,096 Differences entries and 1,024 bytes per
-glyph name. Embedded TrueType reuse also checks overridden glyph names
-against the font's Unicode glyphs; mismatches use the fallback font.
+glyph name. Embedded TrueType reuse resolves overridden glyph names in the
+actual program; an unavailable source glyph name retains the font fallback.
+ToUnicode aliases change text semantics without replacing source outlines.
 The mapping follows the [Adobe Glyph List specification](https://github.com/adobe-type-tools/agl-specification).
 Named and difference encodings follow
 [ISO 32000-1, section 9.6.6](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
@@ -1775,9 +1787,10 @@ values are not assumed to be Unicode. Five immutable Unicode maps load on
 demand without network or system resources. Supplementary-plane scalars
 remain intact through UTF-16 surrogate pairs. A present ToUnicode retains
 priority, including errors for malformed or incomplete explicit maps.
-Unknown collections, undefined mappings and multi-scalar mappings still
-return errors under the current one-character-per-code layout restriction;
-Unicode variation sequences are not silently shortened. This fallback follows
+Unknown collections and undefined mappings still return errors. Multi-scalar
+mappings retain their source glyph through CGTransform when a usable embedded
+program is available; Unicode variation sequences are never silently shortened.
+This fallback follows
 [ISO 32000-1, section 9.10.2](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 Source mappings and original notices are pinned to
 [Adobe mapping-resources-pdf](https://github.com/adobe-type-tools/mapping-resources-pdf/tree/2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5),

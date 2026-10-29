@@ -165,22 +165,19 @@ impl SimpleEncoding {
         }
     }
 
-    pub fn matches_face(&self, face: &ttf_parser::Face<'_>, codes: &[u8], text: &str) -> bool {
-        self.decode(codes).ok().as_deref() == Some(text)
-            && text.chars().zip(codes).all(|(ch, code)| {
-                let Some(glyph) = face.glyph_index(ch) else {
-                    return false;
-                };
+    pub fn glyph_ids(&self, face: &ttf_parser::Face<'_>, codes: &[u8]) -> Option<Vec<u16>> {
+        codes
+            .iter()
+            .map(|code| {
                 match &self.glyph_names[usize::from(*code)] {
-                    Some(name) => {
-                        std::str::from_utf8(name)
-                            .ok()
-                            .and_then(|name| face.glyph_index_by_name(name))
-                            == Some(glyph)
-                    }
-                    None => true,
+                    Some(name) => std::str::from_utf8(name)
+                        .ok()
+                        .and_then(|name| face.glyph_index_by_name(name)),
+                    None => self.characters[usize::from(*code)].and_then(|ch| face.glyph_index(ch)),
                 }
+                .map(|glyph| glyph.0)
             })
+            .collect()
     }
 }
 
@@ -463,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_font_matching_checks_reencoded_names_and_unicode_semantics() {
+    fn embedded_font_glyphs_follow_source_encoding_and_require_actual_variant_names() {
         let pdf = PdfDocument::new();
         let face =
             ttf_parser::Face::parse(include_bytes!("../../tests/fixtures/dejavu-sans.ttf"), 0)
@@ -474,15 +471,17 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(encoding.matches_face(&face, b"A", "B"));
-        assert!(!encoding.matches_face(&face, b"A", "A"));
+        assert_eq!(
+            encoding.glyph_ids(&face, b"A"),
+            Some(vec![face.glyph_index('B').unwrap().0])
+        );
         let variant = SimpleEncoding::parse(
             &pdf,
             &font(vec![65.into(), Object::Name(b"A.swash".to_vec())]),
             false,
         )
         .unwrap();
-        assert!(!variant.matches_face(&face, b"A", "A"));
+        assert!(variant.glyph_ids(&face, b"A").is_none());
     }
 
     #[test]
