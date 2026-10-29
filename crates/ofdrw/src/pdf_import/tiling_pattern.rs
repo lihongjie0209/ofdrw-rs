@@ -15,6 +15,7 @@ pub(super) struct Source {
     matrix: [f64; 6],
     step: [f64; 2],
     uncolored: bool,
+    raster_scale: f64,
     cells: std::sync::Mutex<HashMap<[u8; 3], String>>,
 }
 
@@ -119,6 +120,7 @@ impl Source {
             matrix,
             step,
             uncolored,
+            raster_scale: page.raster_scale,
             cells: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -193,6 +195,8 @@ impl Source {
             box_: self.bbox,
             index: scratch,
             resources,
+            raster_scale: self.raster_scale
+                * pdf_linear_scale(crate::multiply_matrix(self.parent.ctm, self.matrix)),
         };
         import_content(output, &cell_page, content, state, &mut Vec::new())?;
         let cell_xml = {

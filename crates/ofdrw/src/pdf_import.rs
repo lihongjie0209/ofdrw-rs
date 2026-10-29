@@ -10,6 +10,7 @@ mod mesh_shading;
 mod multi_function;
 mod pattern;
 mod plane_shading;
+mod radial_shading;
 mod scalar_function;
 mod separation_color;
 mod shading_pattern;
@@ -467,6 +468,8 @@ struct PdfPageContext<'a> {
     box_: [f64; 4],
     index: usize,
     resources: &'a Object,
+    // Conservative outer-transform magnification for sampled paint sources.
+    raster_scale: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -3383,6 +3386,18 @@ fn pdf_shading_segments_inner(
     Ok(segments)
 }
 
+fn pdf_linear_scale([a, b, c, d, _, _]: [f64; 6]) -> f64 {
+    let largest = [a, b, c, d].into_iter().map(f64::abs).fold(0., f64::max);
+    if largest == 0. || !largest.is_finite() {
+        return largest;
+    }
+    let [a, b, c, d] = [a, b, c, d].map(|v| v / largest);
+    let x = a * a + b * b;
+    let y = c * c + d * d;
+    let cross = a * c + b * d;
+    largest * ((x + y + (x - y).hypot(2. * cross)) * 0.5).sqrt()
+}
+
 fn import_pdf_shading(
     output: &mut OfdDocument,
     page: &PdfPageContext<'_>,
@@ -3509,6 +3524,13 @@ fn import_pdf_shading_source(
         "shading Coords",
         if shading_type == 2 { 4 } else { 6 },
     )?;
+    if shading_type == 3 && radial_shading::needs_general(&coords) {
+        let mut state = state.clone();
+        if let Some(clip) = bbox_clip {
+            state.clips.push(clip);
+        }
+        return radial_shading::import(output, page, &state, shading, &coords, visible);
+    }
     let (kind, start, end, reverse) = if shading_type == 2 {
         let start = state.point(coords[0], coords[1], page.box_);
         let end = state.point(coords[2], coords[3], page.box_);
@@ -6068,6 +6090,7 @@ fn import_image_stream(
                 resources,
                 box_,
                 index: page_index,
+                raster_scale: 1.,
             },
             state,
             image,
@@ -7764,6 +7787,7 @@ fn import_page(
         box_,
         index: page_index,
         resources,
+        raster_scale: 1.,
     };
     import_content(output, &page_context, content, state, &mut Vec::new())
 }
@@ -14156,7 +14180,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_radial_shading_with_unnested_circles() {
+    fn imports_radial_shading_with_unnested_circles() {
         let bytes = include_bytes!("../tests/fixtures/shading-radial.pdf");
         let mut pdf = PdfDocument::load_mem(bytes).unwrap();
         pdf.get_object_mut((5, 0))
@@ -14176,7 +14200,9 @@ mod tests {
             );
         let mut altered = Vec::new();
         pdf.save_to(&mut altered).unwrap();
-        assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+        let document = OfdDocument::from_pdf_bytes(&altered).unwrap();
+        assert!(document.page_svg(0).unwrap().contains("<image"));
+        assert!(document.validate_references().unwrap().is_empty());
     }
 
     #[test]

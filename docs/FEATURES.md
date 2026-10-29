@@ -2037,8 +2037,8 @@ on a native pattern/composite wrapper. Transforming axial endpoints alone would
 change its isocolor lines, while scaling a radial radius cannot represent the
 resulting ellipse. Even small shears use the full matrix; the looser tolerance
 used for stroke widths does not select the gradient representation. Conformal
-transforms continue to use the existing direct gradient representation. Existing
-radial restrictions, including nested source circles, remain unchanged.
+transforms continue to use the existing direct gradient representation for
+strictly nested radial circles.
 
 This path uses the graphics state at the `sh` operator, including rendering
 intent, fill alpha, blend mode and current clips. Shading `BBox` clips the source;
@@ -2053,6 +2053,27 @@ Multiply, Form matrices, page rotation, UserUnit and hidden content. Additional
 unit checks cover current ICC rendering intent, hidden malformed shaders, text
 clips and nonpainting colors. `scripts/generate_affine_shading_fixtures.py`
 regenerates these sources and rasters; Python/Go/Node.js call the same importer.
+
+General radial shadings also support nonnested, overlapping, equal-radius and
+internally tangent source circles. The importer solves the two-circle quadratic
+in source coordinates, selects the greatest valid parameter, rejects negative
+radii and applies each extension flag independently, as specified in
+[PDF 32000-1, section 8.7.4.5.4](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+The tangent limit uses a linear equation; two zero radii paint nothing.
+Coincident circles with the same nonzero radius remain explicitly unsupported.
+
+Strictly nested circles retain the native OFD gradient. General circle fields
+use an RGBA image sampled at 16 pixels/mm, capped at four million pixels per
+paint. Outer shading/tiling-pattern magnification contributes to sampling density,
+including nested patterns. This fallback preserves alpha, blending, clipping,
+rendering intent, background handling and affine transforms, but enlarging the
+result beyond its sampled resolution cannot recover additional detail.
+Thirty-three authored PDF/reference-image pairs cover these cases, function
+families, color spaces, hidden content and Form/pattern nesting. The tests compare
+original-source Ghostscript rasters, validate resource references, reopen OFD
+archives and check PDF export. Regenerate them with
+`scripts/generate_general_radial_fixtures.py`; Python, Go and Node.js integration
+also exercise the shared importer.
 
 Function arrays retain the union of sample-table knots, cubic extrema,
 function-domain boundaries and stitching bounds before adaptive sampling.

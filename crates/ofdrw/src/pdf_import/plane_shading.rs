@@ -315,7 +315,10 @@ pub(super) fn import(
     if !visible || determinant == 0. {
         return Ok(());
     }
-    let [width, height] = dimensions((b.0 - a.0).hypot(b.1 - a.1), (c.0 - a.0).hypot(c.1 - a.1))?;
+    let [width, height] = dimensions(
+        (b.0 - a.0).hypot(b.1 - a.1) * page.raster_scale,
+        (c.0 - a.0).hypot(c.1 - a.1) * page.raster_scale,
+    )?;
     let pixels = width as usize * height as usize;
     let work: usize = functions.iter().map(Function::work_cost).sum();
     if work.checked_mul(pixels).is_none_or(|work| work > MAX_WORK) {

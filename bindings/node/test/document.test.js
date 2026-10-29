@@ -4024,3 +4024,19 @@ test('import direct affine shadings through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+test('import general radial shadings through the C ABI', () => {
+  for (const kind of ['grow', 'equal', 'shrink-both', 'affine', 'pattern-background', 'nested-pattern', 'calculator-step']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('general-radial-' + kind + '.pdf')));
+    try {
+      assert.equal(document.pageCount, 1);
+      assert.ok(document.pageSvg(0).includes('<image'));
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

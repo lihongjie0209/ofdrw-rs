@@ -273,6 +273,7 @@ mod tests {
             resources: &resources,
             box_: [0., 0., 96., 96.],
             index: 0,
+            raster_scale: 1.,
         };
         let colors = MeshColors::new(
             &page,
@@ -304,6 +305,7 @@ mod tests {
             resources: &resources,
             box_: [0., 0., 96., 96.],
             index: 0,
+            raster_scale: 1.,
         };
         let colors = MeshColors::new(
             &page,
@@ -386,6 +388,7 @@ mod tests {
             resources: &resources,
             box_: [0., 0., 96., 96.],
             index: 0,
+            raster_scale: 1.,
         };
         let state = GraphicsState::default();
         let colors = MeshColors::new(

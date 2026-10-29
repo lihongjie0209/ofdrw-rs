@@ -1,12 +1,21 @@
 Unreleased source changes after v0.1.0:
 
+- General PDF radial shading supports nonnested/equal-radius circles, separate
+  endpoint extension, point circles and the tangent linear limit. A stable
+  quadratic selects the greatest valid parameter with a nonnegative radius.
+  Native nested gradients remain vector paints; general fields use bounded
+  RGBA sampling (16 pixels/mm, four million pixels per paint), accounting for
+  outer pattern magnification. Coincident nonzero circles remain unsupported.
+  Thirty-three original-source Ghostscript raster/round-trip scenes, numeric
+  boundary tests and Python/Go/Node integration cover the feature.
+
 - Direct PDF axial/radial shading preserves full affine geometry under
   nonuniform scale and shear instead of projecting only endpoints/radii.
   Current rendering intent, alpha, blend mode, clipping and Form/page matrices
   are retained; direct-shading backgrounds stay ignored. Hidden/nonpainting
   validation leaves no resources or reserved IDs. Twenty-four original-PDF
   raster references, four new boundary tests and Python/Go/Node integration
-  cover the change. Existing nested-radial-circle restrictions remain.
+  cover the change.
 
 - PDF shading parameters resolve indirect `ShadingType`, bounds, coordinates,
   extension flags and domains, including referenced array components. Direct

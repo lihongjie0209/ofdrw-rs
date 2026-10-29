@@ -79,6 +79,7 @@ pub(super) fn validate_opaque(
                 resources,
                 index: 0,
                 box_: [0., 0., 1., 1.],
+                raster_scale: 1.,
             };
             let source =
                 shading_pattern::Source::resolve(&page, value, Arc::new(GraphicsState::default()))?;

@@ -471,6 +471,7 @@ mod tests {
             resources: &resources,
             box_: [0., 0., 96., 96.],
             index: 0,
+            raster_scale: 1.,
         };
         parse(
             pdf.get_object((5, 0)).unwrap(),

@@ -1,0 +1,75 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 64] /Resources << /Shading << /S 5 0 R >> /Pattern << /P 8 0 R /T 9 0 R >> /ExtGState << /G 7 0 R >> /Properties << /H 13 0 R >> /XObject << /F 14 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<<  /Length 5 >>
+stream
+/S sh
+endstream
+endobj
+5 0 obj
+<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [24 32 20 72 32 8] /Extend [true false] /Function 6 0 R >>
+endobj
+6 0 obj
+<< /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>
+endobj
+7 0 obj
+<< /ca .5 >>
+endobj
+8 0 obj
+<< /Type /Pattern /PatternType 2 /Shading 5 0 R /Matrix [1 0 0 1 0 0] >>
+endobj
+9 0 obj
+<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 /BBox [0 0 48 32] /XStep 48 /YStep 32 /Matrix [2 0 0 2 0 0] /Resources << /Pattern << /S 8 0 R >> >> /Length 33 >>
+stream
+/Pattern cs /S scn 0 0 48 32 re f
+endstream
+endobj
+10 0 obj
+<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 2 >>
+endobj
+11 0 obj
+<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1 >>
+endobj
+12 0 obj
+<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >>
+endobj
+13 0 obj
+<< /Type /OCG /Name (Hidden radial field) >>
+endobj
+14 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 96 64] /Matrix [1 .2 .4 .8 -8 0] /Resources << /Shading << /S 5 0 R >> >> /Length 5 >>
+stream
+/S sh
+endstream
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000359 00000 n 
+0000000414 00000 n 
+0000000537 00000 n 
+0000000617 00000 n 
+0000000645 00000 n 
+0000000733 00000 n 
+0000000974 00000 n 
+0000001047 00000 n 
+0000001120 00000 n 
+0000001193 00000 n 
+0000001254 00000 n 
+trailer
+<< /Size 15 /Root 1 0 R >>
+startxref
+1424
+%%EOF

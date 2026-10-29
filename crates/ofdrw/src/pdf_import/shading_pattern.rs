@@ -12,6 +12,7 @@ pub(super) struct Source {
     resources: Object,
     parent: Arc<GraphicsState>,
     matrix: [f64; 6],
+    raster_scale: f64,
     ext_gstate: Option<lopdf::Dictionary>,
     cells: std::sync::Mutex<HashMap<[u64; 4], String>>,
 }
@@ -62,6 +63,7 @@ impl Source {
             resources: page.resources.clone(),
             parent,
             matrix,
+            raster_scale: page.raster_scale,
             ext_gstate,
             cells: std::sync::Mutex::new(HashMap::new()),
         })
@@ -208,6 +210,8 @@ impl Source {
             box_: bbox,
             index: scratch,
             resources: &self.resources,
+            raster_scale: self.raster_scale
+                * pdf_linear_scale(crate::multiply_matrix(self.parent.ctm, self.matrix)),
         };
         self.background(output, &context, state)?;
         import_pdf_shading_source(output, &context, state, &self.shading, true)?;
@@ -395,6 +399,7 @@ mod tests {
             resources,
             index: 0,
             box_: [0., 0., 96., 64.],
+            raster_scale: 1.,
         }
     }
 

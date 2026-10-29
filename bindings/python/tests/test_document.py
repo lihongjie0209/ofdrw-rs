@@ -7649,3 +7649,14 @@ def test_pdf_direct_affine_shadings_across_binding(kind):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+@pytest.mark.parametrize("kind", ["grow", "equal", "shrink-both", "affine", "pattern-background", "nested-pattern", "calculator-step"])
+def test_pdf_general_radial_shadings_across_binding(kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("general-radial-" + kind + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert document.page_count == 1
+        assert "<image" in document.page_svg(0)
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []
