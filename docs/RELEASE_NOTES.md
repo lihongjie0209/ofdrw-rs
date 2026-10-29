@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- Type0 text accepts embedded horizontal Encoding CMaps with mixed one- to
+  four-byte source codes, CID character/range mappings, notdef fallbacks and
+  bounded UseCMap inheritance. Unicode lookup uses the source code while
+  widths and embedded glyph validation use the mapped CID. Tests cover
+  bytewise codespaces, word spacing, malformed data, limits, embedded font
+  reuse, equivalent geometry/raster output and Python/Go/Node.js consumers.
+
 - Custom and subset Type1 fonts import without ToUnicode when an explicit
   named encoding or named BaseEncoding/Differences provides the character
   mapping. MacExpertEncoding is accepted alongside the other predefined

@@ -1000,7 +1000,7 @@ func TestImportsToUnicodePDF(t *testing.T) {
 	for _, name := range []string{
 		"type1-tounicode.pdf", "type1-subset-tounicode.pdf", "rotated-tounicode.pdf",
 		"metadata-tounicode.pdf", "outline-tounicode.pdf", "type0-identity-tounicode.pdf",
-		"type0-indirect-widths.pdf", "encoding-differences.pdf", "custom-type1-differences.pdf",
+		"type0-indirect-widths.pdf", "type0-mixed-cmap.pdf", "encoding-differences.pdf", "custom-type1-differences.pdf",
 		"simple-indirect-widths.pdf", "text-default-origin.pdf",
 	} {
 		t.Run(name, func(t *testing.T) {

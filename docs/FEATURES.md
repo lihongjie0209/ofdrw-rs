@@ -1662,7 +1662,7 @@ than one Unicode character is rejected because this layout path positions one
 character per code. Custom and subset Type1 fonts may use an explicit named
 encoding or an Encoding dictionary with a named BaseEncoding and Differences;
 a complete ToUnicode CMap retains priority when supplied. Type0 CID fonts
-with two-byte `Identity-H` codes and a
+with `Identity-H` or an embedded horizontal Encoding CMap and a
 `ToUnicode` CMap also import as OFD text; descendant `DW` and both forms of
 `W` determine glyph advance. Embedded TrueType/OpenType programs from
 `CIDFontType2` are copied when their Unicode character map agrees with the
@@ -1731,8 +1731,24 @@ objects. Width validation and `TJ` spacing apply after resolution; broken or
 cyclic references return errors. Width-table expansion is limited to 1,000,000
 assignments per parse, counting overlapping and overwritten declarations.
 
+Embedded Encoding CMaps accept mixed one-, two-, three- and four-byte source
+codes. `begincidchar`/`begincidrange` map source codes to CIDs, while ToUnicode
+uses the original source code and its byte length. CID widths and embedded
+CIDToGIDMap checks use the resulting CID. `beginnotdefchar`/`beginnotdefrange`
+provide fallback CIDs for otherwise unmapped codes; the final default is CID 0.
+`UseCMap` inherits another embedded stream or Identity-H with local mapping
+overrides; a `usecmap` declaration must agree with its dictionary base name.
+Only descendant font number zero is accepted. Codespace matching compares
+each byte's bounds and rejects overlapping or prefix-ambiguous ranges.
+Parsing limits are 128 codespace ranges, 100,000 assignments (including
+overwrites), one MiB of decoded CMap data across inheritance, and eight
+inheritance links. Word spacing applies to a one-byte source code 32, even
+when ToUnicode gives it a different character; two-byte codes do not gain
+word spacing merely because they map to a space. These rules follow
+[ISO 32000-1, sections 9.3.3 and 9.7.5](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
+
 Other source fonts use the document's fallback font for previews. Vertical
-and other CID encodings remain unsupported. The `'` and `"` line operators
+writing and named CID CMaps other than Identity-H remain unsupported. The `'` and `"` line operators
 are supported.
 Text-state operators such as `Tr` and `Tf` are accepted before `BT`; text
 positioning and drawing still require an active text object. ToUnicode CMaps

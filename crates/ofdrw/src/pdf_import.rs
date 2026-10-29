@@ -1,5 +1,6 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
+mod cid_encoding;
 mod font_style;
 mod scalar_function;
 mod simple_encoding;
@@ -6835,16 +6836,10 @@ fn import_type0_text(
     let encoding = font
         .get(b"Encoding")
         .map_err(|_| OfdError::Invalid("PDF Type0 font has no Encoding".into()))?;
-    if pdf_resolved_value(Some(page.pdf), encoding, "Type0 Encoding")?
-        .as_name()
-        .ok()
-        != Some(b"Identity-H".as_slice())
-    {
-        return Err(OfdError::Invalid(
-            "PDF Type0 encoding is not Identity-H".into(),
-        ));
-    }
-    let Encoding::UnicodeMapEncoding(map) = pdf_to_unicode_map(font, page.pdf)? else {
+    let encoding = cid_encoding::CidEncoding::parse(page.pdf, encoding)?;
+    let mut mapped_font = font.clone();
+    mapped_font.set("Encoding", Object::Name(b"Identity-H".to_vec()));
+    let Encoding::UnicodeMapEncoding(map) = pdf_to_unicode_map(&mapped_font, page.pdf)? else {
         unreachable!("pdf_to_unicode_map only returns Unicode maps")
     };
     let descendants = font
@@ -6886,14 +6881,14 @@ fn import_type0_text(
         match element {
             Object::String(bytes, _) => {
                 bytes_seen = bytes_seen.saturating_add(bytes.len());
-                if bytes_seen > 100_000 || bytes.len() % 2 != 0 {
+                if bytes_seen > 100_000 {
                     return Err(OfdError::Invalid(
                         "PDF Type0 text has invalid code length".into(),
                     ));
                 }
-                for pair in bytes.chunks_exact(2) {
-                    let cid = u16::from_be_bytes([pair[0], pair[1]]);
-                    let units = map.get(u32::from(cid), 2).ok_or_else(|| {
+                for code in encoding.decode(bytes)? {
+                    let cid = code.cid;
+                    let units = map.get(code.source, code.length).ok_or_else(|| {
                         OfdError::Invalid("PDF Type0 ToUnicode mapping is incomplete".into())
                     })?;
                     let decoded = String::from_utf16(&units).map_err(|_| {
@@ -6909,7 +6904,12 @@ fn import_type0_text(
                     cids.push(cid);
                     pen += widths.get(&cid).copied().unwrap_or(default_width) * state.size_pt
                         / 1000.0
-                        + state.char_spacing;
+                        + state.char_spacing
+                        + if code.length == 1 && code.source == 32 {
+                            state.word_spacing
+                        } else {
+                            0.0
+                        };
                 }
             }
             Object::Integer(_) | Object::Real(_) => {
@@ -25313,6 +25313,103 @@ mod tests {
     }
 
     #[test]
+    fn embedded_cmap_mixed_codes_keep_identity_h_geometry_and_rendering() {
+        let direct = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/type0-identity-tounicode.pdf"
+        ))
+        .unwrap();
+        let mixed =
+            OfdDocument::from_pdf_bytes(include_bytes!("../tests/fixtures/type0-mixed-cmap.pdf"))
+                .unwrap();
+        assert_eq!(mixed.page_text(0).unwrap(), ["中文"]);
+        assert_eq!(
+            mixed.page_text_objects(0).unwrap(),
+            direct.page_text_objects(0).unwrap()
+        );
+        assert_eq!(
+            mixed.page_png(0, 72.0).unwrap(),
+            direct.page_png(0, 72.0).unwrap()
+        );
+        let reopened = OfdDocument::from_bytes(&mixed.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_text_objects(0).unwrap(),
+            mixed.page_text_objects(0).unwrap()
+        );
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn embedded_cmap_reads_four_source_lengths_and_advances_following_runs() {
+        let document = OfdDocument::from_pdf_bytes(include_bytes!(
+            "../tests/fixtures/type0-four-byte-cmap.pdf"
+        ))
+        .unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["中文AB", "中"]);
+        let objects = document.page_text_objects(0).unwrap();
+        let advances = crate::expand_text_deltas(objects[0].codes[0].delta_x.as_deref(), 3)
+            .unwrap()
+            .unwrap();
+        for (advance, expected) in advances.iter().zip([7.2, 6.0, 8.4]) {
+            assert!((*advance - expected * MM_PER_PT).abs() < 1e-6);
+        }
+        assert!(
+            (objects[1].boundary.unwrap()[0] - objects[0].boundary.unwrap()[0] - 31.2 * MM_PER_PT)
+                .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn embedded_cmap_word_spacing_uses_one_byte_source_32_not_unicode_or_cid() {
+        let original =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/type0-mixed-cmap.pdf"))
+                .unwrap();
+        for (source, expected_advance) in [("41", 6.0), ("20", 9.0)] {
+            let mut pdf = original.clone();
+            let stream = pdf.get_object_mut((8, 0)).unwrap().as_stream_mut().unwrap();
+            let data = stream.get_plain_content().unwrap();
+            stream.set_plain_content(
+                String::from_utf8(data)
+                    .unwrap()
+                    .replace("<41>", &format!("<{source}>"))
+                    .into_bytes(),
+            );
+            let stream = pdf.get_object_mut((6, 0)).unwrap().as_stream_mut().unwrap();
+            stream.set_plain_content(
+                String::from_utf8(stream.get_plain_content().unwrap())
+                    .unwrap()
+                    .replace("<41>", &format!("<{source}>"))
+                    .replace("<6587>", "<0020>")
+                    .into_bytes(),
+            );
+            let stream = pdf.get_object_mut((4, 0)).unwrap().as_stream_mut().unwrap();
+            stream.set_content(
+                format!("BT /F1 12 Tf 3 Tw 10 20 Td [<{source}> 100 <8140>] TJ <{source}> Tj ET")
+                    .into_bytes(),
+            );
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), ["中 ", "中"]);
+            let objects = document.page_text_objects(0).unwrap();
+            let advance: f64 = objects[0].codes[0]
+                .delta_x
+                .as_deref()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((advance - expected_advance * MM_PER_PT).abs() < 1e-6);
+            assert!(
+                (objects[1].boundary.unwrap()[0]
+                    - objects[0].boundary.unwrap()[0]
+                    - (expected_advance + 6.0) * MM_PER_PT)
+                    .abs()
+                    < 1e-6
+            );
+        }
+    }
+
+    #[test]
     fn indirect_cid_widths_preserve_chinese_text_spacing_and_rendering() {
         let direct = OfdDocument::from_pdf_bytes(include_bytes!(
             "../tests/fixtures/type0-identity-tounicode.pdf"
@@ -25656,6 +25753,53 @@ mod tests {
         let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.page_text(0).unwrap(), ["AB", "AB"]);
         assert_eq!(reopened.font_data(embedded[0].0).unwrap(), font_bytes);
+
+        let mut mixed = pdf.clone();
+        let fixture =
+            PdfDocument::load_mem(include_bytes!("../tests/fixtures/type0-mixed-cmap.pdf"))
+                .unwrap();
+        let encoding = mixed.add_object(fixture.get_object((8, 0)).unwrap().clone());
+        mixed
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", Object::Reference(encoding));
+        let stream = mixed
+            .get_object_mut((6, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let map = String::from_utf8(stream.get_plain_content().unwrap())
+            .unwrap()
+            .replace("1 begincodespacerange", "2 begincodespacerange")
+            .replace("<0000> <FFFF>", "<00> <7f>\n<8140> <81ff>")
+            .replace("<0001>", "<41>")
+            .replace("<0002>", "<8140>");
+        stream.set_plain_content(map.into_bytes());
+        let stream = mixed
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        let content = String::from_utf8(stream.get_plain_content().unwrap())
+            .unwrap()
+            .replace("<0001>", "<41>")
+            .replace("<0002>", "<8140>");
+        stream.set_plain_content(content.into_bytes());
+        let mut bytes = Vec::new();
+        mixed.save_to(&mut bytes).unwrap();
+        let mixed = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            mixed.page_text_objects(0).unwrap(),
+            document.page_text_objects(0).unwrap()
+        );
+        assert_eq!(mixed.fonts().unwrap(), document.fonts().unwrap());
+        assert_eq!(mixed.font_data(embedded[0].0).unwrap(), font_bytes);
+        assert_eq!(
+            mixed.page_png(0, 72.0).unwrap(),
+            document.page_png(0, 72.0).unwrap()
+        );
 
         let mut opentype = pdf.clone();
         let descriptor = opentype

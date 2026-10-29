@@ -11,6 +11,25 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('decode mixed-length Type0 source codes independently of CID widths', () => {
+  for (const [name, text] of [
+    ['type0-mixed-cmap.pdf', ['中文']],
+    ['type0-four-byte-cmap.pdf', ['中文AB', '中']],
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
+    try {
+      assert.deepEqual(document.pageText(0), text);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pageText(0), text);
+        assert.deepEqual(reopened.pageTextObjects(0), document.pageTextObjects(0));
+        assert.deepEqual(reopened.pagePng(0, 72), document.pagePng(0, 72));
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
+
 test('preserve named and descriptor PDF font styles through an OFD round trip', () => {
   for (const [name, weight] of [['font-style-standard.pdf', 700], ['font-style-descriptor.pdf', 600]]) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture(name)));
