@@ -1992,6 +1992,23 @@ group in [PDF 32000-1 section 11.6.7](https://opensource.adobe.com/dc-acrobat-sd
 Backdrop-dependent blending and graphics-state soft masks still return errors.
 Existing shading-function, color-space, geometry and work limits remain in force.
 
+`ShadingType`, `BBox`, `Coords`, `Extend` and `Domain` also resolve indirect
+objects, including referenced numeric/boolean array entries. The same resolution
+is used by direct `sh` painting and shading patterns. Pattern matrices and
+background components use the shared bounded array reader. Explicit malformed,
+unresolved or cyclic parameter values return errors rather than substituting
+array defaults; numeric coordinate limits remain unchanged.
+
+The parameter-reference regression suite covers all seven shading families,
+compares direct/reference encodings for byte-identical SVG and PNG output, and
+checks saved/reopened OFD references. Two additional authored fixtures exercise
+both direct `sh` and pattern painting. Their committed direct-value equivalents
+supply the independent Ghostscript rasters because Ghostscript 10.02.1 cannot
+render all nested references and Poppler ignores the aliased `BBox` in these
+files. `scripts/generate_indirect_shading_fixtures.py` regenerates both source
+encodings and the references. Python, Go and Node.js also import the authored
+parameter-reference pattern through their existing APIs.
+
 The shading-pattern corpus contains 28 raster/round-trip scenes. Ghostscript
 10.02.1 and Poppler ignore alpha in the pattern's own ExtGState. Three alpha
 references therefore use explicit equivalent Form groups to apply the product

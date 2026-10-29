@@ -1,5 +1,13 @@
 Unreleased source changes after v0.1.0:
 
+- PDF shading parameters resolve indirect `ShadingType`, bounds, coordinates,
+  extension flags and domains, including referenced array components. Direct
+  shading operators and pattern paints share the same array reader and numeric
+  limits. Thirteen new integration tests cover all seven shading families,
+  direct/reference SVG/PNG equality, independent rasters, round trips and
+  malformed/cyclic values. Authored reference-parameter sources and equivalent
+  direct-value PDFs are committed, with Python/Go/Node integration coverage.
+
 - PDF shading patterns (`PatternType=2`) import through the seven existing
   shading families as reusable native paints for paths, strokes, text and
   stencils. Affine source-space mapping preserves radial/axial geometry;

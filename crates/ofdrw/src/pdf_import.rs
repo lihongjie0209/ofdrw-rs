@@ -1971,6 +1971,38 @@ fn pdf_resolved_value<'a>(
         .map_err(|error| OfdError::Invalid(format!("invalid PDF {name}: {error}")))
 }
 
+fn pdf_resolved_array(
+    pdf: &PdfDocument,
+    value: &Object,
+    name: &str,
+    count: usize,
+) -> Result<Vec<Object>, OfdError> {
+    let values = pdf_resolved_value(Some(pdf), value, name)?
+        .as_array()
+        .map_err(|_| OfdError::Invalid(format!("invalid PDF {name} array")))?;
+    if values.len() != count {
+        return Err(OfdError::Invalid(format!(
+            "PDF {name} expects {count} operands"
+        )));
+    }
+    values
+        .iter()
+        .map(|value| pdf_resolved_value(Some(pdf), value, name).cloned())
+        .collect()
+}
+
+fn pdf_numeric_array(
+    pdf: &PdfDocument,
+    value: &Object,
+    name: &str,
+    count: usize,
+) -> Result<Vec<f64>, OfdError> {
+    numbers(
+        &Operation::new(name, pdf_resolved_array(pdf, value, name, count)?),
+        count,
+    )
+}
+
 fn pdf_color_numbers<const N: usize>(
     pdf: Option<&PdfDocument>,
     value: &Object,
@@ -3378,18 +3410,20 @@ fn import_pdf_shading_source(
             ))
         }
     };
-    let shading_type = shading
-        .get(b"ShadingType")
-        .and_then(Object::as_i64)
-        .map_err(|_| OfdError::Invalid("PDF shading has no ShadingType".into()))?;
+    let shading_type = pdf_resolved_value(
+        Some(page.pdf),
+        shading
+            .get(b"ShadingType")
+            .map_err(|_| OfdError::Invalid("PDF shading has no ShadingType".into()))?,
+        "ShadingType",
+    )?
+    .as_i64()
+    .map_err(|_| OfdError::Invalid("PDF ShadingType is not an integer".into()))?;
     if !matches!(shading_type, 1..=7) {
         return Err(OfdError::Invalid("unsupported PDF shading type".into()));
     }
     let bbox_clip = if let Ok(bbox) = shading.get(b"BBox") {
-        let values = bbox
-            .as_array()
-            .map_err(|_| OfdError::Invalid("invalid PDF shading BBox".into()))?;
-        let values = numbers(&Operation::new("shading BBox", values.clone()), 4)?;
+        let values = pdf_numeric_array(page.pdf, bbox, "shading BBox", 4)?;
         let [left, bottom, right, top] = values.as_slice() else {
             unreachable!();
         };
@@ -3459,12 +3493,12 @@ fn import_pdf_shading_source(
         }
         return attach_clips(output, page.index, &id, "PathObject", &clips);
     }
-    let coords = shading
-        .get(b"Coords")
-        .and_then(Object::as_array)
-        .map_err(|_| OfdError::Invalid("PDF shading has no Coords".into()))?;
-    let coords = numbers(
-        &Operation::new("shading Coords", coords.clone()),
+    let coords = pdf_numeric_array(
+        page.pdf,
+        shading
+            .get(b"Coords")
+            .map_err(|_| OfdError::Invalid("PDF shading has no Coords".into()))?,
+        "shading Coords",
         if shading_type == 2 { 4 } else { 6 },
     )?;
     let (kind, start, end, reverse) = if shading_type == 2 {
@@ -3521,9 +3555,7 @@ fn import_pdf_shading_source(
         .get(b"Extend")
         .ok()
         .map(|value| {
-            let values = value
-                .as_array()
-                .map_err(|_| OfdError::Invalid("invalid PDF shading Extend".into()))?;
+            let values = pdf_resolved_array(page.pdf, value, "shading Extend", 2)?;
             let [before, after] = values.as_slice() else {
                 return Err(OfdError::Invalid("invalid PDF shading Extend".into()));
             };
@@ -3543,10 +3575,7 @@ fn import_pdf_shading_source(
     }
     let extend = u8::from(extend_start) | (u8::from(extend_end) << 1);
     let shading_domain = if let Ok(domain) = shading.get(b"Domain") {
-        let values = domain
-            .as_array()
-            .map_err(|_| OfdError::Invalid("invalid PDF shading Domain".into()))?;
-        let values = numbers(&Operation::new("shading Domain", values.clone()), 2)?;
+        let values = pdf_numeric_array(page.pdf, domain, "shading Domain", 2)?;
         [values[0], values[1]]
     } else {
         [0.0, 1.0]

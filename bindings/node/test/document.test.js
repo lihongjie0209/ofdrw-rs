@@ -3990,7 +3990,7 @@ test('import tiling patterns through the C ABI', () => {
 
 
 test('import shading patterns through the C ABI', () => {
-  for (const kind of ['axial', 'affine-radial', 'bbox-background', 'combined-alpha', 'nested', 'tensor', 'state-reuse']) {
+  for (const kind of ['axial', 'affine-radial', 'bbox-background', 'combined-alpha', 'nested', 'tensor', 'state-reuse', 'indirect-params']) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture('shading-pattern-' + kind + '.pdf')));
     try {
       assert.equal(document.pageCount, 1);

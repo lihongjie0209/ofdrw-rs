@@ -39,20 +39,9 @@ impl Source {
             return Err(invalid("Shading is not a dictionary or stream"));
         }
         let matrix = match dict.get(b"Matrix") {
-            Ok(value) => {
-                let array = pdf_resolved_value(Some(page.pdf), value, "Pattern Matrix")?
-                    .as_array()
-                    .map_err(|_| invalid("Matrix is not an array"))?;
-                let values = array
-                    .iter()
-                    .map(|value| {
-                        pdf_resolved_value(Some(page.pdf), value, "Pattern Matrix number").cloned()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                numbers(&Operation::new("Pattern Matrix", values), 6)?
-                    .try_into()
-                    .map_err(|_| invalid("has invalid Matrix"))?
-            }
+            Ok(value) => pdf_numeric_array(page.pdf, value, "Pattern Matrix", 6)?
+                .try_into()
+                .map_err(|_| invalid("has invalid Matrix"))?,
             Err(_) => [1., 0., 0., 1., 0., 0.],
         };
         if crate::inverse_matrix(matrix).is_none() {
@@ -262,31 +251,15 @@ impl Source {
         if matches!(space, PdfColorSpace::Pattern { .. }) {
             return Err(invalid("Shading cannot use Pattern color"));
         }
-        let values = pdf_resolved_value(Some(page.pdf), background, "shading Background")?
-            .as_array()
-            .map_err(|_| invalid("Background is not an array"))?;
-        let values = values
-            .iter()
-            .map(|v| pdf_resolved_value(Some(page.pdf), v, "Background component").cloned())
-            .collect::<Result<Vec<_>, _>>()?;
-        let values = numbers(
-            &Operation::new("shading Background", values),
-            space.channels(),
-        )?;
+        let values =
+            pdf_numeric_array(page.pdf, background, "shading Background", space.channels())?;
         let rgb = space.color_with_intent(&values, state.rendering_intent)?;
         if space.nonpainting() {
             return Ok(());
         }
         let bbox = match dict.get(b"BBox") {
             Ok(value) => {
-                let values = pdf_resolved_value(Some(page.pdf), value, "shading BBox")?
-                    .as_array()
-                    .map_err(|_| invalid("BBox is not an array"))?;
-                let values = values
-                    .iter()
-                    .map(|v| pdf_resolved_value(Some(page.pdf), v, "BBox number").cloned())
-                    .collect::<Result<Vec<_>, _>>()?;
-                let values = numbers(&Operation::new("shading BBox", values), 4)?;
+                let values = pdf_numeric_array(page.pdf, value, "shading BBox", 4)?;
                 [values[0], values[1], values[2], values[3]]
             }
             Err(_) => page.box_,

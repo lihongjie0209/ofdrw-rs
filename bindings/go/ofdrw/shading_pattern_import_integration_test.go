@@ -13,7 +13,7 @@ import (
 func TestImportsShadingPatternsFromPDF(t *testing.T) {
 	tests := []struct{ name string }{
 		{name: "axial"}, {name: "affine-radial"}, {name: "nested"},
-		{name: "bbox-background"}, {name: "combined-alpha"}, {name: "tensor"}, {name: "state-reuse"},
+		{name: "bbox-background"}, {name: "combined-alpha"}, {name: "tensor"}, {name: "state-reuse"}, {name: "indirect-params"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

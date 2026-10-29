@@ -7623,7 +7623,7 @@ def test_pdf_tiling_patterns_across_binding(kind):
             assert reopened.validate_references() == []
 
 
-@pytest.mark.parametrize("kind", ["axial", "affine-radial", "bbox-background", "combined-alpha", "nested", "tensor", "state-reuse"])
+@pytest.mark.parametrize("kind", ["axial", "affine-radial", "bbox-background", "combined-alpha", "nested", "tensor", "state-reuse", "indirect-params"])
 def test_pdf_shading_patterns_across_binding(kind):
     fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("shading-pattern-" + kind + ".pdf")
     with Document.from_pdf_bytes(fixture.read_bytes()) as document:
