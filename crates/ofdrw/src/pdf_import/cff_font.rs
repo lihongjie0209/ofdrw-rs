@@ -153,54 +153,164 @@ fn offset(values: &[f64]) -> Result<usize, OfdError> {
     }
 }
 
-pub(super) fn validate_matrix(data: &[u8], units: u16) -> Result<(), OfdError> {
-    let table = ttf_parser::cff::Table::parse(data).ok_or_else(invalid)?;
-    let matrix = table.matrix();
-    let unit = 1.0 / f64::from(units);
-    for (value, expected) in [
-        matrix.sx, matrix.ky, matrix.kx, matrix.sy, matrix.tx, matrix.ty,
-    ]
-    .into_iter()
-    .zip([unit, 0.0, 0.0, unit, 0.0, 0.0])
-    {
-        if !value.is_finite() || (f64::from(value) - expected).abs() > unit * 1e-5 {
-            return Err(OfdError::Invalid(
-                "PDF CFF FontMatrix cannot be represented by sfnt units".into(),
-            ));
-        }
-    }
-    let top = top_dictionary(data)?;
-    if top
-        .get(&1205)
-        .is_some_and(|values| values.as_slice() != [0.0])
-        || top
-            .get(&1206)
-            .is_some_and(|values| values.as_slice() != [2.0])
-        || top.contains_key(&1220)
-        || top.contains_key(&1221)
+pub(crate) struct GlyphMatrices {
+    transforms: Vec<[f64; 6]>,
+    selection: Vec<u8>,
+    glyph_count: u16,
+}
+
+fn matrix(values: &[f64]) -> Result<[f64; 6], OfdError> {
+    let matrix: [f64; 6] = values.try_into().map_err(|_| invalid())?;
+    if matrix
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > 1e6)
     {
         return Err(invalid());
     }
-    if let Some(values) = top.get(&1236) {
-        let mut reader = Reader {
-            data,
-            position: offset(values)?,
-        };
-        for font in index(&mut reader, 256)? {
-            let dictionary = dictionary(font)?;
-            if dictionary.contains_key(&1221) {
+    Ok(matrix)
+}
+
+fn compose(parent: [f64; 6], child: [f64; 6]) -> Result<[f64; 6], OfdError> {
+    let [a, b, c, d, e, f] = parent;
+    let [p, q, r, s, t, u] = child;
+    matrix(&[
+        a * p + c * q,
+        b * p + d * q,
+        a * r + c * s,
+        b * r + d * s,
+        a * t + c * u + e,
+        b * t + d * u + f,
+    ])
+}
+
+fn fd_selection(data: &[u8], at: usize, glyphs: u16, fonts: usize) -> Result<Vec<u8>, OfdError> {
+    let mut reader = Reader { data, position: at };
+    let mut selection = Vec::with_capacity(usize::from(glyphs));
+    match reader.byte()? {
+        0 => selection.extend_from_slice(reader.take(usize::from(glyphs))?),
+        3 => {
+            let ranges = reader.integer(2)? as usize;
+            if ranges == 0 || ranges > usize::from(glyphs) {
                 return Err(invalid());
             }
-            if let Some(matrix) = dictionary.get(&1207) {
-                if matrix.as_slice() != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] {
-                    return Err(OfdError::Invalid(
-                        "PDF CFF per-font FontMatrix is unsupported".into(),
-                    ));
+            let mut first = reader.integer(2)? as usize;
+            if first != 0 {
+                return Err(invalid());
+            }
+            for _ in 0..ranges {
+                let font = reader.byte()?;
+                let next = reader.integer(2)? as usize;
+                if next <= first || next > usize::from(glyphs) {
+                    return Err(invalid());
                 }
+                selection.resize(next, font);
+                first = next;
+            }
+            if first != usize::from(glyphs) {
+                return Err(invalid());
             }
         }
+        _ => return Err(invalid()),
     }
-    Ok(())
+    if selection.iter().any(|font| usize::from(*font) >= fonts) {
+        return Err(invalid());
+    }
+    Ok(selection)
+}
+
+impl GlyphMatrices {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self, OfdError> {
+        let table = ttf_parser::cff::Table::parse(data).ok_or_else(invalid)?;
+        let top = top_dictionary(data)?;
+        if top
+            .get(&1205)
+            .is_some_and(|values| values.as_slice() != [0.0])
+            || top
+                .get(&1206)
+                .is_some_and(|values| values.as_slice() != [2.0])
+            || top.contains_key(&1220)
+        {
+            return Err(invalid());
+        }
+        // PostScript strings (including FSType metadata) are retained, never executed.
+        let declared = top.get(&1207).map(|values| matrix(values)).transpose()?;
+        let top_matrix = declared.unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+        let glyph_count = table.number_of_glyphs();
+        let (transforms, selection) = if let Some(values) = top.get(&1236) {
+            let mut reader = Reader {
+                data,
+                position: offset(values)?,
+            };
+            let fonts = index(&mut reader, 256)?;
+            if fonts.is_empty() {
+                return Err(invalid());
+            }
+            let mut transforms = Vec::with_capacity(fonts.len());
+            for font in fonts {
+                let dictionary = dictionary(font)?;
+                let transform = match dictionary.get(&1207) {
+                    Some(values) => {
+                        let local = matrix(values)?;
+                        // An explicit top-level matrix concatenates the FD matrix.
+                        // Without it, the FD matrix replaces the implicit default.
+                        declared.map_or(Ok(local), |parent| compose(parent, local))?
+                    }
+                    None => top_matrix,
+                };
+                transforms.push(transform);
+            }
+            let select = offset(top.get(&1237).ok_or_else(invalid)?)?;
+            let selection = fd_selection(data, select, glyph_count, transforms.len())?;
+            (transforms, selection)
+        } else {
+            if top.contains_key(&1237) {
+                return Err(invalid());
+            }
+            (vec![top_matrix], Vec::new())
+        };
+        Ok(Self {
+            transforms,
+            selection,
+            glyph_count,
+        })
+    }
+
+    pub(crate) fn for_glyph(&self, glyph: u16) -> Result<[f64; 6], OfdError> {
+        if glyph >= self.glyph_count {
+            return Err(invalid());
+        }
+        let index = self.selection.get(usize::from(glyph)).copied().unwrap_or(0);
+        self.transforms
+            .get(usize::from(index))
+            .copied()
+            .ok_or_else(invalid)
+    }
+}
+
+pub(crate) fn transformed_bounds(bounds: ttf_parser::Rect, matrix: [f64; 6]) -> [f64; 4] {
+    let [a, b, c, d, e, f] = matrix;
+    let mut result = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for (x, y) in [
+        (bounds.x_min, bounds.y_min),
+        (bounds.x_min, bounds.y_max),
+        (bounds.x_max, bounds.y_min),
+        (bounds.x_max, bounds.y_max),
+    ] {
+        let x = f64::from(x);
+        let y = f64::from(y);
+        let px = a * x + c * y + e;
+        let py = b * x + d * y + f;
+        result[0] = result[0].min(px);
+        result[1] = result[1].min(py);
+        result[2] = result[2].max(px);
+        result[3] = result[3].max(py);
+    }
+    result
 }
 
 pub(super) fn glyphs(data: &[u8], cids: &[u16]) -> Result<Vec<u16>, OfdError> {
@@ -302,15 +412,16 @@ fn checksum(data: &[u8]) -> u32 {
 }
 
 /// Preserve every CFF byte inside a deterministic, outline-only sfnt wrapper.
-pub(super) fn wrap(data: &[u8]) -> Result<Vec<u8>, OfdError> {
+pub(crate) fn wrap(data: &[u8]) -> Result<Vec<u8>, OfdError> {
     let cff = ttf_parser::cff::Table::parse(data).ok_or_else(invalid)?;
     let matrix = cff.matrix();
     let reciprocal = 1.0 / f64::from(matrix.sx);
-    if !reciprocal.is_finite() || !(16.0..=16384.0).contains(&reciprocal.round()) {
-        return Err(invalid());
-    }
-    let units = reciprocal.round() as u16;
-    validate_matrix(data, units)?;
+    GlyphMatrices::parse(data)?;
+    let units = if reciprocal.is_finite() && (16.0..=16384.0).contains(&reciprocal.round()) {
+        reciprocal.round() as u16
+    } else {
+        1000
+    };
     let count = cff.number_of_glyphs();
     let mut head = vec![0; 54];
     head[..4].copy_from_slice(&0x00010000_u32.to_be_bytes());
@@ -453,12 +564,15 @@ mod tests {
                     .unwrap(),
                 source
             );
-            assert!(validate_matrix(source, 2000).is_err());
+            assert_eq!(
+                GlyphMatrices::parse(source).unwrap().for_glyph(2).unwrap(),
+                [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]
+            );
         }
     }
 
     #[test]
-    fn font_matrices_accept_uniform_units_and_reject_unrepresented_transforms() {
+    fn font_matrices_accept_uniform_units_and_affine_transforms() {
         let source = include_bytes!("../../tests/fixtures/test-cff-2048.cff");
         let wrapped = wrap(source).unwrap();
         assert_eq!(
@@ -469,11 +583,77 @@ mod tests {
             "../../tests/fixtures/test-cff-fd-identity.cff"
         ))
         .is_ok());
-        assert!(wrap(include_bytes!("../../tests/fixtures/test-cff-skew.cff")).is_err());
+        assert!(wrap(include_bytes!("../../tests/fixtures/test-cff-skew.cff")).is_ok());
         assert!(wrap(include_bytes!(
             "../../tests/fixtures/test-cff-fd-matrix.cff"
         ))
-        .is_err());
+        .is_ok());
+    }
+
+    #[test]
+    fn fd_select_formats_and_affine_bounds_validate_all_ranges() {
+        assert_eq!(fd_selection(&[0, 0, 0, 1], 0, 3, 2).unwrap(), [0, 0, 1]);
+        assert_eq!(
+            fd_selection(&[3, 0, 2, 0, 0, 0, 0, 2, 1, 0, 3], 0, 3, 2).unwrap(),
+            [0, 0, 1]
+        );
+        for data in [
+            vec![0, 0],
+            vec![0, 0, 0, 2],
+            vec![4],
+            vec![3, 0, 0],
+            vec![3, 0, 1, 0, 1, 0, 0, 3],
+            vec![3, 0, 1, 0, 0, 0, 0, 2],
+            vec![3, 0, 1, 0, 0, 0, 0, 4],
+        ] {
+            assert!(fd_selection(&data, 0, 3, 2).is_err());
+        }
+        assert_eq!(
+            compose([2., 3., 4., 5., 6., 7.], [1., 2., 3., 4., 5., 6.]).unwrap(),
+            [10., 13., 22., 29., 40., 52.]
+        );
+        let bounds = ttf_parser::Rect {
+            x_min: -2,
+            y_min: 1,
+            x_max: 5,
+            y_max: 3,
+        };
+        assert_eq!(
+            transformed_bounds(bounds, [0., 2., -3., 0., 10., 20.]),
+            [1., 16., 7., 30.]
+        );
+        assert!(matrix(&[0.; 5]).is_err());
+        assert!(matrix(&[f64::NAN; 6]).is_err());
+        assert!(matrix(&[1e7; 6]).is_err());
+    }
+
+    #[test]
+    fn fd_matrices_compose_explicit_top_and_replace_implicit_default() {
+        for (source, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/type0-fd-matrices-cff.pdf").as_slice(),
+                [0.0008, 0.00018, 0.0003, 0.00123, 0.05, -0.015],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/type0-fd-only-cff.pdf").as_slice(),
+                [0.0008, 0.0001, 0.0003, 0.0012, 0.05, -0.02],
+            ),
+        ] {
+            let pdf = super::super::PdfDocument::load_mem(source).unwrap();
+            let bytes = pdf
+                .get_object((9, 0))
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .get_plain_content()
+                .unwrap();
+            let parsed = GlyphMatrices::parse(&bytes).unwrap();
+            let actual = parsed.for_glyph(2).unwrap();
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+            assert!(parsed.for_glyph(3).is_err());
+        }
     }
 
     #[test]

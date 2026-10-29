@@ -1302,9 +1302,11 @@ from the font outlines, regardless of the resource filename extension. Glyph
 mappings use UTF-16 positions across adjacent `TextCode` runs, including a
 mapping that consumes characters in more than one run; overlapping mappings
 and mappings that split a UTF-16 character are rejected. Text remains
-available for extraction. Raw CFF data already present in an OFD package still
-uses the text fallback; the PDF importer now encapsulates supported raw CFF
-programs in an sfnt wrapper so their mapped glyphs use this outline path.
+available for extraction. Raw CFF resources with explicit glyph mappings also
+use this outline path, with a temporary sfnt wrapper and the original resource
+bytes retained. Raw
+CFF text without glyph mappings still uses the text fallback. The PDF importer
+encapsulates supported raw programs in deterministic sfnt wrappers.
 
 ## PNG 渲染
 
@@ -1699,10 +1701,17 @@ Raw CFF is encapsulated in a deterministic sfnt wrapper with the original CFF
 table unchanged. Its generated horizontal metrics are placeholders for outline
 rendering; source PDF widths and deltas continue to determine imported layout,
 and the wrapper supplies no Unicode cmap for creating new shaped text.
-FontMatrix must match uniform sfnt units (16–16,384 units per em), without
-skew or translation; per-FD matrices must be absent or identity. Other matrices,
-font sets, stroked CFF PaintType, SyntheticBase and embedded PostScript remain
-unsupported. DICT operands/operators and INDEX object counts are bounded.
+Top-level FontMatrix supports full affine transforms, including skew, reflection,
+rotation and translation. Per-FD matrices are selected using FDSelect formats 0
+and 3: an explicit top matrix concatenates the FD matrix; otherwise an FD
+matrix replaces the implicit default. Matrices transform outlines and bounding
+boxes while PDF widths/deltas retain source layout and stroke widths retain
+text-space units. Text clipping preserves original glyph mappings and emits
+direct SVG clip shapes. FDArray is limited to 256 entries; matrix coefficients
+and their compositions must be finite and at most 1,000,000 in magnitude.
+Font sets, stroked CFF PaintType, SyntheticBase and CFF2 remain unsupported.
+PostScript dictionary strings are retained as inert metadata and never executed.
+DICT operands/operators and INDEX object counts are bounded.
 Tests cover independently rendered Ghostscript references, Unicode ligatures,
 CID/GID differences, vertical text, malformed tables, checksum integrity,
 font-resource reuse, package round trips and Python/Go/Node calls.

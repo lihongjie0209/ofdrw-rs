@@ -31557,27 +31557,55 @@ fn svg_text_positions(code: Node<'_, '_>, size: f64) -> Result<(String, String),
 }
 
 #[derive(Default)]
-struct SvgGlyphOutline(String);
+struct SvgGlyphOutline {
+    data: String,
+    transform: Option<[f64; 6]>,
+    invalid: bool,
+}
+
+impl SvgGlyphOutline {
+    fn push_point(&mut self, command: &str, x: f32, y: f32) {
+        if self.data.len() > 1_000_000 || self.invalid {
+            return;
+        }
+        self.data.push_str(command);
+        match self.transform {
+            Some([a, b, c, d, e, f]) => {
+                let x = f64::from(x);
+                let y = f64::from(y);
+                let px = a * x + c * y + e;
+                let py = b * x + d * y + f;
+                if !px.is_finite() || !py.is_finite() {
+                    self.invalid = true;
+                    return;
+                }
+                self.data.push_str(&format!("{px} {py}"));
+            }
+            None => self.data.push_str(&format!("{x} {y}")),
+        }
+    }
+}
 
 impl ttf_parser::OutlineBuilder for SvgGlyphOutline {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.0.push_str(&format!("M{x} {y}"));
+        self.push_point("M", x, y);
     }
-
     fn line_to(&mut self, x: f32, y: f32) {
-        self.0.push_str(&format!("L{x} {y}"));
+        self.push_point("L", x, y);
     }
-
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.0.push_str(&format!("Q{x1} {y1} {x} {y}"));
+        self.push_point("Q", x1, y1);
+        self.push_point(" ", x, y);
     }
-
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.0.push_str(&format!("C{x1} {y1} {x2} {y2} {x} {y}"));
+        self.push_point("C", x1, y1);
+        self.push_point(" ", x2, y2);
+        self.push_point(" ", x, y);
     }
-
     fn close(&mut self) {
-        self.0.push('Z');
+        if self.data.len() <= 1_000_000 {
+            self.data.push('Z');
+        }
     }
 }
 
@@ -31899,10 +31927,23 @@ fn svg_glyph_paths(
         return Ok(None);
     };
     let bytes = document.required_entry(path)?;
-    let Ok(face) = ttf_parser::Face::parse(bytes, 0) else {
-        return Ok(None);
+    let wrapped;
+    let face = match ttf_parser::Face::parse(bytes, 0) {
+        Ok(face) => face,
+        Err(_) if ttf_parser::cff::Table::parse(bytes).is_some() => {
+            wrapped = pdf_import::cff_font::wrap(bytes)?;
+            ttf_parser::Face::parse(&wrapped, 0)
+                .map_err(|_| OfdError::Invalid("invalid CFF outline wrapper".into()))?
+        }
+        Err(_) => return Ok(None),
     };
     let scale = size / f64::from(face.units_per_em());
+    let cff_matrices = face
+        .raw_face()
+        .table(ttf_parser::Tag::from_bytes(b"CFF "))
+        .filter(|_| face.tables().glyf.is_none())
+        .map(pdf_import::cff_font::GlyphMatrices::parse)
+        .transpose()?;
     let mut output = String::new();
     let codes = object
         .children()
@@ -31974,14 +32015,51 @@ fn svg_glyph_paths(
             if !x.is_finite() || !y.is_finite() {
                 return Err(OfdError::Invalid("CGTransform position is invalid".into()));
             }
-            let mut outline = SvgGlyphOutline::default();
+            // Missing glyph IDs have no outline, as for the TrueType path.
+            // Validate the range before selecting a CFF font dictionary.
+            if glyph.0 >= face.number_of_glyphs() {
+                continue;
+            }
+            let glyph_matrix = cff_matrices
+                .as_ref()
+                .map(|matrices| {
+                    let [a, b, c, d, e, f] = matrices.for_glyph(glyph.0)?;
+                    let values = [
+                        size * h_scale * a,
+                        -size * b,
+                        size * h_scale * c,
+                        -size * d,
+                        size * h_scale * e,
+                        -size * f,
+                    ];
+                    if values.iter().any(|value| !value.is_finite()) {
+                        return Err(OfdError::Invalid("CFF glyph matrix is not finite".into()));
+                    }
+                    Ok(values)
+                })
+                .transpose()?;
+            let mut outline = SvgGlyphOutline {
+                transform: glyph_matrix,
+                ..SvgGlyphOutline::default()
+            };
             if face.outline_glyph(*glyph, &mut outline).is_none() {
                 continue;
             }
-            if outline.0.len() > 1_000_000 || output.len() > 32_000_000 {
+            if outline.invalid {
+                return Err(OfdError::Invalid(
+                    "glyph outline geometry is not finite".into(),
+                ));
+            }
+            if outline.data.len() > 1_000_000 || output.len() > 32_000_000 {
                 return Err(OfdError::Limit("CGTransform outline is too large".into()));
             }
-            output.push_str(&format!("<path data-ofd-glyph=\"{}\" transform=\"translate({x} {y}) rotate({direction}) scale({} {})\" d=\"{}\" {paint}/>", glyph.0, scale * h_scale, -scale, outline.0));
+            if cff_matrices.is_some() {
+                // Bake the font matrix into geometry so it does not also scale
+                // the TextObject's stroke width or user-space paint coordinates.
+                output.push_str(&format!("<path data-ofd-glyph=\"{}\" transform=\"translate({x} {y}) rotate({direction})\" d=\"{}\" {paint}/>", glyph.0, outline.data));
+            } else {
+                output.push_str(&format!("<path data-ofd-glyph=\"{}\" transform=\"translate({x} {y}) rotate({direction}) scale({} {})\" d=\"{}\" {paint}/>", glyph.0, scale * h_scale, -scale, outline.data));
+            }
         }
     }
     Ok(Some(output))
@@ -32239,7 +32317,15 @@ fn svg_clip_groups(
                 if let Some(paths) =
                     svg_glyph_paths(document, shape, resources, size, h_scale, direction, &paint)?
                 {
-                    svg.push_str(&format!("<g transform=\"{transform}\">{paths}</g>"));
+                    if use_mask {
+                        svg.push_str(&format!("<g transform=\"{transform}\">{paths}</g>"));
+                    } else {
+                        // clipPath accepts direct shapes, not transformed groups.
+                        // These paths and their transform attributes are generated above.
+                        svg.push_str(
+                            &paths.replace(" transform=\"", &format!(" transform=\"{transform} ")),
+                        );
+                    }
                     area_count += 1;
                     continue;
                 }
@@ -37086,6 +37172,17 @@ fn attachments_xml(attachments: &[AttachmentInfo]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn affine_glyph_coordinates_detect_overflow_after_finite_matrix_scaling() {
+        let mut outline = super::SvgGlyphOutline {
+            transform: Some([1e306, 0.0, 0.0, 1e306, 0.0, 0.0]),
+            ..super::SvgGlyphOutline::default()
+        };
+        ttf_parser::OutlineBuilder::move_to(&mut outline, 1000.0, 1000.0);
+        assert!(outline.invalid);
+        assert!(!outline.data.contains("inf"));
+    }
+
     use super::*;
 
     #[test]

@@ -1,5 +1,13 @@
 Unreleased source changes after v0.1.0:
 
+- CFF outlines support full affine top-level and per-FD font matrices,
+  including FDSelect formats 0 and 3. PDF advances and stroke widths retain
+  source text-space metrics. Raw CFF resources with explicit glyph mappings
+  render directly in existing OFD packages without changing their bytes.
+  Imported text clips retain glyph maps and emit direct SVG clip shapes.
+  Tests cover 20 CFF and one TrueType Ghostscript references, bounds,
+  matrix inheritance, clipping, round trips and Python/Go/Node calls.
+
 - CFF Encoding dictionaries without BaseEncoding inherit the embedded font's
   native encoding before applying Differences. Explicit bases retain priority;
   subset Zapf Dingbats fonts use their special glyph-name Unicode mapping.
@@ -14,8 +22,7 @@ Unreleased source changes after v0.1.0:
   encodings also recover simple-font text when PDF Encoding/ToUnicode are
   absent. Tests cover nine independent Ghostscript rasters, CID/GID differences,
   ligatures, vertical text, bounded parsing, checksums and language bindings.
-  Nonuniform/translated/per-FD font matrices and other listed CFF limitations
-  remain unsupported.
+  Remaining CFF limitations are listed in FEATURES.md.
 
 - All 189 current Adobe CMap resources are bundled, including 73 vertical
   maps. Tests parse every resource offline, verify original source digests

@@ -1,6 +1,6 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
-mod cff_font;
+pub(crate) mod cff_font;
 mod cid_encoding;
 mod cid_unicode;
 mod font_style;
@@ -1000,7 +1000,7 @@ fn imported_text_clip_shape(
     shape.push('>');
     for code in object
         .children()
-        .filter(|node| is_element(*node, "TextCode"))
+        .filter(|node| is_element(*node, "TextCode") || is_element(*node, "CGTransform"))
     {
         shape.push_str(&source[code.range()]);
     }
@@ -6543,12 +6543,15 @@ fn embedded_pdf_font(
     let Ok(face) = ttf_parser::Face::parse(&bytes, 0) else {
         return Ok(None);
     };
-    let cff_data = face.raw_face().table(ttf_parser::Tag::from_bytes(b"CFF "));
+    let cff_data = face
+        .raw_face()
+        .table(ttf_parser::Tag::from_bytes(b"CFF "))
+        .filter(|_| face.tables().glyf.is_none());
+    let cff_matrices = cff_data.map(cff_font::GlyphMatrices::parse).transpose()?;
     if type1 || cid_cff {
-        let Some(data) = cff_data else {
+        if cff_data.is_none() {
             return Ok(None);
-        };
-        cff_font::validate_matrix(data, face.units_per_em())?;
+        }
     } else if face.tables().glyf.is_none() {
         return Ok(None);
     }
@@ -6631,24 +6634,27 @@ fn embedded_pdf_font(
             .chars()
             .zip(&glyphs)
             .all(|(ch, glyph)| face.glyph_index(ch).map(|id| id.0) == Some(*glyph));
-    let mapped_glyphs = (force_mapping || !direct).then_some(glyphs);
-    let glyph_bounds = mapped_glyphs.as_ref().map(|glyphs| {
-        let units = f64::from(face.units_per_em());
-        glyphs
-            .iter()
-            .map(|glyph| {
-                face.glyph_bounding_box(ttf_parser::GlyphId(*glyph))
-                    .map(|bounds| {
-                        [
-                            f64::from(bounds.x_min) / units,
-                            f64::from(bounds.y_min) / units,
-                            f64::from(bounds.x_max) / units,
-                            f64::from(bounds.y_max) / units,
-                        ]
-                    })
-            })
-            .collect()
-    });
+    let mapped_glyphs = (force_mapping || cff_matrices.is_some() || !direct).then_some(glyphs);
+    let glyph_bounds = mapped_glyphs
+        .as_ref()
+        .map(|glyphs| {
+            let unit = 1.0 / f64::from(face.units_per_em());
+            glyphs
+                .iter()
+                .map(|glyph| {
+                    let Some(bounds) = face.glyph_bounding_box(ttf_parser::GlyphId(*glyph)) else {
+                        return Ok(None);
+                    };
+                    let matrix = cff_matrices
+                        .as_ref()
+                        .map_or(Ok([unit, 0.0, 0.0, unit, 0.0, 0.0]), |matrices| {
+                            matrices.for_glyph(*glyph)
+                        })?;
+                    Ok(Some(cff_font::transformed_bounds(bounds, matrix)))
+                })
+                .collect::<Result<Vec<_>, OfdError>>()
+        })
+        .transpose()?;
     for (index, existing) in output.fonts()?.iter().enumerate() {
         if existing.embedded_path.is_some() && output.font_data(index)? == bytes {
             return Ok(Some(EmbeddedPdfFont {

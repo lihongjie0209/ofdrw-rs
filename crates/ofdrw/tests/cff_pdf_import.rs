@@ -120,6 +120,54 @@ fn cff_outlines_match_independent_ghostscript_rasters() {
             include_bytes!("fixtures/type0-vertical-cid-cff.pdf").as_slice(),
             include_bytes!("fixtures/type0-vertical-cid-cff.png").as_slice(),
         ),
+        (
+            include_bytes!("fixtures/type1-affine-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-affine-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type1-reflected-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-reflected-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type1-rotated-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-rotated-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type1-opentype-affine-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-opentype-affine-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-fd-matrices-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type0-fd-matrices-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-fd-ranges-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type0-fd-ranges-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-fd-only-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type0-fd-only-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-vertical-fd-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type0-vertical-fd-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type1-stroked-affine-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type1-stroked-affine-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-clipped-fd-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type0-clipped-fd-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-fd-translated-top-cff.pdf").as_slice(),
+            include_bytes!("fixtures/type0-fd-translated-top-cff.png").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/type0-clipped-ligature.pdf").as_slice(),
+            include_bytes!("fixtures/type0-clipped-ligature.png").as_slice(),
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -139,7 +187,12 @@ fn cff_outlines_match_independent_ghostscript_rasters() {
         };
         let actual = ink(&actual);
         let expected = ink(&expected);
-        assert!(actual.len() > 100 && expected.len() > 100);
+        assert!(
+            actual.len() > 100 && expected.len() > 100,
+            "ink counts case {index}: {} {}",
+            actual.len(),
+            expected.len()
+        );
         let mut unmatched = 0;
         for (a, b) in [(&actual, &expected), (&expected, &actual)] {
             unmatched += a
@@ -201,5 +254,164 @@ fn implicit_cff_base_applies_differences_without_losing_native_codes() {
         assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
         assert_eq!(reopened.page_png(0, 72.0).unwrap(), png);
         assert!(reopened.validate_references().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn affine_cff_matrices_keep_pdf_advances_and_survive_package_round_trips() {
+    for source in [
+        include_bytes!("fixtures/type1-affine-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type1-reflected-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type1-rotated-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type1-opentype-affine-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-fd-matrices-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-fd-ranges-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-fd-translated-top-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-fd-only-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-vertical-fd-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type1-stroked-affine-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-clipped-fd-cff.pdf").as_slice(),
+    ] {
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        assert_eq!(document.page_text(0).unwrap(), ["fiA", "fi"]);
+        let objects = document.page_text_objects(0).unwrap();
+        assert_eq!(objects[0].cg_transforms[0].glyphs, [2, 1]);
+        let png = document.page_png(0, 72.0).unwrap();
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text_objects(0).unwrap(), objects);
+        assert_eq!(reopened.page_png(0, 72.0).unwrap(), png);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+    let direct =
+        OfdDocument::from_pdf_bytes(include_bytes!("fixtures/type0-fd-matrices-cff.pdf")).unwrap();
+    let ranges =
+        OfdDocument::from_pdf_bytes(include_bytes!("fixtures/type0-fd-ranges-cff.pdf")).unwrap();
+    assert_eq!(
+        direct.page_text_objects(0).unwrap(),
+        ranges.page_text_objects(0).unwrap()
+    );
+    assert_eq!(
+        direct.page_png(0, 72.0).unwrap(),
+        ranges.page_png(0, 72.0).unwrap()
+    );
+    let objects = direct.page_text_objects(0).unwrap();
+    let dx: f64 = objects[0].codes[0]
+        .delta_x
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((dx - 15.6 * 25.4 / 72.0).abs() < 1e-6);
+    assert!(
+        (objects[1].boundary.unwrap()[0] - objects[0].boundary.unwrap()[0] - 32.928 * 25.4 / 72.0)
+            .abs()
+            < 1e-6
+    );
+}
+
+#[test]
+fn imported_text_clips_retain_original_glyph_maps_and_emit_direct_svg_shapes() {
+    for (source, expected) in [
+        (
+            include_bytes!("fixtures/type0-clipped-fd-cff.pdf").as_slice(),
+            vec![2, 1],
+        ),
+        (
+            include_bytes!("fixtures/type0-clipped-ligature.pdf").as_slice(),
+            vec![3315, 36],
+        ),
+    ] {
+        let document = OfdDocument::from_pdf_bytes(source).unwrap();
+        let groups = document.page_object_clips(0).unwrap();
+        let group = groups
+            .iter()
+            .find(|group| group.kind == "PathObject")
+            .unwrap();
+        assert_eq!(group.clips[0].len(), 2);
+        assert_eq!(group.clips[0][0].cg_transforms[0].glyphs, expected);
+        assert_eq!(group.clips[0][0].cg_transforms[0].code_count, 3);
+        let svg = document.page_svg(0).unwrap();
+        let parsed = roxmltree::Document::parse(&svg).unwrap();
+        let clip = parsed
+            .descendants()
+            .find(|node| {
+                node.tag_name().name() == "clipPath"
+                    && node
+                        .attribute("id")
+                        .is_some_and(|id| id.starts_with("ofd-clip-"))
+            })
+            .unwrap();
+        assert_eq!(clip.children().filter(|node| node.is_element()).count(), 3);
+        assert!(clip
+            .children()
+            .filter(|node| node.is_element())
+            .all(|node| node.tag_name().name() == "path"));
+    }
+}
+
+#[test]
+fn raw_cff_resources_in_existing_ofd_packages_render_their_original_matrices() {
+    for source in [
+        include_bytes!("fixtures/type1-affine-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-fd-translated-top-cff.pdf").as_slice(),
+    ] {
+        let pdf = lopdf::Document::load_mem(source).unwrap();
+        let program = pdf
+            .get_object((9, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .get_plain_content()
+            .unwrap();
+        let mut document = OfdDocument::from_pdf_bytes(source).unwrap();
+        let expected = document.page_png(0, 72.0).unwrap();
+        let path = document
+            .fonts()
+            .unwrap()
+            .into_iter()
+            .find_map(|font| font.embedded_path)
+            .unwrap();
+        let filename = path.rsplit('/').next().unwrap();
+        let raw_filename = filename.replace(".otf", ".cff");
+        let raw_path = path.replace(".otf", ".cff");
+        let resources = String::from_utf8(
+            document
+                .entry("Doc_0/PublicRes.xml")
+                .unwrap()
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+        .replace(filename, &raw_filename);
+        document.set_entry(&raw_path, program.clone()).unwrap();
+        document
+            .set_entry("Doc_0/PublicRes.xml", resources.into_bytes())
+            .unwrap();
+        assert_eq!(document.page_png(0, 72.0).unwrap(), expected);
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_png(0, 72.0).unwrap(), expected);
+        let font_index = reopened
+            .fonts()
+            .unwrap()
+            .iter()
+            .position(|font| font.embedded_path.as_deref() == Some(raw_path.as_str()))
+            .unwrap();
+        assert_eq!(reopened.font_data(font_index).unwrap(), program);
+        assert!(reopened.validate_references().unwrap().is_empty());
+        let mut missing = reopened.clone();
+        let page_path = missing.pages().unwrap()[0].path.clone();
+        let xml = String::from_utf8(missing.entry(&page_path).unwrap().unwrap().to_vec())
+            .unwrap()
+            .replace(
+                "<ofd:Glyphs>2 1</ofd:Glyphs>",
+                "<ofd:Glyphs>65535 1</ofd:Glyphs>",
+            );
+        assert!(xml.contains("<ofd:Glyphs>65535 1</ofd:Glyphs>"));
+        missing.set_entry(&page_path, xml.into_bytes()).unwrap();
+        assert_eq!(missing.page_text(0).unwrap(), ["fiA", "fi"]);
+        let svg = missing.page_svg(0).unwrap();
+        assert!(!svg.contains("data-ofd-glyph=\"65535\""));
+        assert!(svg.contains("data-ofd-glyph=\"1\""));
+        assert!(missing.page_png(0, 72.0).unwrap().starts_with(b"\x89PNG"));
     }
 }

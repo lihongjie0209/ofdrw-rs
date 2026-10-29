@@ -4,6 +4,7 @@ Run: uv run --with fonttools python scripts/generate_cff_pdf_fixtures.py --refer
 All glyph outlines are authored for this repository under its Apache-2.0 license.
 """
 import argparse
+from copy import deepcopy
 import re
 from io import BytesIO
 from pathlib import Path
@@ -18,7 +19,7 @@ from generate_pdf_glyph_fixtures import objects
 from generate_nested_stitching_fixture import pdf_bytes, stream
 
 
-def font(cid=False, font_matrix=None, fd_matrix=None, dingbats=False, long_name=False):
+def font(cid=False, font_matrix=None, fd_matrix=None, dingbats=False, long_name=False, fd_matrices=None, fd_select=None, fd_format=0):
     names = [".notdef", "cid00007" if cid else "A", "cid00042" if cid else "fi"]
     if dingbats:
         names = [".notdef", "a1", "a2"]
@@ -62,19 +63,22 @@ def font(cid=False, font_matrix=None, fd_matrix=None, dingbats=False, long_name=
         array = FDArrayIndex()
         array.strings = None
         array.GlobalSubrs = top.GlobalSubrs
-        fd = FontDict()
-        fd.Private = top.Private
-        if fd_matrix is not None:
-            fd.FontMatrix = fd_matrix
-        array.append(fd)
+        for index, matrix in enumerate(fd_matrices if fd_matrices is not None else [fd_matrix]):
+            fd = FontDict()
+            fd.Private = top.Private if index == 0 else deepcopy(top.Private)
+            if matrix is not None:
+                fd.FontMatrix = matrix
+            array.append(fd)
         top.FDArray = array
-        select = FDSelect(format=0)
-        select.gidArray = [0] * len(names)
+        select = FDSelect(format=fd_format)
+        select.gidArray = fd_select if fd_select is not None else [0] * len(names)
         top.FDSelect = select
         top.CharStrings.fdArray = array
         top.CharStrings.fdSelect = select
-        for name in names:
-            top.CharStrings[name].fdSelectIndex = 0
+        for index, name in enumerate(names):
+            selected = select.gidArray[index]
+            top.CharStrings[name].fdSelectIndex = selected
+            top.CharStrings[name].private = array[selected].Private
         del top.Private
     builder.font.recalcTimestamp = False
     builder.font["head"].created = builder.font["head"].modified = 2082844800
@@ -124,6 +128,15 @@ def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal
     return pdf_bytes(result)
 
 
+def write_fixture(fixtures, name, source, references):
+    (fixtures / f"{name}.pdf").write_bytes(source)
+    if references:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.pdf"
+            path.write_bytes(source)
+            subprocess.run(["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r72", "-dTextAlphaBits=4", f"-sOutputFile={fixtures / name}.png", str(path)], check=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--references", action="store_true")
@@ -166,9 +179,38 @@ if __name__ == "__main__":
                 parts[4] = parts[4].replace(b"/fi", b"/a2").replace(b"OFDTestCFF", b"ABCDEF+ZapfDingbats")
                 parts[7] = parts[7].replace(b"OFDTestCFF", b"ABCDEF+ZapfDingbats").replace(b"/Flags 32", b"/Flags 4")
             source = pdf_bytes(parts)
-        (fixtures / f"{name}.pdf").write_bytes(source)
-        if args.references:
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "source.pdf"
-                path.write_bytes(source)
-                subprocess.run(["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r72", "-dTextAlphaBits=4", f"-sOutputFile={fixtures / name}.png", str(path)], check=True)
+        write_fixture(fixtures, name, source, args.references)
+
+    top_matrix = [.001, .0001, 0, .001, 0, 0]
+    local = [.8, .1, .3, 1.2, 50, -20]
+    for name, options, raw, simple, vertical, paint in [
+        ("type1-affine-cff", {"font_matrix": [.001, .0003, .0004, .0008, .12, -.06]}, True, True, False, "fill"),
+        ("type1-reflected-cff", {"font_matrix": [-.001, 0, .0002, .001, .6, 0]}, True, True, False, "fill"),
+        ("type1-rotated-cff", {"font_matrix": [0, .001, -.001, 0, .8, 0]}, True, True, False, "fill"),
+        ("type1-opentype-affine-cff", {"font_matrix": [.001, .0003, .0004, .0008, .12, -.06]}, False, True, False, "fill"),
+        ("type0-fd-matrices-cff", {"cid": True, "font_matrix": top_matrix, "fd_matrices": [None, local], "fd_select": [0, 0, 1]}, True, False, False, "fill"),
+        ("type0-fd-translated-top-cff", {"cid": True, "font_matrix": [.001, .0001, 0, .001, .12, .05], "fd_matrices": [None, local], "fd_select": [0, 0, 1]}, True, False, False, "fill"),
+        ("type0-fd-ranges-cff", {"cid": True, "font_matrix": top_matrix, "fd_matrices": [None, local], "fd_select": [0, 0, 1], "fd_format": 3}, True, False, False, "fill"),
+        ("type0-fd-only-cff", {"cid": True, "fd_matrices": [None, [.0008, .0001, .0003, .0012, .05, -.02]], "fd_select": [0, 0, 1]}, True, False, False, "fill"),
+        ("type0-vertical-fd-cff", {"cid": True, "font_matrix": top_matrix, "fd_matrices": [None, local], "fd_select": [0, 0, 1]}, True, False, True, "fill"),
+        ("type1-stroked-affine-cff", {"font_matrix": [.001, .0003, .0004, .0008, -.1, -.06]}, True, True, False, "stroke"),
+        ("type0-clipped-fd-cff", {"cid": True, "font_matrix": top_matrix, "fd_matrices": [None, local], "fd_select": [0, 0, 1]}, True, False, False, "clip"),
+    ]:
+        otf, program = font(**options)
+        data = program if raw else otf
+        source = pdf(data, raw, simple, options.get("cid", False), vertical)
+        if paint != "fill":
+            parts = re.findall(rb"\d+ 0 obj\n(.*?)\nendobj", source, re.S)
+            content = parts[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
+            if paint == "stroke":
+                content = b"1 0 0 RG 3 w " + content.replace(b"BT", b"BT 2 Tr", 1)
+            else:
+                content = content.replace(b"BT", b"BT 7 Tr", 1) + b" 1 0 0 rg 0 0 144 96 re f"
+            parts[3] = stream(b"", content)
+            source = pdf_bytes(parts)
+        write_fixture(fixtures, name, source, args.references)
+
+    source = objects((fixtures / "dejavu-serif.ttf").read_bytes())
+    content = source[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
+    source[3] = stream(b"", content.replace(b"BT", b"BT 7 Tr", 1) + b" 1 0 0 rg 0 0 144 96 re f")
+    write_fixture(fixtures, "type0-clipped-ligature", pdf_bytes(source), args.references)

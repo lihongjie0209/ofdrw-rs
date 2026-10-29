@@ -219,3 +219,8 @@ repository's Apache-2.0 license. They contain three synthetic glyph outlines,
 including a curved ligature and a CID charset whose CIDs differ from GIDs.
 The generator needs fonttools; normal tests use the checked-in fixtures.
 PNG references are generated independently with Ghostscript at 72 DPI.
+
+Affine CFF cases cover top-level skew, reflection, rotation, translation,
+per-FD inheritance with FDSelect formats 0 and 3, vertical layout, strokes and
+text clipping. `type0-clipped-ligature.pdf` uses the existing DejaVu Serif
+fixture to check the same mapped-glyph clipping path for TrueType fonts.
