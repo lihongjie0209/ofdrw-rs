@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- PDF raster color conversion inherits the current `ri` or ExtGState `RI`
+  when an image has no explicit Intent. Image Intent still overrides that
+  state. Color-key, explicit and soft masks preserve the inherited setting;
+  q/Q restores it. A synthetic ICC profile with distinct per-intent LUTs
+  makes the regression checks sensitive to the previous fixed-default behavior.
+
 - Explicit DeviceN JPEG2000 images now convert up to 32 source colorants
   directly, avoiding display-decoder RGB/alpha inference on raw codestreams.
   Source precision is retained for color-key masks, and external soft masks

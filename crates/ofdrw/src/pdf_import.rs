@@ -4736,7 +4736,13 @@ fn image_bytes_inner(
     image: &lopdf::Stream,
     allow_soft_mask: bool,
 ) -> Result<(Vec<u8>, &'static str), OfdError> {
-    image_bytes_inner_with_context(image, allow_soft_mask, None, None)
+    image_bytes_inner_with_context(
+        image,
+        allow_soft_mask,
+        None,
+        None,
+        RenderingIntent::RelativeColorimetric,
+    )
 }
 
 fn image_bytes_inner_with_context(
@@ -4744,6 +4750,7 @@ fn image_bytes_inner_with_context(
     allow_soft_mask: bool,
     pdf: Option<&PdfDocument>,
     resources: Option<&Object>,
+    default_intent: RenderingIntent,
 ) -> Result<(Vec<u8>, &'static str), OfdError> {
     let rendering_intent = match image.dict.get(b"Intent") {
         Ok(value) => {
@@ -4762,7 +4769,7 @@ fn image_bytes_inner_with_context(
                     .map_err(|_| OfdError::Invalid("PDF image Intent must be a name".into()))?,
             )
         }
-        Err(_) => RenderingIntent::RelativeColorimetric,
+        Err(_) => default_intent,
     };
     let width = pdf_image_u32_field(pdf, &image.dict, b"Width", "")?;
     let height = pdf_image_u32_field(pdf, &image.dict, b"Height", "")?;
@@ -5537,6 +5544,7 @@ fn image_bytes_with_soft_mask(
     pdf: &PdfDocument,
     resources: &Object,
     image: &lopdf::Stream,
+    default_intent: RenderingIntent,
 ) -> Result<(Vec<u8>, &'static str), OfdError> {
     if image.dict.get(b"Mask").is_ok() && image.dict.get(b"SMask").is_ok() {
         return Err(OfdError::Invalid(
@@ -5549,12 +5557,24 @@ fn image_bytes_with_soft_mask(
                 .dereference(reference)
                 .map_err(|error| OfdError::Invalid(format!("invalid PDF image Mask: {error}")))?;
             if matches!(value, Object::Stream(_)) {
-                return image_bytes_with_explicit_mask(pdf, resources, image, reference);
+                return image_bytes_with_explicit_mask(
+                    pdf,
+                    resources,
+                    image,
+                    reference,
+                    default_intent,
+                );
             }
         }
     }
     let Ok(reference) = image.dict.get(b"SMask") else {
-        return image_bytes_inner_with_context(image, false, Some(pdf), Some(resources));
+        return image_bytes_inner_with_context(
+            image,
+            false,
+            Some(pdf),
+            Some(resources),
+            default_intent,
+        );
     };
     let (_, mask) = pdf
         .dereference(reference)
@@ -5634,9 +5654,9 @@ fn image_bytes_with_soft_mask(
         Err(_) => None,
     };
     let (base_bytes, base_format) =
-        image_bytes_inner_with_context(image, true, Some(pdf), Some(resources))?;
+        image_bytes_inner_with_context(image, true, Some(pdf), Some(resources), default_intent)?;
     let (mask_bytes, mask_format) =
-        image_bytes_inner_with_context(mask, false, Some(pdf), Some(resources))?;
+        image_bytes_inner_with_context(mask, false, Some(pdf), Some(resources), default_intent)?;
     let base = decode_mask_image(&base_bytes, base_format, width, height)?;
     let mask = decode_mask_image(&mask_bytes, mask_format, mask_width, mask_height)?.to_luma8();
     let alpha = if mask_width == width && mask_height == height {
@@ -5789,6 +5809,7 @@ fn image_bytes_with_explicit_mask(
     resources: &Object,
     image: &lopdf::Stream,
     reference: &Object,
+    default_intent: RenderingIntent,
 ) -> Result<(Vec<u8>, &'static str), OfdError> {
     let (_, mask) = pdf
         .dereference(reference)
@@ -5829,7 +5850,8 @@ fn image_bytes_with_explicit_mask(
     };
     let mut base = image.clone();
     base.dict.remove(b"Mask");
-    let (bytes, format) = image_bytes_inner_with_context(&base, false, Some(pdf), Some(resources))?;
+    let (bytes, format) =
+        image_bytes_inner_with_context(&base, false, Some(pdf), Some(resources), default_intent)?;
     let mut pixels = decode_mask_image(&bytes, format, width, height)?
         .to_rgba8()
         .into_raw();
@@ -5950,7 +5972,7 @@ fn import_image_stream(
     let (bytes, format) = if pdf_image_is_mask(Some(pdf), &image.dict)? {
         stencil_image_bytes(pdf, image, state.fill_color)?
     } else {
-        image_bytes_with_soft_mask(pdf, resources, image)?
+        image_bytes_with_soft_mask(pdf, resources, image, state.rendering_intent)?
     };
     let id = output.add_image_object(page_index, &bytes, format, [min_x, min_y, width, height])?;
     if top_right.1 != top_left.1
@@ -25126,6 +25148,156 @@ mod tests {
         let mut altered = Vec::new();
         invalid_first.save_to(&mut altered).unwrap();
         assert!(OfdDocument::from_pdf_bytes(&altered).is_err());
+    }
+
+    #[test]
+    fn pdf_images_inherit_rendering_intent_through_masks_and_graphics_state() {
+        let profile_bytes = include_bytes!("../tests/fixtures/intent-test-cmyk.icc");
+        let source_color = [77_u8, 51, 26, 51];
+        let mut source =
+            PdfDocument::load_mem(&image_pdf(&source_color.repeat(4), None, false)).unwrap();
+        let profile_id = source.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! {"N" => 4},
+            profile_bytes.to_vec(),
+        )));
+        source
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference(profile_id),
+                ]),
+            );
+        let profile = ColorProfile::new_from_slice(profile_bytes).unwrap();
+        let intents = [
+            ("Perceptual", RenderingIntent::Perceptual),
+            (
+                "RelativeColorimetric",
+                RenderingIntent::RelativeColorimetric,
+            ),
+            ("Saturation", RenderingIntent::Saturation),
+            (
+                "AbsoluteColorimetric",
+                RenderingIntent::AbsoluteColorimetric,
+            ),
+        ];
+        let expected: Vec<_> = intents
+            .iter()
+            .map(|(_, intent)| {
+                let converter = profile
+                    .create_transform_8bit(
+                        Layout::Rgba,
+                        &ColorProfile::new_srgb(),
+                        Layout::Rgb,
+                        TransformOptions {
+                            rendering_intent: *intent,
+                            ..TransformOptions::default()
+                        },
+                    )
+                    .unwrap();
+                let mut rgb = [0; 3];
+                converter.transform(&source_color, &mut rgb).unwrap();
+                rgb
+            })
+            .collect();
+        assert!(
+            expected.iter().any(|color| *color != expected[1]),
+            "profile must distinguish inherited intents"
+        );
+        let body = source
+            .get_object((4, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .get_plain_content()
+            .unwrap();
+        for mask_kind in 0..4 {
+            let mut base = source.clone();
+            let mask = match mask_kind {
+                1 => Some(Object::Array((0..8).map(|_| Object::Integer(0)).collect())),
+                2 => Some(Object::Reference(base.add_object(lopdf::Stream::new(dictionary! {"Type"=>"XObject","Subtype"=>"Image","Width"=>2,"Height"=>2,"BitsPerComponent"=>1,"ImageMask"=>true},vec![0;2])))),
+                3 => Some(Object::Reference(base.add_object(lopdf::Stream::new(dictionary! {"Type"=>"XObject","Subtype"=>"Image","Width"=>2,"Height"=>2,"BitsPerComponent"=>8,"ColorSpace"=>"DeviceGray"},vec![255;4])))),
+                _ => None,
+            };
+            if let Some(mask) = mask {
+                base.get_object_mut((5, 0))
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap()
+                    .dict
+                    .set(if mask_kind == 3 { "SMask" } else { "Mask" }, mask);
+            }
+            for (index, (name, _)) in intents.iter().enumerate() {
+                for via_extgstate in [false, true] {
+                    let mut pdf = base.clone();
+                    let prefix = if via_extgstate {
+                        pdf.get_object_mut((3,0)).unwrap().as_dict_mut().unwrap().get_mut(b"Resources").unwrap().as_dict_mut().unwrap().set("ExtGState",dictionary! {"G"=>dictionary! {"RI"=>Object::Name(name.as_bytes().to_vec())}});
+                        b"/G gs ".to_vec()
+                    } else {
+                        format!("/{name} ri ").into_bytes()
+                    };
+                    let mut content = prefix;
+                    content.extend_from_slice(&body);
+                    pdf.get_object_mut((4, 0))
+                        .unwrap()
+                        .as_stream_mut()
+                        .unwrap()
+                        .set_plain_content(content);
+                    let mut bytes = Vec::new();
+                    pdf.save_to(&mut bytes).unwrap();
+                    let doc = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+                    let image = image::load_from_memory(doc.page_image_data(0, 0).unwrap())
+                        .unwrap()
+                        .to_rgb8();
+                    assert_eq!(
+                        image.get_pixel(0, 0).0,
+                        expected[index],
+                        "{name}, mask={mask_kind}, gs={via_extgstate}"
+                    );
+                }
+            }
+        }
+        // The image's explicit Intent overrides both the outer and saved state.
+        for explicit in [false, true] {
+            let mut pdf = source.clone();
+            if explicit {
+                pdf.get_object_mut((5, 0))
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap()
+                    .dict
+                    .set("Intent", Object::Name(b"RelativeColorimetric".to_vec()));
+            }
+            let mut content = b"/AbsoluteColorimetric ri ".to_vec();
+            content.extend_from_slice(&body);
+            content.extend_from_slice(b" q /Perceptual ri ");
+            content.extend_from_slice(&body);
+            content.extend_from_slice(b" Q ");
+            content.extend_from_slice(&body);
+            pdf.get_object_mut((4, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_plain_content(content);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let doc = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(doc.page_images(0).unwrap().len(), 3);
+            for (index, intent) in [3, 0, 3].into_iter().enumerate() {
+                let image = image::load_from_memory(doc.page_image_data(0, index).unwrap())
+                    .unwrap()
+                    .to_rgb8();
+                assert_eq!(
+                    image.get_pixel(0, 0).0,
+                    expected[if explicit { 1 } else { intent }]
+                );
+            }
+        }
     }
 
     #[test]

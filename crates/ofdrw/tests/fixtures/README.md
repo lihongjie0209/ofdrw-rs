@@ -288,3 +288,10 @@ RGB color declaration: PDF's explicit `ColorSpace` takes precedence over it
 between these inputs and when redundant bit-depth/Decode metadata changes.
 Original PDFs remain the importer inputs, and tests inspect alpha samples
 independently. Ordinary tests use the checked-in files without those tools.
+
+`intent-test-cmyk.icc` is authored under Apache-2.0 by
+`scripts/generate_intent_profile.py`. Its ICC v2 LUT8 tables produce different
+constant neutral Lab values for perceptual, relative-colorimetric and saturation
+conversion, making rendering-intent inheritance observable independently of
+source samples. The tests compare converted pixels across graphics states,
+image-level overrides and masking paths.

@@ -1340,8 +1340,7 @@ Complete PDF conversion is still pending.
 PDF `ri` rendering-intent operators and ExtGState `RI` entries with a name
 operand select the corresponding ICC conversion for vector colors when the
 profile supports it. Image XObject `Intent` names select ICC conversion for
-decoded raster images, including JPEG; an omitted image intent uses
-`RelativeColorimetric`. Unknown intent names also use `RelativeColorimetric`;
+decoded raster images, including JPEG; an omitted image intent inherits the current graphics-state intent. Unknown intent names also use `RelativeColorimetric`;
 an unavailable ICC conversion falls back to a usable profile transform.
 
 Indexed ICC palettes are converted separately for each rendering intent, so
