@@ -3987,3 +3987,22 @@ test('import tiling patterns through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+
+test('import shading patterns through the C ABI', () => {
+  for (const kind of ['axial', 'affine-radial', 'bbox-background', 'combined-alpha', 'nested', 'tensor', 'state-reuse']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('shading-pattern-' + kind + '.pdf')));
+    try {
+      assert.equal(document.pageCount, 1);
+      assert.ok(document.pageSvg(0).includes('<pattern'));
+      assert.ok(document.pageCompositeUnits(0).length > 0);
+      if (kind === 'state-reuse') assert.equal(document.pageCompositeUnits(0).length, 1);
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

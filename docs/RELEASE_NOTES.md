@@ -1,5 +1,15 @@
 Unreleased source changes after v0.1.0:
 
+- PDF shading patterns (`PatternType=2`) import through the seven existing
+  shading families as reusable native paints for paths, strokes, text and
+  stencils. Affine source-space mapping preserves radial/axial geometry;
+  background colors, BBox clipping, initial parent state, rendering intent and
+  source/outer alpha are retained. Twenty-eight independent raster/round-trip
+  scenes and explicit opacity checks cover the implementation; three alpha
+  references include equivalent Form-group PDFs because common renderers
+  ignore the pattern ExtGState alpha. Pattern blending that depends on the
+  backdrop and graphics-state soft masks remain unsupported.
+
 - PDF colored and uncolored tiling patterns import as native OFD pattern
   paints with reusable vector cell resources. Paths, strokes, text, stencils,
   supported cell images/forms, nested patterns, matrices, gaps/overlaps,
@@ -7,9 +17,9 @@ Unreleased source changes after v0.1.0:
   independent raster/round-trip scenes. Python, Go and Node.js exercise the
   same feature through the existing PDF import API. Cycles, malformed
   dictionaries, uncolored color-setting content and excessive overlap fail
-  explicitly. Shading patterns and backdrop-dependent cell blending remain
-  unsupported. Independent composite resources also reserve the in-memory
-  identifier range before subsequent pages are added.
+  explicitly. Backdrop-dependent cell blending remains unsupported. Independent
+  composite resources also reserve the in-memory identifier range before
+  subsequent pages are added.
 
 - Inline PDF image parsing resolves named color spaces in the current page
   or Form resources for both raw and filtered pixels. Candidate EI markers

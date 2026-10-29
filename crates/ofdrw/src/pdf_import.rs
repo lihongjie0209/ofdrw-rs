@@ -8,9 +8,11 @@ mod font_style;
 mod jpx_color;
 mod mesh_shading;
 mod multi_function;
+mod pattern;
 mod plane_shading;
 mod scalar_function;
 mod separation_color;
+mod shading_pattern;
 mod simple_encoding;
 mod simple_widths;
 mod standard_font_data;
@@ -65,8 +67,8 @@ struct GraphicsState {
     dash_pattern: Option<Vec<f64>>,
     dash_phase: f64,
     clips: Vec<PdfClip>,
-    fill_pattern: Option<Arc<tiling_pattern::Source>>,
-    stroke_pattern: Option<Arc<tiling_pattern::Source>>,
+    fill_pattern: Option<Arc<pattern::Source>>,
+    stroke_pattern: Option<Arc<pattern::Source>>,
     active_patterns: Vec<Option<ObjectId>>,
     uncolored_pattern: bool,
 }
@@ -2175,6 +2177,15 @@ fn apply_ext_gstate(
     let dictionary = value
         .as_dict()
         .map_err(|_| OfdError::Invalid("PDF ExtGState is not a dictionary".into()))?;
+    apply_ext_gstate_dictionary(pdf, dictionary, state, text)
+}
+
+fn apply_ext_gstate_dictionary(
+    pdf: &PdfDocument,
+    dictionary: &lopdf::Dictionary,
+    state: &mut GraphicsState,
+    text: &mut TextState,
+) -> Result<(), OfdError> {
     for (key, value) in dictionary.iter() {
         let (_, value) = pdf
             .dereference(value)
@@ -3348,6 +3359,16 @@ fn import_pdf_shading(
     visible: bool,
 ) -> Result<(), OfdError> {
     let (_, source) = resource(page.pdf, page.resources, b"Shading", name)?;
+    import_pdf_shading_source(output, page, state, source, visible)
+}
+
+fn import_pdf_shading_source(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    state: &GraphicsState,
+    source: &Object,
+    visible: bool,
+) -> Result<(), OfdError> {
     let shading = match source {
         Object::Dictionary(dict) => dict,
         Object::Stream(stream) => &stream.dict,
@@ -6393,7 +6414,7 @@ fn validate_opaque_form_content(
         match operation.operator.as_str() {
             "scn" | "SCN" => {
                 if let Some(Object::Name(name)) = operation.operands.last() {
-                    tiling_pattern::validate_opaque(pdf, resources, name, active_forms)?;
+                    pattern::validate_opaque(pdf, resources, name, active_forms)?;
                 }
             }
             "gs" => {
@@ -8061,7 +8082,7 @@ fn import_content(
                             "PDF Pattern color has no pattern name".into(),
                         ));
                     };
-                    let source = tiling_pattern::Source::resolve(
+                    let source = pattern::Source::resolve(
                         page_context,
                         name,
                         initial_state.clone(),

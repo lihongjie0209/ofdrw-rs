@@ -1955,8 +1955,8 @@ is bounded at 32 levels and each period at 1000 overlapping cell placements;
 pattern byte filters use the shared bounded byte-stream decoder. Resource
 cycles, singular matrices, zero steps, malformed resource dictionaries, and
 excessive complexity return errors. Existing opaque transparency-group checks
-also inspect pattern cells. Shading patterns (`PatternType=2`) and graphics-state
-soft masks remain unsupported. Pattern cells with non-`Normal` blending also
+also inspect pattern cells. Graphics-state soft masks remain unsupported.
+Pattern cells with non-`Normal` blending also
 return an error until backdrop-dependent pattern compositing is implemented.
 Pattern-cell transparency parameters start at their defaults, including when
 the parent Form inherited alpha; outer alpha is applied once to the resulting
@@ -1971,6 +1971,35 @@ use Ghostscript's arithmetic conversion to match the documented no-profile
 fallback. Text scenes embed their font so font substitution does not obscure
 pattern geometry. Raster comparisons allow the existing one-pixel neighborhood
 for differences between rasterizers; they do not assert byte-identical output.
+
+PDF shading patterns (`PatternType=2`) also import as reusable native pattern
+paints, with the same path fill/stroke, text and stencil interfaces. The source
+may be any of the seven shading families supported below. The importer evaluates
+in shading coordinates and transforms the complete paint, preserving axial
+isocolor lines and the supported radial gradients under rotation, reflection,
+nonuniform scaling and shear. The visible page bounds are mapped back into
+shading space so one cell covers the painted page without introducing repetition.
+`Background` fills areas not painted by the shading, and `BBox` clips both the
+background and the shading. Pattern `Matrix`, `Shading` and `ExtGState` entries
+may be indirect references. Repeated paints reuse the source composite resource.
+
+A shading pattern starts with the parent's initial non-transparency state and
+default transparency state. Its `ExtGState` can override rendering intent and
+nonstroking alpha; stroke/text-only parameters do not affect shading. Source
+alpha multiplies the painting operation's fill or stroke alpha and applies to
+the entire pattern, including its background. This follows the implicit knockout
+group in [PDF 32000-1 section 11.6.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+Backdrop-dependent blending and graphics-state soft masks still return errors.
+Existing shading-function, color-space, geometry and work limits remain in force.
+
+The shading-pattern corpus contains 28 raster/round-trip scenes. Ghostscript
+10.02.1 and Poppler ignore alpha in the pattern's own ExtGState. Three alpha
+references therefore use explicit equivalent Form groups to apply the product
+of source and outer opacity once; the original source PDFs and these reference
+PDFs are both committed. Tests additionally check the opacity formula directly
+at known pixels. Other scenes render the original authored PDFs independently.
+`scripts/generate_shading_pattern_fixtures.py` reproduces all sources and
+references, including affine radial geometry and all seven shading families.
 
 PDF axial (type 2) and radial (type 3) `sh` shading import as OFD gradients
 for type 2 exponential functions, one-input type 0 sampled functions,

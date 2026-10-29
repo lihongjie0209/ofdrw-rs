@@ -216,7 +216,7 @@ impl Source {
         Ok(resource_id)
     }
 
-    fn style(
+    pub(super) fn style(
         &self,
         output: &mut OfdDocument,
         page: &PdfPageContext<'_>,
