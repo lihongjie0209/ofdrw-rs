@@ -272,3 +272,19 @@ and the 16-bit mask oracle expands the raw-sample predicate into explicit alpha.
 The importer always receives the original PDF. Tests separately inspect the
 original image alpha samples and retained None text. No generator is required
 for ordinary offline tests.
+
+`devicen-jpx-*.pdf` and PNG references are authored by
+`scripts/generate_multichannel_jpx_fixtures.py`, using glymur/numpy/packaging
+and OpenJPEG only during generation. The ten cases encode lossless
+2/4/5/32-component codestreams, container color overrides, embedded alpha,
+8/16-bit color-key masking, external soft masks and omitted `BitsPerComponent`. Ghostscript generates 72-DPI references.
+For Ghostscript 10.02.1, the omitted-bit-depth oracle supplies redundant
+`BitsPerComponent` metadata (ISO 32000-1 Table 89 requires readers to determine
+JPX precision from the codestream); the 16-bit color-key oracle expands its
+raw-sample predicate into explicit alpha, as in the other tint fixtures.
+The container-color oracle uses the same encoded samples without its embedded
+RGB color declaration: PDF's explicit `ColorSpace` takes precedence over it
+(ISO 32000-1 Table 89). Tests also require byte-identical converted images
+between these inputs and when redundant bit-depth/Decode metadata changes.
+Original PDFs remain the importer inputs, and tests inspect alpha samples
+independently. Ordinary tests use the checked-in files without those tools.

@@ -7550,6 +7550,16 @@ def test_imports_pdf_separation_colors_across_binding(name):
 
 
 @pytest.mark.parametrize("name", [
+    'devicen-jpx-two',
+    'devicen-jpx-five',
+    'devicen-jpx-thirty-two',
+    'devicen-jpx-five-mask',
+    'devicen-jpx-five-sixteen-mask',
+    'devicen-jpx-five-soft-mask',
+    'devicen-jpx-five-no-bpc',
+    'devicen-jpx-four',
+    'devicen-jpx-three-alpha',
+    'devicen-jpx-five-container',
     'devicen-paths',
     'devicen-sampled',
     'devicen-cubic',

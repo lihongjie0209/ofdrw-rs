@@ -5,6 +5,7 @@ mod cid_encoding;
 mod cid_unicode;
 mod device_n;
 mod font_style;
+mod jpx_color;
 mod mesh_shading;
 mod multi_function;
 mod plane_shading;
@@ -4794,8 +4795,15 @@ fn image_bytes_inner_with_context(
         if !is_jpeg2000(&image.content) {
             return Err(OfdError::Invalid("invalid PDF JPEG2000 image".into()));
         }
+        let declared_space = image
+            .dict
+            .get(b"ColorSpace")
+            .ok()
+            .map(|value| parse_color_space(pdf, resources, value, 0))
+            .transpose()?;
+        let codec_data = jpx_color::codec_data(&image.content, declared_space.as_ref())?;
         let header =
-            hayro_jpeg2000::Image::new(&image.content, &hayro_jpeg2000::DecodeSettings::default())
+            hayro_jpeg2000::Image::new(&codec_data, &hayro_jpeg2000::DecodeSettings::default())
                 .map_err(|error| {
                     OfdError::Invalid(format!("cannot read PDF JPEG2000 image: {error}"))
                 })?;
@@ -4804,9 +4812,8 @@ fn image_bytes_inner_with_context(
                 "PDF JPEG2000 dimensions do not match its samples".into(),
             ));
         }
-        let remap_space = match image.dict.get(b"ColorSpace") {
-            Ok(value) => {
-                let mapped = parse_color_space(pdf, resources, value, 0)?;
+        let remap_space = match declared_space {
+            Some(mapped) => {
                 if mapped.channels() != usize::from(header.color_space().num_channels()) {
                     return Err(OfdError::Invalid(
                         "PDF JPEG2000 color space does not match its samples".into(),
@@ -4823,7 +4830,7 @@ fn image_bytes_inner_with_context(
                     Some(mapped)
                 }
             }
-            Err(_) => None,
+            None => None,
         };
         let embedded_mask = match image.dict.get(b"SMaskInData") {
             Ok(value) => resolve_pdf_image_value(pdf, value, "JPEG2000 SMaskInData")?
@@ -4846,7 +4853,25 @@ fn image_bytes_inner_with_context(
                 "PDF JPEG2000 has no embedded opacity channel".into(),
             ));
         }
-        let mut decoded = decode_jpeg2000(&image.content)?;
+        // A PDF ColorSpace can interpret arbitrary codestream components.
+        // Avoid the generic display-color decoder before that interpretation.
+        let pixels = u64::from(width) * u64::from(height);
+        let components =
+            u64::from(header.color_space().num_channels()) + u64::from(header.has_alpha());
+        if pixels * 4 > MAX_ENTRY_BYTES || pixels * components * 4 > MAX_TOTAL_BYTES {
+            return Err(OfdError::Limit(
+                "PDF JPEG2000 decoded components are too large".into(),
+            ));
+        }
+        let mut decoded = if remap_space.is_some() && embedded_mask != 2 {
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                width,
+                height,
+                image::Rgba([0, 0, 0, 255]),
+            ))
+        } else {
+            decode_jpeg2000(&image.content)?
+        };
         if embedded_mask == 2 {
             decoded = unblend_preblended_jpeg2000(image, pdf, header.color_space(), decoded)?;
         }
@@ -4856,9 +4881,9 @@ fn image_bytes_inner_with_context(
                 return Err(OfdError::Limit("PDF JPEG2000 image is too large".into()));
             }
             let channels = space.channels();
-            if channels > 4 {
-                return Err(OfdError::Invalid(
-                    "PDF JPEG2000 default color space has too many channels".into(),
+            if channels > 32 {
+                return Err(OfdError::Limit(
+                    "PDF JPEG2000 color space exceeds 32 channels".into(),
                 ));
             }
             let mut context = hayro_jpeg2000::DecoderContext::default();
@@ -4876,10 +4901,25 @@ fn image_bytes_inner_with_context(
                     "PDF JPEG2000 color components are invalid".into(),
                 ));
             }
+            let alpha = if embedded_mask == 1 {
+                let alpha = components.get(channels).ok_or_else(|| {
+                    OfdError::Invalid("PDF JPEG2000 opacity component is missing".into())
+                })?;
+                if alpha.samples().len() != width as usize * height as usize
+                    || !(1..=16).contains(&alpha.bit_depth())
+                {
+                    return Err(OfdError::Invalid(
+                        "PDF JPEG2000 opacity component is invalid".into(),
+                    ));
+                }
+                Some(alpha)
+            } else {
+                None
+            };
             let unblended = (embedded_mask == 2).then(|| decoded.to_rgb8());
             let mut pixels = decoded.to_rgba8();
             for (index, pixel) in pixels.pixels_mut().enumerate() {
-                let mut values = [0.0; 4];
+                let mut values = [0.0; 32];
                 for (channel, component) in components[..channels].iter().enumerate() {
                     let sample = if let Some(unblended) = &unblended {
                         f64::from(
@@ -4894,6 +4934,12 @@ fn image_bytes_inner_with_context(
                 }
                 let rgb = space.color_with_intent(&values[..channels], rendering_intent)?;
                 pixel.0[..3].copy_from_slice(&rgb);
+                if let Some(alpha) = alpha {
+                    let maximum = (1_u32 << alpha.bit_depth()) - 1;
+                    pixel.0[3] = (f64::from(alpha.samples()[index]) / f64::from(maximum) * 255.)
+                        .clamp(0., 255.)
+                        .round() as u8;
+                }
             }
             decoded = image::DynamicImage::ImageRgba8(pixels);
         }

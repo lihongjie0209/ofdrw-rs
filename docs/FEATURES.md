@@ -1419,7 +1419,17 @@ import, including the standard case where `ColorSpace` and
 `BitsPerComponent` are absent. The PDF image dimensions are checked against
 the codestream. Explicit device and supported calibrated or ICC color spaces
 must have the same component count as the encoded image; calibrated and ICC
-samples are converted to sRGB. Color-space arrays may be indirect PDF objects.
+samples are converted to sRGB. Explicit DeviceN also converts arbitrary
+JPEG2000 components (up to 32) through its tint transform. Raw codestreams
+retain all DeviceN colorants rather than inferring RGB or an opacity channel.
+For explicit DeviceN in a container without opacity metadata, embedded color
+specifications are ignored while palette and component mappings remain intact.
+Containers with opacity metadata retain their decoder alpha interpretation
+and still require a codec-recognized color/alpha layout.
+Color-space arrays may be indirect PDF objects. Before decoding, output pixels
+are capped at 64 MiB and the estimated floating-point component buffers at
+256 MiB. JPX bit depth comes from the codestream; `BitsPerComponent` remains
+optional and is ignored when present.
 
 `SMaskInData=0` ignores an embedded alpha channel, `1` keeps it,
 and `2` unblends preblended RGB or gray samples using an optional `Matte` array.
@@ -1500,8 +1510,9 @@ NChannel attributes are accepted for alternate-space composite previews;
 process/spot plate blending and MixingHints are not implemented. Tables and
 per-evaluation interpolation are each capped at one million entries/work units,
 and each parsed tint transform has a 100-million-unit cumulative work budget.
-Colorant names are limited to 1,024 bytes. JPEG/JPEG2000 still require supported
-codec component layouts; arbitrary multi-channel raw images become RGB PNG.
+Colorant names are limited to 1,024 bytes. JPEG still requires supported codec component layouts. Raw images and
+explicit-DeviceN JPEG2000 images support up to 32 source color components
+and become RGB/RGBA PNG resources.
 
 PDF `ICCBased` color spaces with one, three, or four channels use their embedded
 ICC profiles to convert vector colors, indexed palettes, and raw image samples

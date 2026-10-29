@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- Explicit DeviceN JPEG2000 images now convert up to 32 source colorants
+  directly, avoiding display-decoder RGB/alpha inference on raw codestreams.
+  Source precision is retained for color-key masks, and external soft masks
+  and existing embedded-alpha conversion remain supported. Ten independent
+  raster cases cover 2/4/5/32 channels, container color overrides, embedded
+  alpha, omitted bit depth and 8/16-bit masks.
+  Component-buffer limits are checked before decoding; malformed, mismatched
+  and oversized declarations have regression coverage through the core.
+
 - PDF DeviceN composite RGB conversion supports up to 32 named colorants,
   multi-input sampled/calculator transforms, single-input exponential/stitching
   transforms, ICC intent conversion and Indexed bases. All-None spaces suppress
