@@ -3204,7 +3204,7 @@ fn import_pdf_shading(
         .get(b"ShadingType")
         .and_then(Object::as_i64)
         .map_err(|_| OfdError::Invalid("PDF shading has no ShadingType".into()))?;
-    if !matches!(shading_type, 2..=5) {
+    if !matches!(shading_type, 2..=7) {
         return Err(OfdError::Invalid("unsupported PDF shading type".into()));
     }
     let bbox_clip = if let Ok(bbox) = shading.get(b"BBox") {
@@ -3246,7 +3246,7 @@ fn import_pdf_shading(
     } else {
         None
     };
-    if matches!(shading_type, 4 | 5) {
+    if matches!(shading_type, 4..=7) {
         let Some(mesh) = mesh_shading::parse(source, page, state, shading_type)? else {
             return Ok(());
         };

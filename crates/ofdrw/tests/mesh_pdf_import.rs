@@ -49,49 +49,117 @@ const FIXTURES: &[(&[u8], &[u8])] = &[
         include_bytes!("fixtures/mesh-calculator-function.pdf"),
         include_bytes!("fixtures/mesh-calculator-function.png"),
     ),
+    (
+        include_bytes!("fixtures/patch-coons-flat.pdf"),
+        include_bytes!("fixtures/patch-coons-flat.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-curved.pdf"),
+        include_bytes!("fixtures/patch-coons-curved.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-tensor-curved.pdf"),
+        include_bytes!("fixtures/patch-tensor-curved.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-tensor-folded.pdf"),
+        include_bytes!("fixtures/patch-tensor-folded.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-reuse-1.pdf"),
+        include_bytes!("fixtures/patch-coons-reuse-1.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-reuse-2.pdf"),
+        include_bytes!("fixtures/patch-coons-reuse-2.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-reuse-3.pdf"),
+        include_bytes!("fixtures/patch-coons-reuse-3.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-tensor-reuse.pdf"),
+        include_bytes!("fixtures/patch-tensor-reuse.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-function.pdf"),
+        include_bytes!("fixtures/patch-coons-function.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-tensor-clipped.pdf"),
+        include_bytes!("fixtures/patch-tensor-clipped.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-wide.pdf"),
+        include_bytes!("fixtures/patch-coons-wide.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-packed.pdf"),
+        include_bytes!("fixtures/patch-coons-packed.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-coons-calgray.pdf"),
+        include_bytes!("fixtures/patch-coons-calgray.png"),
+    ),
+    (
+        include_bytes!("fixtures/patch-tensor-cmyk.pdf"),
+        include_bytes!("fixtures/patch-tensor-cmyk.png"),
+    ),
 ];
+
+fn assert_mesh_raster(
+    source: &[u8],
+    reference: &[u8],
+    label: &str,
+) -> (OfdDocument, String, Vec<u8>) {
+    let document = OfdDocument::from_pdf_bytes(source).unwrap();
+    let svg = document.page_svg(0).unwrap();
+    let png = document.page_png(0, 72.).unwrap();
+    let actual = image::load_from_memory(&png).unwrap().to_rgb8();
+    let expected = image::load_from_memory(reference).unwrap().to_rgb8();
+    assert_eq!(actual.dimensions(), expected.dimensions());
+    // Ignore a one-pixel boundary neighborhood, where independent triangle
+    // rasterizers have different coverage and antialiasing conventions.
+    let mut error = 0_u64;
+    let mut samples = 0_u64;
+    for y in 1..actual.height() - 1 {
+        for x in 1..actual.width() - 1 {
+            let neighborhood = (y - 1..=y + 1).flat_map(|y| (x - 1..=x + 1).map(move |x| (x, y)));
+            if neighborhood
+                .clone()
+                .any(|(x, y)| expected.get_pixel(x, y).0 == [255; 3])
+            {
+                continue;
+            }
+            for channel in 0..3 {
+                error += u64::from(
+                    actual.get_pixel(x, y)[channel].abs_diff(expected.get_pixel(x, y)[channel]),
+                );
+                samples += 1;
+            }
+        }
+    }
+    let mean = error as f64 / samples as f64;
+    assert!(
+        samples > 1000 && mean < 4.,
+        "mesh {label}: mean error {mean} over {samples} samples"
+    );
+    (document, svg, png)
+}
+
+fn assert_mesh_round_trip(document: &OfdDocument, svg: &str, png: &[u8]) {
+    let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.page_svg(0).unwrap(), svg);
+    assert_eq!(reopened.page_png(0, 72.).unwrap(), png);
+    assert!(reopened.validate_references().unwrap().is_empty());
+    assert!(lopdf::Document::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+}
 
 #[test]
 fn pdf_meshes_match_independent_rasters_and_survive_ofd_round_trips() {
     for (index, (source, reference)) in FIXTURES.iter().enumerate() {
-        let document = OfdDocument::from_pdf_bytes(source).unwrap();
-        let svg = document.page_svg(0).unwrap();
-        let png = document.page_png(0, 72.).unwrap();
-        let actual = image::load_from_memory(&png).unwrap().to_rgb8();
-        let expected = image::load_from_memory(reference).unwrap().to_rgb8();
-        assert_eq!(actual.dimensions(), expected.dimensions());
-        // Ignore a one-pixel boundary neighborhood, where independent triangle
-        // rasterizers have different coverage and antialiasing conventions.
-        let mut error = 0_u64;
-        let mut samples = 0_u64;
-        for y in 1..actual.height() - 1 {
-            for x in 1..actual.width() - 1 {
-                let neighborhood =
-                    (y - 1..=y + 1).flat_map(|y| (x - 1..=x + 1).map(move |x| (x, y)));
-                if neighborhood
-                    .clone()
-                    .any(|(x, y)| expected.get_pixel(x, y).0 == [255; 3])
-                {
-                    continue;
-                }
-                for channel in 0..3 {
-                    error += u64::from(
-                        actual.get_pixel(x, y)[channel].abs_diff(expected.get_pixel(x, y)[channel]),
-                    );
-                    samples += 1;
-                }
-            }
-        }
-        let mean = error as f64 / samples as f64;
-        assert!(
-            samples > 1000 && mean < 4.,
-            "mesh {index}: mean error {mean} over {samples} samples"
-        );
-        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
-        assert_eq!(reopened.page_svg(0).unwrap(), svg);
-        assert_eq!(reopened.page_png(0, 72.).unwrap(), png);
-        assert!(reopened.validate_references().unwrap().is_empty());
-        assert!(lopdf::Document::load_mem(&reopened.to_pdf().unwrap()).is_ok());
+        let (document, svg, png) = assert_mesh_raster(source, reference, &index.to_string());
+        assert_mesh_round_trip(&document, &svg, &png);
     }
 }
 
@@ -153,4 +221,35 @@ fn malformed_mesh_metadata_and_partial_vertex_records_return_errors() {
             "length {length}"
         );
     }
+}
+
+#[test]
+fn folded_tensor_fixture_has_opposite_triangle_orientations() {
+    let (document, svg, png) = assert_mesh_raster(
+        include_bytes!("fixtures/patch-tensor-folded.pdf"),
+        include_bytes!("fixtures/patch-tensor-folded.png"),
+        "folded tensor",
+    );
+    let page = document.pages().unwrap().remove(0);
+    let xml = std::str::from_utf8(document.entry(&page.path).unwrap().unwrap()).unwrap();
+    let parsed = roxmltree::Document::parse(xml).unwrap();
+    let points = parsed
+        .descendants()
+        .filter(|node| node.tag_name().name() == "Point")
+        .map(|node| {
+            [
+                node.attribute("X").unwrap().parse::<f64>().unwrap(),
+                node.attribute("Y").unwrap().parse::<f64>().unwrap(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let areas = points
+        .chunks_exact(3)
+        .map(|p| {
+            (p[1][1] - p[2][1]) * (p[0][0] - p[2][0]) + (p[2][0] - p[1][0]) * (p[0][1] - p[2][1])
+        })
+        .collect::<Vec<_>>();
+    assert!(areas.iter().any(|area| *area > 1e-6));
+    assert!(areas.iter().any(|area| *area < -1e-6));
+    assert_mesh_round_trip(&document, &svg, &png);
 }

@@ -1975,9 +1975,25 @@ output meshes are limited to 100,000 points, subdivision to ten levels and
 color evaluation to one million samples. Exceeding these limits returns an
 error. Degenerate triangles paint nothing; malformed records, invalid edge
 sequences and incomplete grids return errors. Graphics transforms, fill alpha,
-blend modes, clipping paths and shading BBox are retained. Type 1 function-based
-and Type 6/7 patch meshes remain unsupported. The stream layout follows
+blend modes, clipping paths and shading BBox are retained. The stream layout follows
 [ISO 32000-1, sections 8.7.4.5.5–6](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+
+PDF Type 6 Coons and Type 7 tensor-product patch meshes also import as OFD
+Gouraud triangles. Patches use continuous packed bit streams and preserve all
+three shared-edge selectors, including the inherited boundary control points
+and corner colors. Coons transfinite interpolation and tensor Bernstein
+surfaces retain curved boundaries and internal controls; corner components
+interpolate bilinearly before color conversion or function evaluation.
+Uniform parameter grids are refined until sampled geometric error is at most
+0.025 mm and RGB error is at most two byte levels per channel, in addition to
+function-sampling tolerance. Each patch permits at most seven refinement levels
+(128 cells per axis); streams permit 4,096 patches and 100,000 output points,
+with the same one-million color evaluation budget. Exhausted budgets or unmet
+error tolerances return errors. Folded patches, edge reuse, transformed clipping,
+opacity and functions have independent raster and round-trip regressions.
+Truncated patches and a reused edge without a preceding patch return errors.
+Type 1 function-based shading remains unsupported. Patch semantics follow
+[ISO 32000-1, sections 8.7.4.5.7–8](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 
 An optional PDF shading `BBox` is transformed and intersected with the
 current clipping path. For direct `sh` painting, `Background` is ignored as

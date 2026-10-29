@@ -5,7 +5,9 @@ use super::{
     pdf_shading_segments, GraphicsState, Object, OfdError, PdfColorSpace, PdfDocument,
     PdfPageContext,
 };
-use crate::{GouraudControlPoint, GouraudFillStyle};
+use crate::{GouraudControlPoint, GouraudFillStyle, GradientSegment};
+
+mod patches;
 
 const MAX_POINTS: usize = 100_000;
 
@@ -170,6 +172,108 @@ where
     Ok(())
 }
 
+struct MeshColors<'a> {
+    space: &'a PdfColorSpace,
+    intent: moxcms::RenderingIntent,
+    stops: Option<Vec<GradientSegment>>,
+    domain: [f64; 2],
+    remaining: std::cell::Cell<usize>,
+}
+
+impl<'a> MeshColors<'a> {
+    fn new(
+        page: &PdfPageContext<'_>,
+        state: &GraphicsState,
+        space: &'a PdfColorSpace,
+        function: Option<&Object>,
+        decode: &[f64],
+    ) -> Result<Self, OfdError> {
+        let a = decode[4].min(decode[5]);
+        let b = decode[4].max(decode[5]);
+        let domain = [a, if b == a { a + 1.0 } else { b }];
+        let stops = function
+            .map(|function| {
+                pdf_shading_segments(page.pdf, function, space, state.rendering_intent, domain)
+            })
+            .transpose()?;
+        Ok(Self {
+            space,
+            intent: state.rendering_intent,
+            stops,
+            domain,
+            remaining: std::cell::Cell::new(1_000_000),
+        })
+    }
+
+    fn evaluate(&self, values: &[f64]) -> Result<[u8; 3], OfdError> {
+        self.remaining
+            .set(self.remaining.get().checked_sub(1).ok_or_else(|| {
+                OfdError::Limit("PDF Gouraud color evaluation budget exceeded".into())
+            })?);
+        let Some(stops) = &self.stops else {
+            let values = values
+                .iter()
+                .enumerate()
+                .map(|(channel, value)| {
+                    let bounds = self.space.component_bounds(channel);
+                    value.clamp(bounds[0], bounds[1])
+                })
+                .collect::<Vec<_>>();
+            return self.space.color_with_intent(&values, self.intent);
+        };
+        let [a, b] = self.domain;
+        let position = ((values[0] - a) / (b - a)).clamp(0., 1.);
+        let index = stops.partition_point(|stop| stop.position.unwrap_or(0.) <= position);
+        if index == 0 {
+            return Ok(stops[0].color);
+        }
+        if index == stops.len() {
+            return Ok(stops[index - 1].color);
+        }
+        let left = &stops[index - 1];
+        let right = &stops[index];
+        let left_position = left.position.unwrap_or(0.);
+        let fraction = (position - left_position) / (right.position.unwrap_or(1.) - left_position);
+        Ok(std::array::from_fn(|channel| {
+            (f64::from(left.color[channel]) * (1. - fraction)
+                + f64::from(right.color[channel]) * fraction)
+                .round() as u8
+        }))
+    }
+}
+
+struct MeshSamples<'a, 'p> {
+    data: &'a [u8],
+    decode: &'a [f64],
+    coordinate_bits: usize,
+    component_bits: usize,
+    flag_bits: usize,
+    channels: usize,
+    page: &'a PdfPageContext<'p>,
+    state: &'a GraphicsState,
+}
+
+impl MeshSamples<'_, '_> {
+    fn value(&self, bits: &mut Bits<'_>, pair: usize, width: usize) -> Result<f64, OfdError> {
+        let fraction = f64::from(bits.read(width)?) / ((1_u64 << width) - 1) as f64;
+        Ok(self.decode[pair * 2] * (1. - fraction) + self.decode[pair * 2 + 1] * fraction)
+    }
+    fn point(&self, bits: &mut Bits<'_>) -> Result<[f64; 2], OfdError> {
+        let x = self.value(bits, 0, self.coordinate_bits)?;
+        let y = self.value(bits, 1, self.coordinate_bits)?;
+        let (x, y) = self.state.point(x, y, self.page.box_);
+        if !x.is_finite() || !y.is_finite() || x.abs() > 1e9 || y.abs() > 1e9 {
+            return Err(invalid());
+        }
+        Ok([x, y])
+    }
+    fn components(&self, bits: &mut Bits<'_>) -> Result<Vec<f64>, OfdError> {
+        (0..self.channels)
+            .map(|channel| self.value(bits, channel + 2, self.component_bits))
+            .collect()
+    }
+}
+
 pub(super) fn parse(
     source: &Object,
     page: &PdfPageContext<'_>,
@@ -185,7 +289,7 @@ pub(super) fn parse(
     {
         return Err(invalid());
     }
-    let flag_bits = if kind == 4 {
+    let flag_bits = if kind != 5 {
         let bits = integer(page.pdf, dict, b"BitsPerFlag")?;
         if ![2, 4, 8].contains(&bits) {
             return Err(invalid());
@@ -211,6 +315,32 @@ pub(super) fn parse(
     };
     let decode = pdf_function_numbers(page.pdf, dict, b"Decode", 4 + 2 * channels)?;
     let data = pdf_byte_stream_data(stream, Some(page.pdf), "Gouraud mesh")?;
+    if matches!(kind, 6 | 7) {
+        let colors = MeshColors::new(page, state, &color_space, function, &decode)?;
+        let samples = MeshSamples {
+            data: &data,
+            decode: &decode,
+            coordinate_bits,
+            component_bits,
+            flag_bits,
+            channels,
+            page,
+            state,
+        };
+        let points = patches::parse(&samples, &colors, kind)?;
+        if points.is_empty() {
+            return Ok(None);
+        }
+        let style = GouraudFillStyle {
+            points,
+            vertices_per_row: None,
+            extend: false,
+            back_color: None,
+            back_alpha: None,
+        };
+        style.validate()?;
+        return Ok(Some(style));
+    }
     let record_bytes = (flag_bits + coordinate_bits * 2 + component_bits * channels).div_ceil(8);
     if !data.len().is_multiple_of(record_bytes) {
         return Err(invalid());
@@ -296,57 +426,8 @@ pub(super) fn parse(
             index += count;
         }
     } else {
-        let stops = function
-            .map(|function| {
-                let a = decode[4].min(decode[5]);
-                let b = decode[4].max(decode[5]);
-                pdf_shading_segments(
-                    page.pdf,
-                    function,
-                    &color_space,
-                    state.rendering_intent,
-                    [a, if b == a { a + 1.0 } else { b }],
-                )
-            })
-            .transpose()?;
-        let remaining = std::cell::Cell::new(1_000_000usize);
-        let evaluate = |values: &[f64]| -> Result<[u8; 3], OfdError> {
-            remaining.set(remaining.get().checked_sub(1).ok_or_else(|| {
-                OfdError::Limit("PDF Gouraud color evaluation budget exceeded".into())
-            })?);
-            let Some(stops) = &stops else {
-                let values = values
-                    .iter()
-                    .enumerate()
-                    .map(|(channel, value)| {
-                        let bounds = color_space.component_bounds(channel);
-                        value.clamp(bounds[0], bounds[1])
-                    })
-                    .collect::<Vec<_>>();
-                return color_space.color_with_intent(&values, state.rendering_intent);
-            };
-            let a = decode[4].min(decode[5]);
-            let b = decode[4].max(decode[5]);
-            let b = if b == a { a + 1.0 } else { b };
-            let position = ((values[0] - a) / (b - a)).clamp(0., 1.);
-            let index = stops.partition_point(|stop| stop.position.unwrap_or(0.) <= position);
-            if index == 0 {
-                return Ok(stops[0].color);
-            }
-            if index == stops.len() {
-                return Ok(stops[index - 1].color);
-            }
-            let left = &stops[index - 1];
-            let right = &stops[index];
-            let left_position = left.position.unwrap_or(0.);
-            let fraction =
-                (position - left_position) / (right.position.unwrap_or(1.) - left_position);
-            Ok(std::array::from_fn(|channel| {
-                (f64::from(left.color[channel]) * (1. - fraction)
-                    + f64::from(right.color[channel]) * fraction)
-                    .round() as u8
-            }))
-        };
+        let colors = MeshColors::new(page, state, &color_space, function, &decode)?;
+        let evaluate = |values: &[f64]| colors.evaluate(values);
         for triangle in triangles {
             subdivide(
                 triangle.map(|i| vertices[i].clone()),

@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- PDF Type 6/7 Coons and tensor-product patch meshes import through bounded
+  geometry/color refinement. Continuous bit streams, three shared-edge modes,
+  curved boundaries, internal control points and bilinear source colors are
+  retained. Fourteen new Ghostscript references cover folded patches, functions,
+  nonlinear colors, transforms, clipping, opacity, packed and wide coordinates.
+  Rust and language bindings verify rendering and round trips; malformed
+  streams and complexity
+  limits have unit coverage.
+
 - PDF Type 4/5 Gouraud meshes import with source topology, packed vertex
   records, transforms, clips, opacity and blend modes. Nonlinear color spaces
   and shading functions retain source interpolation through bounded mesh
