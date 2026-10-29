@@ -7636,3 +7636,16 @@ def test_pdf_shading_patterns_across_binding(kind):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+
+@pytest.mark.parametrize("kind", ["axial-shear", "radial-shear", "axial-alpha", "radial-clip", "axial-form", "radial-multiply", "radial-rotate"])
+def test_pdf_direct_affine_shadings_across_binding(kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("affine-shading-" + kind + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert document.page_count == 1
+        assert "<pattern" in document.page_svg(0)
+        assert document.page_composite_units(0)
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []

@@ -1,5 +1,13 @@
 Unreleased source changes after v0.1.0:
 
+- Direct PDF axial/radial shading preserves full affine geometry under
+  nonuniform scale and shear instead of projecting only endpoints/radii.
+  Current rendering intent, alpha, blend mode, clipping and Form/page matrices
+  are retained; direct-shading backgrounds stay ignored. Hidden/nonpainting
+  validation leaves no resources or reserved IDs. Twenty-four original-PDF
+  raster references, four new boundary tests and Python/Go/Node integration
+  cover the change. Existing nested-radial-circle restrictions remain.
+
 - PDF shading parameters resolve indirect `ShadingType`, bounds, coordinates,
   extension flags and domains, including referenced array components. Direct
   shading operators and pattern paints share the same array reader and numeric

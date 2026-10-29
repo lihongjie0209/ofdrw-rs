@@ -4006,3 +4006,21 @@ test('import shading patterns through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+
+test('import direct affine shadings through the C ABI', () => {
+  for (const kind of ['axial-shear', 'radial-shear', 'axial-alpha', 'radial-clip', 'axial-form', 'radial-multiply', 'radial-rotate']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('affine-shading-' + kind + '.pdf')));
+    try {
+      assert.equal(document.pageCount, 1);
+      assert.ok(document.pageSvg(0).includes('<pattern'));
+      assert.ok(document.pageCompositeUnits(0).length > 0);
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

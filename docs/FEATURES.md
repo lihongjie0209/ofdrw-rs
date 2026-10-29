@@ -2031,6 +2031,29 @@ are checked before conversion. Nested function arrays are rejected.
 Single exponential functions with a linear component mapping also sample
 calibrated, Lab and ICC color conversions before writing their color stops.
 
+Direct axial and radial `sh` paints also preserve nonuniform scale and shear.
+They evaluate the gradient in source coordinates and retain the full transform
+on a native pattern/composite wrapper. Transforming axial endpoints alone would
+change its isocolor lines, while scaling a radial radius cannot represent the
+resulting ellipse. Even small shears use the full matrix; the looser tolerance
+used for stroke widths does not select the gradient representation. Conformal
+transforms continue to use the existing direct gradient representation. Existing
+radial restrictions, including nested source circles, remain unchanged.
+
+This path uses the graphics state at the `sh` operator, including rendering
+intent, fill alpha, blend mode and current clips. Shading `BBox` clips the source;
+`Background` remains ignored for direct `sh` painting. Hidden and nonpainting
+shaders validate in a temporary document and do not reserve IDs or leave
+composite resources in the imported document. Text clips keep their original
+font references without copying those references into the validation document.
+
+Twenty-four authored direct-shading PDFs have original-source Ghostscript
+references, covering anisotropic/sheared/reflected transforms, clips, alpha,
+Multiply, Form matrices, page rotation, UserUnit and hidden content. Additional
+unit checks cover current ICC rendering intent, hidden malformed shaders, text
+clips and nonpainting colors. `scripts/generate_affine_shading_fixtures.py`
+regenerates these sources and rasters; Python/Go/Node.js call the same importer.
+
 Function arrays retain the union of sample-table knots, cubic extrema,
 function-domain boundaries and stitching bounds before adaptive sampling.
 Calculator and stitching region changes preserve separate colors at jumps.

@@ -3422,6 +3422,14 @@ fn import_pdf_shading_source(
     if !matches!(shading_type, 1..=7) {
         return Err(OfdError::Invalid("unsupported PDF shading type".into()));
     }
+    // Stroke tolerance is unsuitable for choosing a gradient representation:
+    // even a very small shear changes the mathematical isocolor lines.
+    let [a, b, c, d, _, _] = state.ctm;
+    let scale = a.hypot(b);
+    let conformal = scale > 0. && scale.is_finite() && scale == c.hypot(d) && a * c + b * d == 0.;
+    if matches!(shading_type, 2 | 3) && !conformal {
+        return shading_pattern::import_affine_direct(output, page, state, shading, visible);
+    }
     let bbox_clip = if let Ok(bbox) = shading.get(b"BBox") {
         let values = pdf_numeric_array(page.pdf, bbox, "shading BBox", 4)?;
         let [left, bottom, right, top] = values.as_slice() else {

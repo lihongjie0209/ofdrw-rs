@@ -1,0 +1,52 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [9 0 R] /D << /BaseState /OFF /OFF [9 0 R] >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 64] /Resources << /Shading << /S 5 0 R >> /ExtGState << /G 7 0 R >> /XObject << /Fm 8 0 R >> /Properties << /H 9 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<<  /Length 45 >>
+stream
+/OC /H BDC q 1 .3 .4 .8 -10 -5 cm /S sh Q EMC
+endstream
+endobj
+5 0 obj
+<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [12 12 84 52] /Function 6 0 R /Extend [true true] >>
+endobj
+6 0 obj
+<< /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>
+endobj
+7 0 obj
+<< /ca .5 >>
+endobj
+8 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 96 64] /Matrix [1 .3 .4 .8 -10 -5] /Resources << /Shading << /S 5 0 R >> /ExtGState << /G 7 0 R >> >> /Length 5 >>
+stream
+/S sh
+endstream
+endobj
+9 0 obj
+<< /Type /OCG /Name (Hidden shading) >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000136 00000 n 
+0000000193 00000 n 
+0000000397 00000 n 
+0000000493 00000 n 
+0000000610 00000 n 
+0000000690 00000 n 
+0000000718 00000 n 
+0000000915 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+970
+%%EOF

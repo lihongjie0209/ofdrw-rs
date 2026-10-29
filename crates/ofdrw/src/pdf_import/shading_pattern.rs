@@ -296,6 +296,69 @@ impl Source {
     }
 }
 
+/// Preserve the complete source transform for nonconformal direct `sh` paints.
+/// Merely transforming axial endpoints changes its isocolor lines; transforming
+/// a radial center/radius cannot represent the resulting ellipse or shear.
+pub(super) fn import_affine_direct(
+    output: &mut OfdDocument,
+    page: &PdfPageContext<'_>,
+    state: &GraphicsState,
+    shading: &lopdf::Dictionary,
+    visible: bool,
+) -> Result<(), OfdError> {
+    let width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
+    let height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
+    let nonpainting = {
+        let space = parse_color_space(
+            Some(page.pdf),
+            Some(page.resources),
+            shading
+                .get(b"ColorSpace")
+                .map_err(|_| invalid("Shading has no ColorSpace"))?,
+            0,
+        )?;
+        if matches!(space, PdfColorSpace::Pattern { .. }) {
+            return Err(invalid("Shading cannot use Pattern color"));
+        }
+        space.nonpainting()
+    };
+    let mut shading = shading.clone();
+    // Background belongs to shading patterns, never a direct `sh` operation.
+    shading.remove(b"Background");
+    let mut definition = lopdf::Dictionary::new();
+    definition.set("PatternType", 2);
+    definition.set("Shading", Object::Dictionary(shading));
+    let definition = Object::Dictionary(definition);
+    // Direct shading uses the state at `sh`, unlike a resource pattern's
+    // initial parent state. Transparency is applied once to the final paint.
+    let source = Source::resolve(page, &definition, Arc::new(state.clone()))?;
+    if !visible || nonpainting {
+        // Validate in isolation. Existing text clips refer to fonts in the
+        // caller's document, so only the shader and its paint style are needed.
+        let mut validation = OfdDocument::new();
+        validation.add_blank_page(width, height)?;
+        let local = PdfPageContext { index: 0, ..*page };
+        source
+            .style(&mut validation, &local, state, state.fill_alpha)?
+            .validate()?;
+        return Ok(());
+    }
+    let style = source.style(output, page, state, state.fill_alpha)?;
+    let id = output.add_path_object(
+        page.index,
+        &format!("M 0 0 L {width} 0 L {width} {height} L 0 {height} C"),
+        [0., 0., width, height],
+        PathStyle {
+            fill: true,
+            stroke: false,
+            ..PathStyle::default()
+        },
+    )?;
+    output.set_page_object_pattern_fill(page.index, &id, &style)?;
+    attach_blend_mode(output, page.index, &id, state.blend_mode)?;
+    attach_clips(output, page.index, &id, "PathObject", &state.clips)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +395,157 @@ mod tests {
             resources,
             index: 0,
             box_: [0., 0., 96., 64.],
+        }
+    }
+
+    #[test]
+    fn direct_affine_nonpainting_spaces_do_not_create_objects_or_resources() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../../tests/fixtures/affine-shading-axial-shear.pdf"
+        ))
+        .unwrap();
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "ColorSpace",
+                vec![
+                    Object::Name(b"Separation".to_vec()),
+                    Object::Name(b"None".to_vec()),
+                    Object::Name(b"DeviceGray".to_vec()),
+                    Object::Null,
+                ],
+            );
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let mut document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert!(document.page_objects(0).unwrap().is_empty());
+        assert!(document.page_composite_units(0).unwrap().is_empty());
+        assert!(document.validate_references().unwrap().is_empty());
+        document.add_blank_page(10., 10.).unwrap();
+        assert_eq!(document.pages().unwrap()[1].id, "4");
+    }
+
+    #[test]
+    fn hidden_affine_shading_still_validates_required_parameters() {
+        let original = include_bytes!("../../tests/fixtures/affine-shading-hidden-radial.pdf");
+        for key in [b"Coords".as_slice(), b"Function"] {
+            let mut pdf = PdfDocument::load_mem(original).unwrap();
+            pdf.get_object_mut((5, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .remove(key);
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let error = OfdDocument::from_pdf_bytes(&bytes)
+                .expect_err("hidden malformed shading was accepted");
+            assert!(
+                error
+                    .to_string()
+                    .contains(std::str::from_utf8(key).unwrap()),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_affine_shading_does_not_copy_text_clip_fonts_into_the_validation_document() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../../tests/fixtures/affine-shading-hidden-axial.pdf"
+        ))
+        .unwrap();
+        let font = pdf.add_object(
+            dictionary! { "Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>"Helvetica" },
+        );
+        pdf.get_object_mut((3, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Font", dictionary! { "F"=>Object::Reference(font) });
+        let clip = b"BT /F 20 Tf 7 Tr 8 24 Td (H) Tj ET ";
+        let content = pdf.get_object_mut((4, 0)).unwrap().as_stream_mut().unwrap();
+        let original = content.content.clone();
+        content.set_plain_content([clip.as_slice(), original.as_slice()].concat());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let hidden = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        pdf.get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(clip.to_vec());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let baseline = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(hidden.page_svg(0).unwrap(), baseline.page_svg(0).unwrap());
+        assert!(hidden.page_composite_units(0).unwrap().is_empty());
+        assert!(hidden.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_affine_shading_uses_current_rendering_intent_instead_of_initial_parent_intent() {
+        let mut pdf = PdfDocument::load_mem(include_bytes!(
+            "../../tests/fixtures/affine-shading-axial-shear.pdf"
+        ))
+        .unwrap();
+        let profile = pdf.add_object(lopdf::Stream::new(
+            dictionary! { "N"=>4 },
+            include_bytes!("../../tests/fixtures/intent-test-cmyk.icc").to_vec(),
+        ));
+        pdf.get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "ColorSpace",
+                vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference(profile),
+                ],
+            );
+        let function = pdf.get_object_mut((6, 0)).unwrap().as_dict_mut().unwrap();
+        function.set(
+            "C0",
+            vec![
+                Object::Real(0.3),
+                Object::Real(0.2),
+                Object::Real(0.1),
+                Object::Real(0.2),
+            ],
+        );
+        function.set(
+            "C1",
+            vec![
+                Object::Real(0.3),
+                Object::Real(0.2),
+                Object::Real(0.1),
+                Object::Real(0.2),
+            ],
+        );
+        let content = pdf.get_object_mut((4, 0)).unwrap().as_stream_mut().unwrap();
+        let mut operations = lopdf::content::Content::decode(&content.content).unwrap();
+        operations.operations.insert(
+            0,
+            Operation::new("ri", vec![Object::Name(b"Saturation".to_vec())]),
+        );
+        content.set_plain_content(operations.encode().unwrap());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        let actual = image::load_from_memory(&document.page_png(0, 72.).unwrap())
+            .unwrap()
+            .to_rgb8();
+        for sample in actual.get_pixel(48, 32).0 {
+            assert!(
+                sample.abs_diff(185) <= 2,
+                "current intent produced {sample}"
+            );
         }
     }
 
