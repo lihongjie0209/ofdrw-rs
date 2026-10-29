@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- PDF DeviceN composite RGB conversion supports up to 32 named colorants,
+  multi-input sampled/calculator transforms, single-input exponential/stitching
+  transforms, ICC intent conversion and Indexed bases. All-None spaces suppress
+  painting; mixed None values remain inputs to the alternate transform.
+  Raw image conversion now safely handles more than four source channels.
+  Eighteen independent raster/round-trip cases cover vector/text painting,
+  images up to 32 channels, masks, NChannel fallback and shading families.
+  Physical plate blending, MixingHints and overprint remain outside this preview.
+
 - PDF patch meshes now skip padding after each patch. Shared-edge fixtures
   use nonzero padding, and symmetric raster comparisons also detect extra
   paint outside the reference shape.

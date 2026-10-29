@@ -3899,3 +3899,41 @@ test('import PDF Separation colors through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+
+test('import PDF DeviceN colors through the C ABI', () => {
+  for (const name of [
+    'devicen-paths',
+    'devicen-sampled',
+    'devicen-cubic',
+    'devicen-cmyk',
+    'devicen-three-input',
+    'devicen-image',
+    'devicen-image-five',
+    'devicen-image-thirty-two',
+    'devicen-image16-mask',
+    'devicen-indexed',
+    'devicen-none',
+    'devicen-mixed-none',
+    'devicen-none-clipping',
+    'devicen-nchannel',
+    'devicen-shading',
+    'devicen-mesh',
+    'devicen-patch',
+    'devicen-plane',
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name + '.pdf')));
+    try {
+      if (name === 'devicen-none') {
+        assert.deepEqual(document.pageText(0), ['none']);
+        assert.deepEqual(document.pageImages(0), []);
+      }
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

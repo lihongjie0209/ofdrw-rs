@@ -37,6 +37,7 @@ pub(super) fn parse(
     if matches!(
         alternate,
         PdfColorSpace::Indexed { .. }
+            | PdfColorSpace::DeviceN { .. }
             | PdfColorSpace::Separation { .. }
             | PdfColorSpace::SeparationAll
             | PdfColorSpace::SeparationNone

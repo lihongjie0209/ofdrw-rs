@@ -7547,3 +7547,35 @@ def test_imports_pdf_separation_colors_across_binding(name):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+
+@pytest.mark.parametrize("name", [
+    'devicen-paths',
+    'devicen-sampled',
+    'devicen-cubic',
+    'devicen-cmyk',
+    'devicen-three-input',
+    'devicen-image',
+    'devicen-image-five',
+    'devicen-image-thirty-two',
+    'devicen-image16-mask',
+    'devicen-indexed',
+    'devicen-none',
+    'devicen-mixed-none',
+    'devicen-none-clipping',
+    'devicen-nchannel',
+    'devicen-shading',
+    'devicen-mesh',
+    'devicen-patch',
+    'devicen-plane',
+])
+def test_imports_pdf_device_n_colors_across_binding(name):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / (name + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        if name == "devicen-none":
+            assert document.page_text(0) == ["none"]
+            assert document.page_images(0) == []
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []

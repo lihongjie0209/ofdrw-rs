@@ -1484,7 +1484,24 @@ subtractive gray in composite RGB. `/None` suppresses its own paint while
 preserving text extraction and clipping; independently colored images and
 shadings remain visible. Tint tables use the existing bounded gradient
 approximation, with at most 10,000 stops. Colorant names are limited to 1,024
-bytes. Physical spot-ink plates, overprint and DeviceN are not implemented.
+bytes. Physical spot-ink plates and overprint are not implemented.
+
+PDF `DeviceN` supports one through 32 uniquely named colorants, with repeated
+`None` permitted and `All` rejected. Ordinary tint components start at 1.
+Multi-input Type 0 sampled and Type 4 calculator functions convert to the
+alternate device/calibrated/ICC space; a one-component DeviceN also accepts
+Type 2/3 transforms through the Separation path. Sample tables support all
+standard bit depths, first-axis-fast ordering, Encode/Decode mapping and
+linear or cubic interpolation, including singleton dimensions. Indexed
+palettes, paths, text, raw images with up to 32 channels, and shading imports
+use the same conversion. All-None spaces suppress their paint while preserving
+text and clips; mixed None components still enter the alternate tint transform.
+NChannel attributes are accepted for alternate-space composite previews;
+process/spot plate blending and MixingHints are not implemented. Tables and
+per-evaluation interpolation are each capped at one million entries/work units,
+and each parsed tint transform has a 100-million-unit cumulative work budget.
+Colorant names are limited to 1,024 bytes. JPEG/JPEG2000 still require supported
+codec component layouts; arbitrary multi-channel raw images become RGB PNG.
 
 PDF `ICCBased` color spaces with one, three, or four channels use their embedded
 ICC profiles to convert vector colors, indexed palettes, and raw image samples

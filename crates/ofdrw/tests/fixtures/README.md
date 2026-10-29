@@ -260,3 +260,15 @@ predicate uses an explicit alpha mask (8.9.6.4), and None uses background only
 assertions verify None text retention, clipping and independent RGB content.
 The Indexed image has one sample per output pixel to avoid conflating palette
 conversion with differences in image resampling between renderers.
+
+`devicen-*.pdf` and PNG references are authored by
+`scripts/generate_device_n_fixtures.py`. Eighteen cases cover multi-input
+calculator and sampled/cubic transforms, RGB/CMYK alternates, three-input
+functions, two/five/32-channel images, 16-bit color-key masking, Indexed bases,
+all/mixed None, clipping, NChannel composite fallback and four shading families.
+References use Ghostscript at 72 DPI (`-dUseFastColor` for CMYK). As with the
+Separation fixtures, the all-None oracle contains only the unchanged background,
+and the 16-bit mask oracle expands the raw-sample predicate into explicit alpha.
+The importer always receives the original PDF. Tests separately inspect the
+original image alpha samples and retained None text. No generator is required
+for ordinary offline tests.

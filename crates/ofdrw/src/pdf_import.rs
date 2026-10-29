@@ -3,8 +3,10 @@
 pub(crate) mod cff_font;
 mod cid_encoding;
 mod cid_unicode;
+mod device_n;
 mod font_style;
 mod mesh_shading;
+mod multi_function;
 mod plane_shading;
 mod scalar_function;
 mod separation_color;
@@ -86,6 +88,10 @@ enum PdfColorSpace {
     Separation {
         colors: [Arc<Vec<GradientSegment>>; 4],
     },
+    DeviceN {
+        channels: usize,
+        tint: Option<Arc<device_n::Tint>>,
+    },
     SeparationAll,
     SeparationNone,
     Icc {
@@ -99,6 +105,7 @@ impl PdfColorSpace {
         matches!(
             self,
             Self::SeparationNone
+                | Self::DeviceN { tint: None, .. }
                 | Self::Indexed {
                     nonpainting: true,
                     ..
@@ -109,7 +116,10 @@ impl PdfColorSpace {
     fn intent_dependent(&self) -> bool {
         matches!(
             self,
-            Self::Icc { .. } | Self::Separation { .. } | Self::Indexed { .. }
+            Self::Icc { .. }
+                | Self::Separation { .. }
+                | Self::Indexed { .. }
+                | Self::DeviceN { .. }
         )
     }
     fn component_bounds(&self, index: usize) -> [f64; 2] {
@@ -134,7 +144,7 @@ impl PdfColorSpace {
             | Self::SeparationNone => 1,
             Self::Rgb | Self::CalRgb { .. } | Self::Lab { .. } => 3,
             Self::Cmyk => 4,
-            Self::Icc { channels, .. } => *channels,
+            Self::Icc { channels, .. } | Self::DeviceN { channels, .. } => *channels,
         }
     }
 
@@ -148,6 +158,19 @@ impl PdfColorSpace {
         intent: RenderingIntent,
     ) -> Result<[u8; 3], OfdError> {
         match self {
+            Self::DeviceN { channels, tint } => {
+                if values.len() != *channels
+                    || values
+                        .iter()
+                        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                {
+                    return Err(OfdError::Invalid("invalid PDF DeviceN tints".into()));
+                }
+                match tint {
+                    Some(tint) => tint.color(values, intent),
+                    None => Ok([0; 3]),
+                }
+            }
             Self::Separation { .. } | Self::SeparationAll | Self::SeparationNone => {
                 let [tint] = values else {
                     return Err(OfdError::Invalid("PDF Separation requires one tint".into()));
@@ -262,6 +285,7 @@ impl PdfColorSpace {
     fn initial_components(&self) -> Vec<f64> {
         match self {
             Self::Separation { .. } | Self::SeparationAll | Self::SeparationNone => vec![1.],
+            Self::DeviceN { channels, .. } => vec![1.; *channels],
             Self::Cmyk | Self::Icc { channels: 4, .. } => vec![0.0, 0.0, 0.0, 1.0],
             _ => vec![0.0; self.channels()],
         }
@@ -1544,7 +1568,12 @@ fn parse_color_space_inner(
                         if replacement.channels() != channels
                             || matches!(
                                 replacement,
-                                PdfColorSpace::Lab { .. } | PdfColorSpace::Indexed { .. }
+                                PdfColorSpace::Lab { .. }
+                                    | PdfColorSpace::Indexed { .. }
+                                    | PdfColorSpace::DeviceN { .. }
+                                    | PdfColorSpace::Separation { .. }
+                                    | PdfColorSpace::SeparationAll
+                                    | PdfColorSpace::SeparationNone
                             )
                         {
                             return Err(OfdError::Invalid(
@@ -1577,6 +1606,15 @@ fn parse_color_space_inner(
     let array = value
         .as_array()
         .map_err(|_| OfdError::Invalid("unsupported PDF color space resource".into()))?;
+    if array
+        .first()
+        .map(|kind| pdf_resolved_value(pdf, kind, "color space family"))
+        .transpose()?
+        .and_then(|kind| kind.as_name().ok())
+        == Some(b"DeviceN".as_slice())
+    {
+        return device_n::parse(pdf, resources, array, depth, remap_device);
+    }
     if array
         .first()
         .map(|kind| pdf_resolved_value(pdf, kind, "color space family"))
@@ -4978,6 +5016,7 @@ fn image_bytes_inner_with_context(
         | PdfColorSpace::Separation { .. }
         | PdfColorSpace::SeparationAll
         | PdfColorSpace::SeparationNone
+        | PdfColorSpace::DeviceN { .. }
         | PdfColorSpace::Icc { .. } => png::ColorType::Rgb,
     };
     let bits = pdf_image_u32_field(pdf, &image.dict, b"BitsPerComponent", "")?;
@@ -5355,7 +5394,7 @@ fn image_bytes_inner_with_context(
             }
             let mut masked = mask.is_some();
             let mut gray = 0_u8;
-            let mut mapped_channels = [0.0; 4];
+            let mut mapped_channels = [0.0; 32];
             for channel in 0..channels {
                 let sample_index = pixel * channels + channel;
                 let sample = read_pdf_sample(row, sample_index, bits as usize);
@@ -5384,7 +5423,7 @@ fn image_bytes_inner_with_context(
                         .color_with_intent(&mapped_channels[..channels], rendering_intent)?,
                 );
             } else if channels == 4 {
-                expanded.extend_from_slice(&cmyk_color(&mapped_channels)?);
+                expanded.extend_from_slice(&cmyk_color(&mapped_channels[..channels])?);
             }
             if mask.is_some() {
                 if channels == 1 && !converted_space {
