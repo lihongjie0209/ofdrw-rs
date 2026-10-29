@@ -256,6 +256,9 @@ pub(super) fn import(
             .map_err(|_| invalid("missing ColorSpace"))?,
         0,
     )?;
+    if space.nonpainting() {
+        return Ok(());
+    }
     if matches!(space, PdfColorSpace::Indexed { .. }) {
         return Err(invalid("Indexed color is not allowed"));
     }

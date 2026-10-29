@@ -48,16 +48,18 @@ def patch_pdf(kind=6, curved=False, reuse=0, function=False, transformed=False,
         second = quad(a,b,c,d)
         second[:4] = edge
         patches.append((reuse, second, [colors[reuse], colors[(reuse+1)%4], colors[0], colors[1]]))
-    fields = []
+    data = bytearray()
     for flag, points, colors in patches:
+        fields = []
         fields.append((flag, flag_bits))
         for point in points[(4 if flag else 0):(16 if kind == 7 else 12)]:
             fields.extend((round(value/96*((1 << coordinate_bits)-1)), coordinate_bits) for value in point)
         for color in colors[(2 if flag else 0):]:
             fields.extend((round(value*((1 << component_bits)-1)), component_bits) for value in color)
-    bits = ''.join(f'{value:0{width}b}' for value, width in fields)
-    bits += '0' * (-len(bits) % 8)
-    data = int(bits,2).to_bytes(len(bits)//8,'big')
+        bits = ''.join(f'{value:0{width}b}' for value, width in fields)
+        # Deliberately nonzero padding verifies that readers ignore these bits.
+        bits += '1' * (-len(bits) % 8)
+        data.extend(int(bits,2).to_bytes(len(bits)//8,'big'))
     dictionary = (f'/ShadingType {kind} /BitsPerCoordinate {coordinate_bits} '
                   f'/BitsPerComponent {component_bits} /BitsPerFlag {flag_bits} '
                   '/Decode [0 96 0 96').encode() + b' 0 1' * len(colors[0]) + b'] /Filter /FlateDecode /ColorSpace ' + space

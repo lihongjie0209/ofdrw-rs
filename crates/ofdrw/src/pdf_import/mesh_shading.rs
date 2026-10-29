@@ -304,6 +304,9 @@ pub(super) fn parse(
         dict.get(b"ColorSpace").map_err(|_| invalid())?,
         0,
     )?;
+    if color_space.nonpainting() {
+        return Ok(None);
+    }
     if matches!(color_space, PdfColorSpace::Indexed { .. }) {
         return Err(invalid());
     }

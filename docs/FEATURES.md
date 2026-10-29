@@ -1475,6 +1475,17 @@ lookup stream with a supported base color space. Real indices
 round to the nearest entry and clamp to the palette range. Other color space
 families still return an error.
 
+PDF `Separation` colors import through their alternate device, calibrated or ICC
+color space and bounded Type 0/2/3/4 tint transforms. Initial tint is 1;
+ordinary names, including `Red`, use the alternate on RGB output. Indexed
+palettes may use Separation bases. Paths, text, raw/16-bit/JPEG images and
+shadings share tint conversion and active rendering intents. `/All` maps to
+subtractive gray in composite RGB. `/None` suppresses its own paint while
+preserving text extraction and clipping; independently colored images and
+shadings remain visible. Tint tables use the existing bounded gradient
+approximation, with at most 10,000 stops. Colorant names are limited to 1,024
+bytes. Physical spot-ink plates, overprint and DeviceN are not implemented.
+
 PDF `ICCBased` color spaces with one, three, or four channels use their embedded
 ICC profiles to convert vector colors, indexed palettes, and raw image samples
 to sRGB. Grayscale, RGB, CMYK, and YCCK JPEG images with a separate ICC color
@@ -1981,7 +1992,7 @@ blend modes, clipping paths and shading BBox are retained. The stream layout fol
 [ISO 32000-1, sections 8.7.4.5.5–6](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 
 PDF Type 6 Coons and Type 7 tensor-product patch meshes also import as OFD
-Gouraud triangles. Patches use continuous packed bit streams and preserve all
+Gouraud triangles. Patches use byte-aligned records with packed fields and preserve all
 three shared-edge selectors, including the inherited boundary control points
 and corner colors. Coons transfinite interpolation and tensor Bernstein
 surfaces retain curved boundaries and internal controls; corner components

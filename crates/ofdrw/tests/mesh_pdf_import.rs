@@ -1,3 +1,5 @@
+mod common;
+
 use ofdrw::OfdDocument;
 
 const FIXTURES: &[(&[u8], &[u8])] = &[
@@ -117,33 +119,7 @@ fn assert_mesh_raster(
     let png = document.page_png(0, 72.).unwrap();
     let actual = image::load_from_memory(&png).unwrap().to_rgb8();
     let expected = image::load_from_memory(reference).unwrap().to_rgb8();
-    assert_eq!(actual.dimensions(), expected.dimensions());
-    // Ignore a one-pixel boundary neighborhood, where independent triangle
-    // rasterizers have different coverage and antialiasing conventions.
-    let mut error = 0_u64;
-    let mut samples = 0_u64;
-    for y in 1..actual.height() - 1 {
-        for x in 1..actual.width() - 1 {
-            let neighborhood = (y - 1..=y + 1).flat_map(|y| (x - 1..=x + 1).map(move |x| (x, y)));
-            if neighborhood
-                .clone()
-                .any(|(x, y)| expected.get_pixel(x, y).0 == [255; 3])
-            {
-                continue;
-            }
-            for channel in 0..3 {
-                error += u64::from(
-                    actual.get_pixel(x, y)[channel].abs_diff(expected.get_pixel(x, y)[channel]),
-                );
-                samples += 1;
-            }
-        }
-    }
-    let mean = error as f64 / samples as f64;
-    assert!(
-        samples > 1000 && mean < 4.,
-        "mesh {label}: mean error {mean} over {samples} samples"
-    );
+    common::assert_raster_matches(&actual, &expected, label);
     (document, svg, png)
 }
 

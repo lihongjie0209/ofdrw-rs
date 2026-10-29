@@ -1,3 +1,5 @@
+mod common;
+
 use ofdrw::OfdDocument;
 
 const FIXTURES: &[(&[u8], &[u8])] = &[
@@ -59,25 +61,7 @@ fn two_input_shadings_match_independent_rasters_and_round_trip() {
         let png = document.page_png(0, 72.).unwrap();
         let actual = image::load_from_memory(&png).unwrap().to_rgb8();
         let expected = image::load_from_memory(reference).unwrap().to_rgb8();
-        assert_eq!(actual.dimensions(), expected.dimensions());
-        let mut errors = Vec::new();
-        for y in 1..expected.height() - 1 {
-            for x in 1..expected.width() - 1 {
-                if (y - 1..=y + 1)
-                    .any(|y| (x - 1..=x + 1).any(|x| expected.get_pixel(x, y).0 == [255; 3]))
-                {
-                    continue;
-                }
-                errors.extend((0..3).map(|channel| {
-                    actual.get_pixel(x, y)[channel].abs_diff(expected.get_pixel(x, y)[channel])
-                }));
-            }
-        }
-        let mean = errors.iter().map(|n| f64::from(*n)).sum::<f64>() / errors.len() as f64;
-        assert!(
-            errors.len() > 1000 && mean < 4.,
-            "function shading {index}: mean error {mean}"
-        );
+        common::assert_raster_matches(&actual, &expected, &format!("function shading {index}"));
         let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.page_png(0, 72.).unwrap(), png);
         assert_eq!(

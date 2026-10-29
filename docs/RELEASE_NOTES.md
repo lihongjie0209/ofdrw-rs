@@ -1,5 +1,16 @@
 Unreleased source changes after v0.1.0:
 
+- PDF patch meshes now skip padding after each patch. Shared-edge fixtures
+  use nonzero padding, and symmetric raster comparisons also detect extra
+  paint outside the reference shape.
+
+- PDF Separation tint conversion covers alternate device/calibrated/ICC colors,
+  function types 0/2/3/4, Indexed palettes, paths, text, images and shadings.
+  All and None retain distinct painting semantics, including clipping and
+  independently colored content. Tests include malformed inputs, four ICC
+  intents and eighteen raster/round-trip fixtures. Composite RGB does not
+  preserve physical spot-ink plates or overprint.
+
 - PDF Type 1 function-based shading imports two-input sampled/calculator
   functions and component arrays with domain/matrix mapping, color conversion,
   clips, opacity and blend modes. Arbitrary functions become bounded RGB PNG
@@ -10,7 +21,7 @@ Unreleased source changes after v0.1.0:
   tables now also retain cubic interpolation in existing one-input importers.
 
 - PDF Type 6/7 Coons and tensor-product patch meshes import through bounded
-  geometry/color refinement. Continuous bit streams, three shared-edge modes,
+  geometry/color refinement. Byte-aligned patch records, three shared-edge modes,
   curved boundaries, internal control points and bilinear source colors are
   retained. Fourteen new Ghostscript references cover folded patches, functions,
   nonlinear colors, transforms, clipping, opacity, packed and wide coordinates.

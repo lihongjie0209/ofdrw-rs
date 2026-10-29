@@ -7514,3 +7514,36 @@ def test_embeds_font_in_existing_document(tmp_path):
         assert document.font_data(1) == font_bytes
         assert document.page_text(1) == ["selected font"]
         assert document.validate_references() == []
+
+
+@pytest.mark.parametrize("name", [
+    'separation-paths',
+    'separation-cmyk',
+    'separation-sampled',
+    'separation-stitching',
+    'separation-calculator',
+    'separation-image',
+    'separation-image16-mask',
+    'separation-jpeg',
+    'separation-indexed',
+    'separation-all',
+    'separation-none',
+    'separation-none-clipping',
+    'separation-none-independent',
+    'separation-none-text-clip',
+    'separation-shading',
+    'separation-mesh',
+    'separation-patch',
+    'separation-plane',
+])
+
+def test_imports_pdf_separation_colors_across_binding(name):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / (name + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        if name == "separation-none":
+            assert document.page_text(0) == ["none"]
+            assert document.page_images(0) == []
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []

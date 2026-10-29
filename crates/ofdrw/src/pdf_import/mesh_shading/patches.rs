@@ -169,7 +169,7 @@ pub(super) fn parse(
     let mut count = 0;
     let mut output = Vec::new();
     let point_count = if kind == 7 { 16 } else { 12 };
-    // Patches share a continuous bit stream. Only the final byte has padding.
+    // Each patch ends at a byte boundary; padding bits are ignored.
     while samples.data.len() * 8 - bits.position > 7 {
         count += 1;
         if count > MAX_PATCHES {
@@ -202,6 +202,7 @@ pub(super) fn parse(
         }
         tessellate(&patch, colors, &mut output)?;
         previous = Some(patch);
+        bits.position = bits.position.div_ceil(8) * 8;
     }
     if count == 0 {
         return Err(invalid());
@@ -377,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_count_is_bounded_even_when_every_patch_is_degenerate() {
+    fn patch_padding_is_ignored_and_degenerate_patch_count_is_bounded() {
         let pdf = PdfDocument::new();
         let resources = Object::Dictionary(lopdf::Dictionary::new());
         let page = PdfPageContext {
@@ -395,8 +396,8 @@ mod tests {
             &[0., 1., 0., 1., 0., 1.],
         )
         .unwrap();
-        // One-bit coordinates and components: 2 + 12*2 + 4 = 30 bits per patch.
-        let data = vec![0; (30 * (MAX_PATCHES + 1)).div_ceil(8)];
+        // Each 30-bit patch occupies four bytes including two ignored padding bits.
+        let data = vec![0; 4 * (MAX_PATCHES + 1)];
         let samples = MeshSamples {
             data: &data,
             decode: &[0., 1., 0., 1., 0., 1.],
@@ -407,6 +408,12 @@ mod tests {
             page: &page,
             state: &state,
         };
+        let padded = [0, 0, 0, 3, 0, 0, 0, 3];
+        let pair = MeshSamples {
+            data: &padded,
+            ..samples
+        };
+        assert!(parse(&pair, &colors, 6).unwrap().is_empty());
         assert!(matches!(
             parse(&samples, &colors, 6),
             Err(OfdError::Limit(_))

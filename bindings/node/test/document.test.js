@@ -3861,3 +3861,41 @@ test('reject malformed data and invalid calls without corrupting a document', ()
     document.close();
   }
 });
+
+
+test('import PDF Separation colors through the C ABI', () => {
+  for (const name of [
+    'separation-paths',
+    'separation-cmyk',
+    'separation-sampled',
+    'separation-stitching',
+    'separation-calculator',
+    'separation-image',
+    'separation-image16-mask',
+    'separation-jpeg',
+    'separation-indexed',
+    'separation-all',
+    'separation-none',
+    'separation-none-clipping',
+    'separation-none-independent',
+    'separation-none-text-clip',
+    'separation-shading',
+    'separation-mesh',
+    'separation-patch',
+    'separation-plane',
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name + '.pdf')));
+    try {
+      if (name === 'separation-none') {
+        assert.deepEqual(document.pageText(0), ['none']);
+        assert.deepEqual(document.pageImages(0), []);
+      }
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

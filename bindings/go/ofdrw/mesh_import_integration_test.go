@@ -137,3 +137,71 @@ func TestImportsFunctionBasedShadingsFromPDF(t *testing.T) {
 		})
 	}
 }
+
+func TestImportsSeparationColorsFromPDF(t *testing.T) {
+	tests := []struct{ name string }{
+		{"separation-paths"},
+		{"separation-cmyk"},
+		{"separation-sampled"},
+		{"separation-stitching"},
+		{"separation-calculator"},
+		{"separation-image"},
+		{"separation-image16-mask"},
+		{"separation-jpeg"},
+		{"separation-indexed"},
+		{"separation-all"},
+		{"separation-none"},
+		{"separation-none-clipping"},
+		{"separation-none-independent"},
+		{"separation-none-text-clip"},
+		{"separation-shading"},
+		{"separation-mesh"},
+		{"separation-patch"},
+		{"separation-plane"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", tt.name+".pdf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, err := FromPDF(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			if tt.name == "separation-none" {
+				text, err := doc.PageText(0)
+				if err != nil || len(text) != 1 || text[0] != "none" {
+					t.Fatalf("None text = %v, error = %v", text, err)
+				}
+				images, err := doc.PageImages(0)
+				if err != nil || len(images) != 0 {
+					t.Fatalf("None images = %v, error = %v", images, err)
+				}
+			}
+			png, err := doc.PagePNG(0, 72)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err = doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := FromBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			actual, err := reopened.PagePNG(0, 72)
+			if err != nil || !bytes.Equal(actual, png) {
+				t.Fatalf("Separation raster changed after round trip: %v", err)
+			}
+			issues, err := reopened.ValidateReferences()
+			if err != nil || len(issues) != 0 {
+				t.Fatalf("Separation references = %v, error = %v", issues, err)
+			}
+		})
+	}
+}

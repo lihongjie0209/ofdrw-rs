@@ -7,6 +7,7 @@ mod font_style;
 mod mesh_shading;
 mod plane_shading;
 mod scalar_function;
+mod separation_color;
 mod simple_encoding;
 mod simple_widths;
 mod standard_font_data;
@@ -80,7 +81,13 @@ enum PdfColorSpace {
     Cmyk,
     Indexed {
         palettes: [Vec<[u8; 3]>; 4],
+        nonpainting: bool,
     },
+    Separation {
+        colors: [Arc<Vec<GradientSegment>>; 4],
+    },
+    SeparationAll,
+    SeparationNone,
     Icc {
         channels: usize,
         transforms: [Option<Arc<Transform8BitExecutor>>; 4],
@@ -88,6 +95,23 @@ enum PdfColorSpace {
 }
 
 impl PdfColorSpace {
+    fn nonpainting(&self) -> bool {
+        matches!(
+            self,
+            Self::SeparationNone
+                | Self::Indexed {
+                    nonpainting: true,
+                    ..
+                }
+        )
+    }
+
+    fn intent_dependent(&self) -> bool {
+        matches!(
+            self,
+            Self::Icc { .. } | Self::Separation { .. } | Self::Indexed { .. }
+        )
+    }
     fn component_bounds(&self, index: usize) -> [f64; 2] {
         match self {
             Self::Lab { range, .. } => match index {
@@ -102,7 +126,12 @@ impl PdfColorSpace {
 
     fn channels(&self) -> usize {
         match self {
-            Self::Gray | Self::CalGray { .. } | Self::Indexed { .. } => 1,
+            Self::Gray
+            | Self::CalGray { .. }
+            | Self::Indexed { .. }
+            | Self::Separation { .. }
+            | Self::SeparationAll
+            | Self::SeparationNone => 1,
             Self::Rgb | Self::CalRgb { .. } | Self::Lab { .. } => 3,
             Self::Cmyk => 4,
             Self::Icc { channels, .. } => *channels,
@@ -119,6 +148,23 @@ impl PdfColorSpace {
         intent: RenderingIntent,
     ) -> Result<[u8; 3], OfdError> {
         match self {
+            Self::Separation { .. } | Self::SeparationAll | Self::SeparationNone => {
+                let [tint] = values else {
+                    return Err(OfdError::Invalid("PDF Separation requires one tint".into()));
+                };
+                if !tint.is_finite() || !(0.0..=1.0).contains(tint) {
+                    return Err(OfdError::Invalid(
+                        "PDF Separation tint is out of range".into(),
+                    ));
+                }
+                match self {
+                    Self::Separation { colors } => {
+                        Ok(separation_color::color(&colors[intent as usize], *tint))
+                    }
+                    Self::SeparationAll => color(&[1. - tint]),
+                    _ => Ok([0; 3]),
+                }
+            }
             Self::Gray | Self::Rgb => color(values),
             Self::CalGray { gamma } => {
                 let [gray] = values else {
@@ -195,7 +241,7 @@ impl PdfColorSpace {
                 })?;
                 Ok(rgb)
             }
-            Self::Indexed { palettes } => {
+            Self::Indexed { palettes, .. } => {
                 let [index] = values else {
                     return Err(OfdError::Invalid(
                         "PDF Indexed color requires one index".into(),
@@ -215,6 +261,7 @@ impl PdfColorSpace {
 
     fn initial_components(&self) -> Vec<f64> {
         match self {
+            Self::Separation { .. } | Self::SeparationAll | Self::SeparationNone => vec![1.],
             Self::Cmyk | Self::Icc { channels: 4, .. } => vec![0.0, 0.0, 0.0, 1.0],
             _ => vec![0.0; self.channels()],
         }
@@ -827,12 +874,14 @@ fn paint(
     box_: [f64; 4],
     path: &mut PathBuilder,
     state: &GraphicsState,
-    mode: PdfPaint,
+    mut mode: PdfPaint,
     visible: bool,
 ) -> Result<(), OfdError> {
     if path.commands.is_empty() {
         return Ok(());
     }
+    mode.fill &= !state.fill_space.nonpainting();
+    mode.stroke &= !state.stroke_space.nonpainting();
     let mut style = PathStyle {
         fill: mode.fill,
         stroke: mode.stroke,
@@ -864,7 +913,7 @@ fn paint(
     let commands = std::mem::take(&mut path.commands);
     path.current = None;
     path.start = None;
-    if !visible {
+    if !visible || (!mode.fill && !mode.stroke) {
         return Ok(());
     }
     let id = output.add_path_object(
@@ -1058,8 +1107,8 @@ fn attach_text_paint(
     graphics: &GraphicsState,
     render_mode: u8,
 ) -> Result<(), OfdError> {
-    let fill = matches!(render_mode % 4, 0 | 2);
-    let stroke = matches!(render_mode % 4, 1 | 2);
+    let fill = matches!(render_mode % 4, 0 | 2) && !graphics.fill_space.nonpainting();
+    let stroke = matches!(render_mode % 4, 1 | 2) && !graphics.stroke_space.nonpainting();
     let mut attrs = String::new();
     if !fill {
         attrs.push_str(" Fill=\"false\"");
@@ -1528,6 +1577,15 @@ fn parse_color_space_inner(
     let array = value
         .as_array()
         .map_err(|_| OfdError::Invalid("unsupported PDF color space resource".into()))?;
+    if array
+        .first()
+        .map(|kind| pdf_resolved_value(pdf, kind, "color space family"))
+        .transpose()?
+        .and_then(|kind| kind.as_name().ok())
+        == Some(b"Separation".as_slice())
+    {
+        return separation_color::parse(pdf, resources, array, depth, remap_device);
+    }
     if let [kind, profile] = array.as_slice() {
         let kind = pdf_resolved_value(pdf, kind, "color space family")?;
         if kind.as_name().ok() == Some(b"CalGray".as_slice()) {
@@ -1785,7 +1843,7 @@ fn parse_color_space_inner(
                 minimum + (decode[channel * 2 + 1] - minimum) * f64::from(*component) / 255.0
             })
             .collect::<Vec<_>>();
-        if matches!(base_space, PdfColorSpace::Icc { .. }) {
+        if base_space.intent_dependent() {
             for (palette, intent) in palettes.iter_mut().zip(intents) {
                 palette.push(base_space.color_with_intent(&components, intent)?);
             }
@@ -1796,7 +1854,10 @@ fn parse_color_space_inner(
             }
         }
     }
-    Ok(PdfColorSpace::Indexed { palettes })
+    Ok(PdfColorSpace::Indexed {
+        palettes,
+        nonpainting: base_space.nonpainting(),
+    })
 }
 
 fn pdf_resolved_value<'a>(
@@ -3381,6 +3442,9 @@ fn import_pdf_shading(
         .get(b"ColorSpace")
         .map_err(|_| OfdError::Invalid("PDF shading has no ColorSpace".into()))?;
     let color_space = parse_color_space(Some(page.pdf), Some(page.resources), color_space, 0)?;
+    if color_space.nonpainting() {
+        return Ok(());
+    }
     if matches!(color_space, PdfColorSpace::Indexed { .. }) {
         return Err(OfdError::Invalid(
             "PDF axial and radial shading cannot use Indexed color".into(),
@@ -4911,6 +4975,9 @@ fn image_bytes_inner_with_context(
         | PdfColorSpace::Rgb
         | PdfColorSpace::Cmyk
         | PdfColorSpace::Indexed { .. }
+        | PdfColorSpace::Separation { .. }
+        | PdfColorSpace::SeparationAll
+        | PdfColorSpace::SeparationNone
         | PdfColorSpace::Icc { .. } => png::ColorType::Rgb,
     };
     let bits = pdf_image_u32_field(pdf, &image.dict, b"BitsPerComponent", "")?;
@@ -4986,13 +5053,9 @@ fn image_bytes_inner_with_context(
         let unmarked_yuvk = channels == 4
             && color_transform == 1
             && jpeg_adobe_color_transform(&image.content)?.is_none();
-        if matches!(
+        if !matches!(
             color_space,
-            PdfColorSpace::Icc { .. }
-                | PdfColorSpace::CalGray { .. }
-                | PdfColorSpace::CalRgb { .. }
-                | PdfColorSpace::Lab { .. }
-                | PdfColorSpace::Indexed { .. }
+            PdfColorSpace::Gray | PdfColorSpace::Rgb | PdfColorSpace::Cmyk
         ) {
             let sample_len = u64::from(width) * u64::from(height) * channels as u64;
             if sample_len > MAX_ENTRY_BYTES {
@@ -5248,22 +5311,14 @@ fn image_bytes_inner_with_context(
             bits,
         },
     )?;
-    let converted_space = matches!(
+    let converted_space = !matches!(
         color_space,
-        PdfColorSpace::Icc { .. }
-            | PdfColorSpace::CalGray { .. }
-            | PdfColorSpace::CalRgb { .. }
-            | PdfColorSpace::Lab { .. }
-    );
-    let output_channels = if matches!(
-        color_space,
-        PdfColorSpace::Cmyk
+        PdfColorSpace::Gray
+            | PdfColorSpace::Rgb
+            | PdfColorSpace::Cmyk
             | PdfColorSpace::Indexed { .. }
-            | PdfColorSpace::Icc { .. }
-            | PdfColorSpace::CalGray { .. }
-            | PdfColorSpace::CalRgb { .. }
-            | PdfColorSpace::Lab { .. }
-    ) {
+    );
+    let output_channels = if matches!(png_color, png::ColorType::Rgb) {
         3
     } else {
         channels
@@ -5759,6 +5814,16 @@ fn import_image_stream(
     state: &GraphicsState,
     image: &lopdf::Stream,
 ) -> Result<(), OfdError> {
+    let nonpainting = if pdf_image_is_mask(Some(pdf), &image.dict)? {
+        state.fill_space.nonpainting()
+    } else if let Ok(space) = image.dict.get(b"ColorSpace") {
+        parse_color_space(Some(pdf), Some(resources), space, 0)?.nonpainting()
+    } else {
+        false
+    };
+    if nonpainting {
+        return Ok(());
+    }
     let top_left = state.point(0.0, 1.0, box_);
     let top_right = state.point(1.0, 1.0, box_);
     let bottom_left = state.point(0.0, 0.0, box_);

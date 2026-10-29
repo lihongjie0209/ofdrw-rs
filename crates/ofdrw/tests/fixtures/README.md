@@ -236,7 +236,7 @@ conversion rather than a machine's default CMYK ICC profile, as described in
 
 `patch-*.pdf` and PNG references are authored by
 `scripts/generate_patch_shading_fixtures.py`. They exercise PDF Coons and tensor
-patches, continuous bit packing, three shared-edge modes, curved and folded
+patches, packed fields and nonzero byte-padding, three shared-edge modes, curved and folded
 surfaces, corner-color functions, clipping, opacity and transforms. Ghostscript
 produces the independent 72-DPI references; ordinary tests run entirely offline.
 
@@ -247,3 +247,16 @@ multidimensional cubic interpolation, packed data, discontinuities, reversed
 mappings, CalGray/CMYK conversion and domain/matrix/clip mapping. Independent
 72-DPI references use Ghostscript; the CMYK case uses `-dUseFastColor` for the
 same simple subtractive device-color conversion used by the importer.
+
+`separation-*.pdf` and PNG references are authored by
+`scripts/generate_separation_fixtures.py` (Pillow is needed only to generate
+the grayscale JPEG). Eighteen cases exercise alternate colors, four function
+types, Indexed palettes, images, color-key masking, All/None and shadings.
+Ghostscript renders the references at 72 DPI. Three oracle inputs independently
+expand normative semantics to avoid Ghostscript 10.02.1 discrepancies: the
+stitching boundary uses explicit RGB (ISO 32000-1 7.10.4), the 16-bit color-key
+predicate uses an explicit alpha mask (8.9.6.4), and None uses background only
+(8.6.6.4). The original PDFs remain the importer inputs. Separate semantic
+assertions verify None text retention, clipping and independent RGB content.
+The Indexed image has one sample per output pixel to avoid conflating palette
+conversion with differences in image resampling between renderers.
