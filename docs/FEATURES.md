@@ -1857,8 +1857,8 @@ Source mappings and original notices are pinned to
 with [per-file hashes](../crates/ofdrw/assets/cid_unicode/manifest.json) checked
 offline in CI. ToUnicode CMaps also accept single-line XUID metadata.
 
-Other source fonts use the document's fallback font for previews. Vertical
-writing and unbundled named CID CMaps remain unsupported. The `'` and `"` line operators
+Other source fonts use the document's fallback font for previews. Unbundled
+named CID CMaps remain unsupported. The `'` and `"` line operators
 are supported.
 Text-state operators such as `Tr` and `Tf` are accepted before `BT`; text
 positioning and drawing still require an active text object. ToUnicode CMaps
@@ -1960,8 +1960,24 @@ declared `Range` when sampling and inserting clipping stops.
 Both shading `Extend` flags map to OFD's four extension modes, including the
 PDF default of no extension. Radial circles must be nested, and their transform must preserve circles;
 increasing and decreasing radius order are supported. The current clipping
-path, graphics transform, fill alpha, and blend mode are retained. Other
-shading types return an error.
+path, graphics transform, fill alpha, and blend mode are retained.
+
+PDF Type 4 free-form and Type 5 lattice Gouraud meshes import as OFD mesh
+paints. Vertex records honor byte padding, all standard coordinate/component
+bit depths, low-bit edge selectors and grid diagonals. RGB/gray meshes retain
+source topology. Other supported color spaces interpolate source components
+before RGB conversion; scalar shading functions and component-function arrays
+reuse the existing sampled, exponential, stitching and calculator evaluators.
+Nonlinear conversion uses bounded triangle subdivision, allowing at most two
+RGB byte levels of error per channel at sampled positions, in addition to the
+function sampler's tolerance. Input and
+output meshes are limited to 100,000 points, subdivision to ten levels and
+color evaluation to one million samples. Exceeding these limits returns an
+error. Degenerate triangles paint nothing; malformed records, invalid edge
+sequences and incomplete grids return errors. Graphics transforms, fill alpha,
+blend modes, clipping paths and shading BBox are retained. Type 1 function-based
+and Type 6/7 patch meshes remain unsupported. The stream layout follows
+[ISO 32000-1, sections 8.7.4.5.5–6](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 
 An optional PDF shading `BBox` is transformed and intersected with the
 current clipping path. For direct `sh` painting, `Background` is ignored as

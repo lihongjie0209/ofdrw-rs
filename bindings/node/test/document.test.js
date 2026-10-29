@@ -1887,6 +1887,41 @@ test('import PDF axial and radial sampled shading functions through the C ABI', 
   }
 });
 
+test('import PDF Gouraud meshes and preserve their paints and rasters', () => {
+  for (const [name, kind] of [
+    ['mesh-free-rgb', 'Gouraud'],
+    ['mesh-lattice-rgb', 'LaGouraud'],
+    ['mesh-packed-gray', 'Gouraud'],
+    ['mesh-wide-rgb', 'Gouraud'],
+    ['mesh-lattice-clipped', 'LaGouraud'],
+    ['mesh-cmyk', 'Gouraud'],
+    ['mesh-calgray', 'Gouraud'],
+    ['mesh-function-array', 'Gouraud'],
+    ['mesh-sampled-function', 'Gouraud'],
+    ['mesh-stitching-function', 'Gouraud'],
+    ['mesh-calculator-function', 'Gouraud'],
+    ['mesh-function', 'Gouraud'],
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name + '.pdf')));
+    try {
+      const paints = document.pageObjectPaints(0);
+      assert.equal(paints.length, 1);
+      assert.equal(paints[0].fill.kind, kind);
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.pageObjectPaints(0), paints);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      document.close();
+    }
+  }
+});
+
 test('import a Group 4 fax PDF image through the C ABI', () => {
   const document = Document.fromPdfBytes(fs.readFileSync(fixture('ccitt-g4.pdf')));
   try {

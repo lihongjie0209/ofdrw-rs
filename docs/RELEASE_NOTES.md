@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- PDF Type 4/5 Gouraud meshes import with source topology, packed vertex
+  records, transforms, clips, opacity and blend modes. Nonlinear color spaces
+  and shading functions retain source interpolation through bounded mesh
+  subdivision. Tests cover twelve independent Ghostscript references,
+  all standard bit depths, ignored flag bits, invalid topology, limits,
+  OFD/PDF round trips and Python/Go/Node calls.
+
 - CFF outlines support full affine top-level and per-FD font matrices,
   including FDSelect formats 0 and 3. PDF advances and stroke widths retain
   source text-space metrics. Raw CFF resources with explicit glyph mappings

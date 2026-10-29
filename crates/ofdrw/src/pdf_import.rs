@@ -4,6 +4,7 @@ pub(crate) mod cff_font;
 mod cid_encoding;
 mod cid_unicode;
 mod font_style;
+mod mesh_shading;
 mod scalar_function;
 mod simple_encoding;
 mod simple_widths;
@@ -3189,15 +3190,21 @@ fn import_pdf_shading(
     name: &[u8],
     visible: bool,
 ) -> Result<(), OfdError> {
-    let (_, shading) = resource(page.pdf, page.resources, b"Shading", name)?;
-    let shading = shading
-        .as_dict()
-        .map_err(|_| OfdError::Invalid("PDF shading is not a dictionary".into()))?;
+    let (_, source) = resource(page.pdf, page.resources, b"Shading", name)?;
+    let shading = match source {
+        Object::Dictionary(dict) => dict,
+        Object::Stream(stream) => &stream.dict,
+        _ => {
+            return Err(OfdError::Invalid(
+                "PDF shading is not a dictionary or stream".into(),
+            ))
+        }
+    };
     let shading_type = shading
         .get(b"ShadingType")
         .and_then(Object::as_i64)
         .map_err(|_| OfdError::Invalid("PDF shading has no ShadingType".into()))?;
-    if !matches!(shading_type, 2 | 3) {
+    if !matches!(shading_type, 2..=5) {
         return Err(OfdError::Invalid("unsupported PDF shading type".into()));
     }
     let bbox_clip = if let Ok(bbox) = shading.get(b"BBox") {
@@ -3239,6 +3246,34 @@ fn import_pdf_shading(
     } else {
         None
     };
+    if matches!(shading_type, 4 | 5) {
+        let Some(mesh) = mesh_shading::parse(source, page, state, shading_type)? else {
+            return Ok(());
+        };
+        if !visible {
+            return Ok(());
+        }
+        let width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
+        let height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
+        let id = output.add_path_object(
+            page.index,
+            &format!("M 0 0 L {width} 0 L {width} {height} L 0 {height} C"),
+            [0.0, 0.0, width, height],
+            PathStyle {
+                fill: true,
+                stroke: false,
+                ..PathStyle::default()
+            },
+        )?;
+        output.set_page_object_gouraud_fill(page.index, &id, &mesh)?;
+        attach_nonstroking_alpha(output, page.index, &id, "PathObject", state.fill_alpha)?;
+        attach_blend_mode(output, page.index, &id, state.blend_mode)?;
+        let mut clips = state.clips.clone();
+        if let Some(clip) = bbox_clip {
+            clips.push(clip);
+        }
+        return attach_clips(output, page.index, &id, "PathObject", &clips);
+    }
     let coords = shading
         .get(b"Coords")
         .and_then(Object::as_array)

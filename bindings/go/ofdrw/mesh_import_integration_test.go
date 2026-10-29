@@ -1,0 +1,69 @@
+//go:build integration
+
+package ofdrw
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestImportsGouraudMeshesFromPDF(t *testing.T) {
+	tests := []struct {
+		name string
+		kind string
+	}{
+		{"mesh-free-rgb", "Gouraud"},
+		{"mesh-lattice-rgb", "LaGouraud"},
+		{"mesh-packed-gray", "Gouraud"},
+		{"mesh-wide-rgb", "Gouraud"},
+		{"mesh-lattice-clipped", "LaGouraud"},
+		{"mesh-cmyk", "Gouraud"},
+		{"mesh-calgray", "Gouraud"},
+		{"mesh-function-array", "Gouraud"},
+		{"mesh-sampled-function", "Gouraud"},
+		{"mesh-stitching-function", "Gouraud"},
+		{"mesh-calculator-function", "Gouraud"},
+		{"mesh-function", "Gouraud"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", tt.name+".pdf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, err := FromPDF(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			paints, err := doc.PageObjectPaints(0)
+			if err != nil || len(paints) != 1 || paints[0].Fill == nil || paints[0].Fill.Kind != tt.kind {
+				t.Fatalf("mesh paints = %+v, error = %v", paints, err)
+			}
+			png, err := doc.PagePNG(0, 72)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err = doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := FromBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			actual, err := reopened.PagePNG(0, 72)
+			if err != nil || !bytes.Equal(actual, png) {
+				t.Fatalf("mesh raster changed after round trip: %v", err)
+			}
+			issues, err := reopened.ValidateReferences()
+			if err != nil || len(issues) != 0 {
+				t.Fatalf("mesh references = %v, error = %v", issues, err)
+			}
+		})
+	}
+}

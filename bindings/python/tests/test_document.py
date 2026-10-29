@@ -303,6 +303,33 @@ def test_imports_sampled_shading_pdf_across_binding(filename):
         assert document.validate_references() == []
 
 
+@pytest.mark.parametrize("name,kind", [
+    ("mesh-free-rgb", "Gouraud"),
+    ("mesh-lattice-rgb", "LaGouraud"),
+    ("mesh-packed-gray", "Gouraud"),
+    ("mesh-wide-rgb", "Gouraud"),
+    ("mesh-lattice-clipped", "LaGouraud"),
+    ("mesh-cmyk", "Gouraud"),
+    ("mesh-calgray", "Gouraud"),
+    ("mesh-function-array", "Gouraud"),
+    ("mesh-sampled-function", "Gouraud"),
+    ("mesh-stitching-function", "Gouraud"),
+    ("mesh-calculator-function", "Gouraud"),
+    ("mesh-function", "Gouraud"),
+])
+def test_imports_pdf_gouraud_meshes_across_binding(name, kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / (name + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        paints = document.page_object_paints(0)
+        assert len(paints) == 1
+        assert paints[0]["fill"]["kind"] == kind
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.page_object_paints(0) == paints
+            assert reopened.validate_references() == []
+
+
 def test_imports_group4_fax_pdf_image_across_binding():
     fixture = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" /
                "tests" / "fixtures" / "ccitt-g4.pdf")

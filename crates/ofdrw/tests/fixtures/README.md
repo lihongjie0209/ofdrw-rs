@@ -224,3 +224,12 @@ Affine CFF cases cover top-level skew, reflection, rotation, translation,
 per-FD inheritance with FDSelect formats 0 and 3, vertical layout, strokes and
 text clipping. `type0-clipped-ligature.pdf` uses the existing DejaVu Serif
 fixture to check the same mapped-glyph clipping path for TrueType fonts.
+
+`mesh-*.pdf` and PNG references are authored by
+`scripts/generate_mesh_shading_fixtures.py`. They cover PDF free-form/lattice
+Gouraud shading, byte padding, 32-bit coordinates, 16-bit colors, nonlinear
+CMYK/CalGray conversion, four function types and component-function arrays,
+transforms, clips, alpha and blend modes. References use Ghostscript at 72 DPI.
+The DeviceCMYK reference uses `-dUseFastColor` to select simple subtractive
+conversion rather than a machine's default CMYK ICC profile, as described in
+[Ghostscript's color options](https://ghostscript.readthedocs.io/en/master/Use.html#dUseFastColor).
