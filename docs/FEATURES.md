@@ -1513,6 +1513,11 @@ Colorant names are limited to 1,024 bytes. JPEG still requires supported codec c
 explicit-DeviceN JPEG2000 images support up to 32 source color components
 and become RGB/RGBA PNG resources.
 
+Inline image color-space names resolve against the current page or Form
+resources, including uncompressed and filtered ICC images. Raw pixels that
+contain an apparent `EI` token are validated against source sample dimensions
+before a candidate is accepted as the image terminator.
+
 PDF `ICCBased` color spaces with one, three, or four channels use their embedded
 ICC profiles to convert vector colors, indexed palettes, and raw image samples
 to sRGB. Grayscale, RGB, CMYK, and YCCK JPEG images with a separate ICC color

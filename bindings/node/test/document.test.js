@@ -3947,3 +3947,24 @@ test('import PDF DeviceN colors through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+
+test('import image rendering intents through the C ABI', () => {
+  for (const kind of ['xobject', 'form', 'inline', 'inline-embedded-ei', 'inline-trailing-cr', 'inline-flate', 'form-inline', 'masked']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('image-intent-' + kind + '.pdf')));
+    try {
+      assert.equal(document.pageImages(0).length, 5);
+      const colors = Array.from({length: 5}, (_, index) => document.pageImageData(0, index));
+      assert.deepEqual(colors[0], colors[2]);
+      assert.notDeepEqual(colors[0], colors[1]);
+      assert.notDeepEqual(colors[0], colors[3]);
+      if (kind !== 'masked') assert.deepEqual(colors[1], colors[4]);
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

@@ -3544,6 +3544,7 @@ fn import_pdf_shading(
     attach_clips(output, page.index, &id, "PathObject", &clips)
 }
 
+#[cfg(test)]
 fn image_bytes(image: &lopdf::Stream) -> Result<(Vec<u8>, &'static str), OfdError> {
     image_bytes_inner(image, false)
 }
@@ -4732,6 +4733,7 @@ fn decode_four_channel_pdf_jpeg_samples(
     Ok(samples)
 }
 
+#[cfg(test)]
 fn image_bytes_inner(
     image: &lopdf::Stream,
     allow_soft_mask: bool,
@@ -6145,6 +6147,7 @@ fn find_pdf_inline_start(bytes: &[u8], start: usize) -> Option<usize> {
 fn decode_pdf_content_with_inline_images(
     bytes: &[u8],
     pdf: &PdfDocument,
+    resources: &Object,
 ) -> Result<lopdf::content::Content<Vec<Operation>>, OfdError> {
     if let Ok(content) = lopdf::content::Content::decode(bytes) {
         return Ok(content);
@@ -6203,12 +6206,9 @@ fn decode_pdf_content_with_inline_images(
             }
             marker = at + 2;
         };
-        if dict.get(b"F").is_err() && dict.get(b"Filter").is_err() {
-            return Err(OfdError::Invalid("invalid PDF inline image content".into()));
-        }
         let mut marker = data_start;
         let mut image_candidates = 0;
-        let (source, end) = loop {
+        let (source, end) = 'candidates: loop {
             let Some(at) = find_pdf_content_word(bytes, marker, b"EI") else {
                 return Err(OfdError::Invalid("PDF inline image has no valid EI".into()));
             };
@@ -6219,20 +6219,31 @@ fn decode_pdf_content_with_inline_images(
                 ));
             }
             if at > data_start && at - data_start <= MAX_ENTRY_BYTES as usize {
-                let mut data_end = at - 1;
-                if bytes[data_end] == b'\n' && data_end > data_start && bytes[data_end - 1] == b'\r'
-                {
-                    data_end -= 1;
-                }
-                let source = lopdf::Stream::new(dict.clone(), bytes[data_start..data_end].to_vec());
-                if let Ok(image) = inline_image_stream(&source) {
-                    let valid = if pdf_image_is_mask(Some(pdf), &image.dict).unwrap_or(false) {
-                        decode_stencil_mask(&image, pdf).is_ok()
-                    } else {
-                        image_bytes(&image).is_ok()
-                    };
-                    if valid {
-                        break (source, at + 2);
+                let single = at - 1;
+                let crlf =
+                    bytes[single] == b'\n' && single > data_start && bytes[single - 1] == b'\r';
+                // Prefer a CRLF separator, then retain CR as pixel data if
+                // the decoded length shows that only LF was the separator.
+                let ends = [if crlf { single - 1 } else { single }, single];
+                for data_end in ends.into_iter().take(if crlf { 2 } else { 1 }) {
+                    let source =
+                        lopdf::Stream::new(dict.clone(), bytes[data_start..data_end].to_vec());
+                    if let Ok(image) = inline_image_stream(&source) {
+                        let valid = if pdf_image_is_mask(Some(pdf), &image.dict).unwrap_or(false) {
+                            decode_stencil_mask(&image, pdf).is_ok()
+                        } else {
+                            image_bytes_inner_with_context(
+                                &image,
+                                false,
+                                Some(pdf),
+                                Some(resources),
+                                RenderingIntent::RelativeColorimetric,
+                            )
+                            .is_ok()
+                        };
+                        if valid {
+                            break 'candidates (source, at + 2);
+                        }
                     }
                 }
             }
@@ -6338,7 +6349,7 @@ fn validate_opaque_form_content(
                 if bytes.len() as u64 > MAX_ENTRY_BYTES {
                     return Err(OfdError::Limit("PDF Form content is too large".into()));
                 }
-                let nested = decode_pdf_content_with_inline_images(&bytes, pdf)?;
+                let nested = decode_pdf_content_with_inline_images(&bytes, pdf, nested_resources)?;
                 if let Some(id) = id {
                     active_forms.push(id);
                 }
@@ -6439,7 +6450,7 @@ fn import_form(
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
         return Err(OfdError::Limit("PDF Form content is too large".into()));
     }
-    let content = decode_pdf_content_with_inline_images(&bytes, page.pdf)?;
+    let content = decode_pdf_content_with_inline_images(&bytes, page.pdf, resources)?;
     if has_transparency_group {
         if state.fill_alpha != 1.0 || state.stroke_alpha != 1.0 || state.blend_mode != "Normal" {
             return Err(OfdError::Invalid(
@@ -7564,13 +7575,13 @@ fn import_page(
     if bytes.is_empty() {
         return Ok(());
     }
-    let content = decode_pdf_content_with_inline_images(&bytes, pdf)?;
     let mut state = GraphicsState {
         ctm: [user_unit, 0.0, 0.0, user_unit, 0.0, 0.0],
         ..GraphicsState::default()
     };
     let empty_resources = Object::Dictionary(lopdf::Dictionary::new());
     let resources = inherited_object(pdf, id, b"Resources")?.unwrap_or(&empty_resources);
+    let content = decode_pdf_content_with_inline_images(&bytes, pdf, resources)?;
     if requires_opaque_content {
         validate_opaque_form_content(pdf, resources, &content, &mut Vec::new())?;
     }
@@ -19118,6 +19129,33 @@ mod tests {
             assert_eq!(document.page_paths(0).unwrap().len(), 1);
             assert!(document.page_svg(0).is_ok());
             assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn named_inline_colors_keep_ei_and_cr_pixel_bytes() {
+        let pdf = PdfDocument::new();
+        for (space, pixels, separator) in [
+            ("DeviceGray", b"\r".as_slice(), b"\n".as_slice()),
+            ("DeviceGray", b"\r".as_slice(), b"\r\n".as_slice()),
+            ("DeviceCMYK", b" EI ".as_slice(), b" ".as_slice()),
+        ] {
+            let resources = Object::Dictionary(
+                dictionary! {"ColorSpace"=>dictionary! {"CS"=>Object::Name(space.as_bytes().to_vec())}},
+            );
+            let mut bytes = b"BI /W 1 /H 1 /BPC 8 /CS /CS ID ".to_vec();
+            bytes.extend_from_slice(pixels);
+            bytes.extend_from_slice(separator);
+            bytes.extend_from_slice(b"EI");
+            let parsed = decode_pdf_content_with_inline_images(&bytes, &pdf, &resources).unwrap();
+            assert_eq!(parsed.operations.len(), 1);
+            assert_eq!(
+                parsed.operations[0].operands[0]
+                    .as_stream()
+                    .unwrap()
+                    .content,
+                pixels
+            );
         }
     }
 

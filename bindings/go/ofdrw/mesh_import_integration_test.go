@@ -283,3 +283,64 @@ func TestImportsDeviceNColorsFromPDF(t *testing.T) {
 		})
 	}
 }
+
+func TestImportsImageRenderingIntentsFromPDF(t *testing.T) {
+	tests := []struct{ name string }{
+		{"image-intent-xobject"},
+		{"image-intent-form"},
+		{"image-intent-inline"},
+		{"image-intent-inline-embedded-ei"},
+		{"image-intent-inline-trailing-cr"},
+		{"image-intent-inline-flate"},
+		{"image-intent-form-inline"},
+		{"image-intent-masked"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", tt.name+".pdf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, err := FromPDF(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			colors := make([][]byte, 5)
+			for index := range colors {
+				colors[index], err = doc.PageImageData(0, index)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !bytes.Equal(colors[0], colors[2]) || bytes.Equal(colors[0], colors[1]) || bytes.Equal(colors[0], colors[3]) {
+				t.Fatal("image intent inheritance or saved state is incorrect")
+			}
+			if tt.name != "image-intent-masked" && !bytes.Equal(colors[1], colors[4]) {
+				t.Fatal("image Intent did not override the graphics state")
+			}
+			png, err := doc.PagePNG(0, 72)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err = doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := FromBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			actual, err := reopened.PagePNG(0, 72)
+			if err != nil || !bytes.Equal(actual, png) {
+				t.Fatalf("image intent raster changed after round trip: %v", err)
+			}
+			issues, err := reopened.ValidateReferences()
+			if err != nil || len(issues) != 0 {
+				t.Fatalf("image intent references = %v, error = %v", issues, err)
+			}
+		})
+	}
+}

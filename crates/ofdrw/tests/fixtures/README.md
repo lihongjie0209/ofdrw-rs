@@ -295,3 +295,12 @@ constant neutral Lab values for perceptual, relative-colorimetric and saturation
 conversion, making rendering-intent inheritance observable independently of
 source samples. The tests compare converted pixels across graphics states,
 image-level overrides and masking paths.
+
+`image-intent-*.pdf` and PNG references are authored by
+`scripts/generate_image_intent_fixtures.py` using the synthetic intent profile.
+Eight cases exercise `ri`, ExtGState `RI`, q/Q restoration, image Intent
+overrides, nested Form resources, raw/Flate inline images, pixel bytes containing
+an apparent EI marker, CR pixel data followed by LF separators, and soft/stencil masks. Independent Ghostscript 72-DPI
+references use `-dBlackPtComp=0` to match the importer's default color-conversion
+setting; [Ghostscript enables black-point compensation by default](https://ghostscript.readthedocs.io/en/gs10.02.0/GhostscriptColorManagement.html). Original
+PDFs are rendered directly, without replacement oracle inputs.

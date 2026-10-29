@@ -1,5 +1,11 @@
 Unreleased source changes after v0.1.0:
 
+- Inline PDF image parsing resolves named color spaces in the current page
+  or Form resources for both raw and filtered pixels. Candidate EI markers
+  are checked against decoded sample length, including EI bytes inside pixels.
+  Eight independent ICC raster/round-trip cases and Python/Go/Node calls cover
+  intent inheritance, scoped resources, compressed data and image masks.
+
 - PDF raster color conversion inherits the current `ri` or ExtGState `RI`
   when an image has no explicit Intent. Image Intent still overrides that
   state. Color-key, explicit and soft masks preserve the inherited setting;

@@ -7589,3 +7589,20 @@ def test_imports_pdf_device_n_colors_across_binding(name):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+
+@pytest.mark.parametrize("kind", ['xobject', 'form', 'inline', 'inline-embedded-ei', 'inline-trailing-cr', 'inline-flate', 'form-inline', 'masked'])
+def test_pdf_image_intent_inheritance_across_binding(kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("image-intent-" + kind + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert len(document.page_images(0)) == 5
+        colors = [document.page_image_data(0, index) for index in range(5)]
+        assert colors[0] == colors[2]
+        assert colors[0] != colors[1]
+        assert colors[0] != colors[3]
+        if kind != "masked":
+            assert colors[1] == colors[4]
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []
