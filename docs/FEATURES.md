@@ -1928,6 +1928,50 @@ RunLength, ASCIIHex, and ASCII85 decoding; filter abbreviations are expanded.
 
 Flate and LZW predictor parameters are applied to filtered inline images.
 The importer also handles filtered inline images in Form XObjects.
+PDF tiling patterns (`PatternType=1`, colored `PaintType=1` and uncolored
+`PaintType=2`) import as native OFD patterns backed by reusable vector composite
+resources. They can paint path fills and strokes, text, and image masks. Cells
+can contain supported paths, text with an explicit font selection, sampled
+images, Form XObjects, and nested patterns. Uncolored cells accept image masks
+and reject color-setting operators, color-related ExtGState parameters, and
+ordinary color images, as required by
+[PDF 32000-1 sections 8.6.8 and 8.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+
+Pattern matrices use the initial coordinate system of their parent content
+stream. Later `cm` operators change the painted shape without moving the pattern
+lattice; page rotation and `UserUnit` still affect both. `q`/`Q` preserve pattern
+selection, and ordinary color selection resets it. Uncolored pattern components
+use the underlying color space and current rendering intent. Pattern fills and
+strokes retain separate alpha values. Repeated painting with one selection
+reuses the same vector cell resource, including across `q`/`Q` restoration.
+
+Cell `BBox` clips its content, and the X/Y steps may leave gaps, overlap, or be
+negative. Overlaps are normalized into a canonical repeat period instead of
+clamping the source steps to the cell dimensions. Tile painting order in an
+overlap is unspecified by PDF; overlapping colored artwork should not depend
+on a particular order. Tiling types 1–3 preserve the ideal vector lattice rather
+than reproducing a particular device's pixel-grid adjustments. Pattern nesting
+is bounded at 32 levels and each period at 1000 overlapping cell placements;
+pattern byte filters use the shared bounded byte-stream decoder. Resource
+cycles, singular matrices, zero steps, malformed resource dictionaries, and
+excessive complexity return errors. Existing opaque transparency-group checks
+also inspect pattern cells. Shading patterns (`PatternType=2`) and graphics-state
+soft masks remain unsupported. Pattern cells with non-`Normal` blending also
+return an error until backdrop-dependent pattern compositing is implemented.
+Pattern-cell transparency parameters start at their defaults, including when
+the parent Form inherited alpha; outer alpha is applied once to the resulting
+pattern paint.
+
+The authored tiling corpus has 26 independent raster comparisons at 288 dpi,
+plus OFD save/reopen, reference validation, PDF export, and Python/Go/Node.js
+integration checks. `scripts/generate_tiling_pattern_fixtures.py` regenerates
+source PDFs and Ghostscript references; the outer-alpha scenes use Poppler because
+Ghostscript 10.02.1 applies the outer pattern alpha twice. Device CMYK references
+use Ghostscript's arithmetic conversion to match the documented no-profile
+fallback. Text scenes embed their font so font substitution does not obscure
+pattern geometry. Raster comparisons allow the existing one-pixel neighborhood
+for differences between rasterizers; they do not assert byte-identical output.
+
 PDF axial (type 2) and radial (type 3) `sh` shading import as OFD gradients
 for type 2 exponential functions, one-input type 0 sampled functions,
 and type 4 calculator functions,

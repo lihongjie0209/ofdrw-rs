@@ -114,7 +114,8 @@ pub(super) fn parse(
     let alternate = parse_color_space_inner(pdf, resources, &values[2], depth + 1, remap_device)?;
     if matches!(
         alternate,
-        PdfColorSpace::Indexed { .. }
+        PdfColorSpace::Pattern { .. }
+            | PdfColorSpace::Indexed { .. }
             | PdfColorSpace::Separation { .. }
             | PdfColorSpace::SeparationAll
             | PdfColorSpace::SeparationNone

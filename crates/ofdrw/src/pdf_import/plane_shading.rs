@@ -256,6 +256,11 @@ pub(super) fn import(
             .map_err(|_| invalid("missing ColorSpace"))?,
         0,
     )?;
+    if matches!(space, PdfColorSpace::Pattern { .. }) {
+        return Err(OfdError::Invalid(
+            "PDF shading cannot use Pattern color".into(),
+        ));
+    }
     if space.nonpainting() {
         return Ok(());
     }

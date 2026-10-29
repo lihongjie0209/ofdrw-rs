@@ -1,5 +1,16 @@
 Unreleased source changes after v0.1.0:
 
+- PDF colored and uncolored tiling patterns import as native OFD pattern
+  paints with reusable vector cell resources. Paths, strokes, text, stencils,
+  supported cell images/forms, nested patterns, matrices, gaps/overlaps,
+  negative steps, alpha, page rotation and UserUnit have coverage in 26
+  independent raster/round-trip scenes. Python, Go and Node.js exercise the
+  same feature through the existing PDF import API. Cycles, malformed
+  dictionaries, uncolored color-setting content and excessive overlap fail
+  explicitly. Shading patterns and backdrop-dependent cell blending remain
+  unsupported. Independent composite resources also reserve the in-memory
+  identifier range before subsequent pages are added.
+
 - Inline PDF image parsing resolves named color spaces in the current page
   or Form resources for both raw and filtered pixels. Candidate EI markers
   are checked against decoded sample length, including EI bytes inside pixels.

@@ -15,6 +15,7 @@ mod simple_encoding;
 mod simple_widths;
 mod standard_font_data;
 mod standard_fonts;
+mod tiling_pattern;
 mod vertical_metrics;
 
 use std::{
@@ -64,10 +65,17 @@ struct GraphicsState {
     dash_pattern: Option<Vec<f64>>,
     dash_phase: f64,
     clips: Vec<PdfClip>,
+    fill_pattern: Option<Arc<tiling_pattern::Source>>,
+    stroke_pattern: Option<Arc<tiling_pattern::Source>>,
+    active_patterns: Vec<Option<ObjectId>>,
+    uncolored_pattern: bool,
 }
 
 #[derive(Clone)]
 enum PdfColorSpace {
+    Pattern {
+        base: Option<Box<PdfColorSpace>>,
+    },
     Gray,
     CalGray {
         gamma: f64,
@@ -103,6 +111,9 @@ enum PdfColorSpace {
 
 impl PdfColorSpace {
     fn nonpainting(&self) -> bool {
+        if let Self::Pattern { base } = self {
+            return base.as_ref().is_some_and(|base| base.nonpainting());
+        }
         matches!(
             self,
             Self::SeparationNone
@@ -137,6 +148,7 @@ impl PdfColorSpace {
 
     fn channels(&self) -> usize {
         match self {
+            Self::Pattern { base } => base.as_ref().map_or(0, |base| base.channels()),
             Self::Gray
             | Self::CalGray { .. }
             | Self::Indexed { .. }
@@ -159,6 +171,13 @@ impl PdfColorSpace {
         intent: RenderingIntent,
     ) -> Result<[u8; 3], OfdError> {
         match self {
+            Self::Pattern { base } => match base {
+                Some(base) => base.color_with_intent(values, intent),
+                None if values.is_empty() => Ok([0; 3]),
+                None => Err(OfdError::Invalid(
+                    "colored PDF Pattern takes no components".into(),
+                )),
+            },
             Self::DeviceN { channels, tint } => {
                 if values.len() != *channels
                     || values
@@ -285,6 +304,9 @@ impl PdfColorSpace {
 
     fn initial_components(&self) -> Vec<f64> {
         match self {
+            Self::Pattern { base } => base
+                .as_ref()
+                .map_or_else(Vec::new, |base| base.initial_components()),
             Self::Separation { .. } | Self::SeparationAll | Self::SeparationNone => vec![1.],
             Self::DeviceN { channels, .. } => vec![1.; *channels],
             Self::Cmyk | Self::Icc { channels: 4, .. } => vec![0.0, 0.0, 0.0, 1.0],
@@ -328,6 +350,10 @@ impl Default for GraphicsState {
             dash_pattern: None,
             dash_phase: 0.0,
             clips: Vec::new(),
+            fill_pattern: None,
+            stroke_pattern: None,
+            active_patterns: Vec::new(),
+            uncolored_pattern: false,
         }
     }
 }
@@ -895,18 +921,20 @@ struct PdfPaint {
 
 fn paint(
     output: &mut OfdDocument,
-    page_index: usize,
-    box_: [f64; 4],
+    page: &PdfPageContext<'_>,
     path: &mut PathBuilder,
     state: &GraphicsState,
     mut mode: PdfPaint,
     visible: bool,
 ) -> Result<(), OfdError> {
+    let page_index = page.index;
+    let box_ = page.box_;
     if path.commands.is_empty() {
         return Ok(());
     }
     mode.fill &= !state.fill_space.nonpainting();
     mode.stroke &= !state.stroke_space.nonpainting();
+    tiling_pattern::require_selected(state, mode.fill, mode.stroke)?;
     let mut style = PathStyle {
         fill: mode.fill,
         stroke: mode.stroke,
@@ -952,6 +980,7 @@ fn paint(
         ],
         style,
     )?;
+    tiling_pattern::attach(output, page, &id, state, mode.fill, mode.stroke)?;
     attach_blend_mode(output, page_index, &id, state.blend_mode)?;
     attach_clips(output, page_index, &id, "PathObject", &state.clips)?;
     Ok(())
@@ -1569,7 +1598,8 @@ fn parse_color_space_inner(
                         if replacement.channels() != channels
                             || matches!(
                                 replacement,
-                                PdfColorSpace::Lab { .. }
+                                PdfColorSpace::Pattern { .. }
+                                    | PdfColorSpace::Lab { .. }
                                     | PdfColorSpace::Indexed { .. }
                                     | PdfColorSpace::DeviceN { .. }
                                     | PdfColorSpace::Separation { .. }
@@ -1587,6 +1617,7 @@ fn parse_color_space_inner(
             }
         }
         match name {
+            b"Pattern" => return Ok(PdfColorSpace::Pattern { base: None }),
             b"DeviceGray" => return Ok(PdfColorSpace::Gray),
             b"DeviceRGB" => return Ok(PdfColorSpace::Rgb),
             b"DeviceCMYK" => return Ok(PdfColorSpace::Cmyk),
@@ -1607,6 +1638,28 @@ fn parse_color_space_inner(
     let array = value
         .as_array()
         .map_err(|_| OfdError::Invalid("unsupported PDF color space resource".into()))?;
+    if array
+        .first()
+        .map(|kind| pdf_resolved_value(pdf, kind, "color space family"))
+        .transpose()?
+        .and_then(|kind| kind.as_name().ok())
+        == Some(b"Pattern".as_slice())
+    {
+        if array.len() != 2 {
+            return Err(OfdError::Invalid(
+                "PDF Pattern array requires one base color space".into(),
+            ));
+        }
+        let base = parse_color_space_inner(pdf, resources, &array[1], depth + 1, remap_device)?;
+        if matches!(base, PdfColorSpace::Pattern { .. }) {
+            return Err(OfdError::Invalid(
+                "PDF Pattern cannot have a Pattern base".into(),
+            ));
+        }
+        return Ok(PdfColorSpace::Pattern {
+            base: Some(Box::new(base)),
+        });
+    }
     if array
         .first()
         .map(|kind| pdf_resolved_value(pdf, kind, "color space family"))
@@ -1824,9 +1877,12 @@ fn parse_color_space_inner(
         return Err(OfdError::Invalid("unsupported PDF color space".into()));
     }
     let base_space = parse_color_space_inner(pdf, resources, base, depth + 1, remap_device)?;
-    if matches!(base_space, PdfColorSpace::Indexed { .. }) {
+    if matches!(
+        base_space,
+        PdfColorSpace::Indexed { .. } | PdfColorSpace::Pattern { .. }
+    ) {
         return Err(OfdError::Invalid(
-            "PDF Indexed base cannot be Indexed".into(),
+            "PDF Indexed base cannot be Indexed or Pattern".into(),
         ));
     }
     let high = pdf_resolved_value(pdf, high, "Indexed hival")?
@@ -3481,12 +3537,17 @@ fn import_pdf_shading(
         .get(b"ColorSpace")
         .map_err(|_| OfdError::Invalid("PDF shading has no ColorSpace".into()))?;
     let color_space = parse_color_space(Some(page.pdf), Some(page.resources), color_space, 0)?;
+    if matches!(color_space, PdfColorSpace::Pattern { .. }) {
+        return Err(OfdError::Invalid(
+            "PDF shading cannot use Pattern color".into(),
+        ));
+    }
     if color_space.nonpainting() {
         return Ok(());
     }
     if matches!(color_space, PdfColorSpace::Indexed { .. }) {
         return Err(OfdError::Invalid(
-            "PDF axial and radial shading cannot use Indexed color".into(),
+            "PDF axial and radial shading cannot use Indexed or Pattern color".into(),
         ));
     }
     let function = shading
@@ -4810,6 +4871,11 @@ fn image_bytes_inner_with_context(
             .ok()
             .map(|value| parse_color_space(pdf, resources, value, 0))
             .transpose()?;
+        if matches!(declared_space.as_ref(), Some(PdfColorSpace::Pattern { .. })) {
+            return Err(OfdError::Invalid(
+                "PDF image cannot use Pattern color".into(),
+            ));
+        }
         let codec_data = jpx_color::codec_data(&image.content, declared_space.as_ref())?;
         let header =
             hayro_jpeg2000::Image::new(&codec_data, &hayro_jpeg2000::DecodeSettings::default())
@@ -5061,6 +5127,11 @@ fn image_bytes_inner_with_context(
     )?;
     let channels = color_space.channels();
     let png_color = match color_space {
+        PdfColorSpace::Pattern { .. } => {
+            return Err(OfdError::Invalid(
+                "PDF image cannot use Pattern color".into(),
+            ))
+        }
         PdfColorSpace::Gray => png::ColorType::Grayscale,
         PdfColorSpace::CalGray { .. }
         | PdfColorSpace::CalRgb { .. }
@@ -5923,10 +5994,37 @@ fn import_image_stream(
     state: &GraphicsState,
     image: &lopdf::Stream,
 ) -> Result<(), OfdError> {
-    let nonpainting = if pdf_image_is_mask(Some(pdf), &image.dict)? {
+    let is_mask = pdf_image_is_mask(Some(pdf), &image.dict)?;
+    if state.uncolored_pattern && !is_mask {
+        return Err(OfdError::Invalid(
+            "uncolored PDF Pattern cannot paint a color image".into(),
+        ));
+    }
+    if is_mask
+        && (matches!(state.fill_space, PdfColorSpace::Pattern { .. }) || state.uncolored_pattern)
+    {
+        return tiling_pattern::paint_mask(
+            output,
+            &PdfPageContext {
+                pdf,
+                resources,
+                box_,
+                index: page_index,
+            },
+            state,
+            image,
+        );
+    }
+    let nonpainting = if is_mask {
         state.fill_space.nonpainting()
     } else if let Ok(space) = image.dict.get(b"ColorSpace") {
-        parse_color_space(Some(pdf), Some(resources), space, 0)?.nonpainting()
+        let space = parse_color_space(Some(pdf), Some(resources), space, 0)?;
+        if matches!(space, PdfColorSpace::Pattern { .. }) {
+            return Err(OfdError::Invalid(
+                "PDF image cannot use Pattern color".into(),
+            ));
+        }
+        space.nonpainting()
     } else {
         false
     };
@@ -6293,6 +6391,11 @@ fn validate_opaque_form_content(
 ) -> Result<(), OfdError> {
     for operation in &content.operations {
         match operation.operator.as_str() {
+            "scn" | "SCN" => {
+                if let Some(Object::Name(name)) = operation.operands.last() {
+                    tiling_pattern::validate_opaque(pdf, resources, name, active_forms)?;
+                }
+            }
             "gs" => {
                 return Err(OfdError::Invalid(
                     "PDF Form transparency group requires opaque content".into(),
@@ -7196,6 +7299,14 @@ fn finish_import_text(
             )?;
         }
         attach_text_paint(output, page.index, &id, graphics, state.render_mode)?;
+        tiling_pattern::attach(
+            output,
+            page,
+            &id,
+            graphics,
+            matches!(state.render_mode % 4, 0 | 2) && !graphics.fill_space.nonpainting(),
+            matches!(state.render_mode % 4, 1 | 2) && !graphics.stroke_space.nonpainting(),
+        )?;
         attach_blend_mode(output, page.index, &id, graphics.blend_mode)?;
         attach_clips(output, page.index, &id, "TextObject", &graphics.clips)?;
         if state.render_mode >= 4 {
@@ -7609,6 +7720,7 @@ fn import_content(
     if content.operations.len() > 1_000_000 {
         return Err(OfdError::Limit("PDF content has too many operators".into()));
     }
+    let initial_state = Arc::new(state.clone());
     let pdf = page_context.pdf;
     let optional_content_enabled = pdf_has_optional_content(pdf)?;
     let box_ = page_context.box_;
@@ -7620,6 +7732,7 @@ fn import_content(
     let mut compatibility_depth = 0_usize;
     let mut marked_content = Vec::new();
     for operation in content.operations {
+        tiling_pattern::validate_operator(&operation, &state, page_context)?;
         if text.active
             && matches!(
                 operation.operator.as_str(),
@@ -7854,16 +7967,23 @@ fn import_content(
                     .as_name()
                     .map_err(|_| OfdError::Invalid("PDF gs has no resource name".into()))?;
                 apply_ext_gstate(pdf, page_context.resources, name, &mut state, &mut text)?;
+                if !state.active_patterns.is_empty() && state.blend_mode != "Normal" {
+                    return Err(OfdError::Invalid(
+                        "PDF Pattern cells with non-Normal blending are unsupported".into(),
+                    ));
+                }
             }
             "rg" | "RG" => {
                 values = numbers(&operation, 3)?;
                 let space = selected_color_space(pdf, page_context.resources, b"DeviceRGB")?;
                 let selected = space.color_with_intent(&values, state.rendering_intent)?;
                 if operation.operator == "rg" {
+                    state.fill_pattern = None;
                     state.fill_space = space;
                     state.fill_color = selected;
                     state.fill_components = values;
                 } else {
+                    state.stroke_pattern = None;
                     state.stroke_space = space;
                     state.stroke_color = selected;
                     state.stroke_components = values;
@@ -7874,10 +7994,12 @@ fn import_content(
                 let space = selected_color_space(pdf, page_context.resources, b"DeviceGray")?;
                 let selected = space.color_with_intent(&values, state.rendering_intent)?;
                 if operation.operator == "g" {
+                    state.fill_pattern = None;
                     state.fill_space = space;
                     state.fill_color = selected;
                     state.fill_components = values;
                 } else {
+                    state.stroke_pattern = None;
                     state.stroke_space = space;
                     state.stroke_color = selected;
                     state.stroke_components = values;
@@ -7888,10 +8010,12 @@ fn import_content(
                 let space = selected_color_space(pdf, page_context.resources, b"DeviceCMYK")?;
                 let selected = space.color_with_intent(&values, state.rendering_intent)?;
                 if operation.operator == "k" {
+                    state.fill_pattern = None;
                     state.fill_space = space;
                     state.fill_color = selected;
                     state.fill_components = values;
                 } else {
+                    state.stroke_pattern = None;
                     state.stroke_space = space;
                     state.stroke_color = selected;
                     state.stroke_components = values;
@@ -7910,10 +8034,12 @@ fn import_content(
                 let components = space.initial_components();
                 let initial_color = space.color_with_intent(&components, state.rendering_intent)?;
                 if operation.operator == "cs" {
+                    state.fill_pattern = None;
                     state.fill_space = space;
                     state.fill_color = initial_color;
                     state.fill_components = components;
                 } else {
+                    state.stroke_pattern = None;
                     state.stroke_space = space;
                     state.stroke_color = initial_color;
                     state.stroke_components = components;
@@ -7926,12 +8052,40 @@ fn import_content(
                 } else {
                     &state.stroke_space
                 };
-                values = numbers(&operation, space.channels())?;
+                let pattern = if let PdfColorSpace::Pattern { base } = space {
+                    if !matches!(operation.operator.as_str(), "scn" | "SCN") {
+                        return Err(OfdError::Invalid("PDF Pattern requires scn or SCN".into()));
+                    }
+                    let Some(Object::Name(name)) = operation.operands.last() else {
+                        return Err(OfdError::Invalid(
+                            "PDF Pattern color has no pattern name".into(),
+                        ));
+                    };
+                    let source = tiling_pattern::Source::resolve(
+                        page_context,
+                        name,
+                        initial_state.clone(),
+                        base.is_some(),
+                    )?;
+                    values = numbers(
+                        &Operation::new(
+                            "Pattern components",
+                            operation.operands[..operation.operands.len() - 1].to_vec(),
+                        ),
+                        space.channels(),
+                    )?;
+                    Some(Arc::new(source))
+                } else {
+                    values = numbers(&operation, space.channels())?;
+                    None
+                };
                 let selected = space.color_with_intent(&values, state.rendering_intent)?;
                 if nonstroking {
+                    state.fill_pattern = pattern;
                     state.fill_color = selected;
                     state.fill_components = values;
                 } else {
+                    state.stroke_pattern = pattern;
                     state.stroke_color = selected;
                     state.stroke_components = values;
                 }
@@ -7997,8 +8151,7 @@ fn import_content(
                 });
                 paint(
                     output,
-                    page_index,
-                    box_,
+                    page_context,
                     &mut path,
                     &state,
                     PdfPaint {

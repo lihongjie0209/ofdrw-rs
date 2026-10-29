@@ -7606,3 +7606,18 @@ def test_pdf_image_intent_inheritance_across_binding(kind):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+
+@pytest.mark.parametrize("kind", ["colored", "uncolored-rgb", "nested", "mask", "cell-text", "state-reuse"])
+def test_pdf_tiling_patterns_across_binding(kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("tiling-" + kind + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert document.page_count == 1
+        assert "<pattern" in document.page_svg(0)
+        assert document.page_composite_units(0)
+        if kind == "state-reuse":
+            assert len(document.page_composite_units(0)) == 1
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []

@@ -304,6 +304,11 @@ pub(super) fn parse(
         dict.get(b"ColorSpace").map_err(|_| invalid())?,
         0,
     )?;
+    if matches!(color_space, PdfColorSpace::Pattern { .. }) {
+        return Err(OfdError::Invalid(
+            "PDF shading cannot use Pattern color".into(),
+        ));
+    }
     if color_space.nonpainting() {
         return Ok(None);
     }
