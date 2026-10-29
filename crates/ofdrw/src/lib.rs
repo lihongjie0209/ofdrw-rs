@@ -20379,6 +20379,9 @@ impl OfdDocument {
         let child_id = layer_id
             .checked_add(1)
             .ok_or_else(|| OfdError::Limit("object identifier overflow".into()))?;
+        let next_id = child_id
+            .checked_add(1)
+            .ok_or_else(|| OfdError::Limit("object identifier overflow".into()))?;
         let resource_name = format!("CompositeRes_{unit_id}.xml");
         let resource_path = resolve_path(&parent_path(&root), &resource_name)?;
         if self.entries.contains_key(&resource_path) {
@@ -20421,6 +20424,9 @@ impl OfdDocument {
             (resource_path, resource_xml.into_bytes()),
             (root, updated_document.into_bytes()),
         ])?;
+        if self.newly_created {
+            self.next_id = self.next_id.max(next_id);
+        }
         Ok(unit_id.to_string())
     }
 
@@ -37248,6 +37254,27 @@ mod tests {
         assert!(document.validate_references().unwrap().is_empty());
         let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.page_png(0, 25.4).unwrap(), png);
+    }
+
+    #[test]
+    fn independent_composite_resource_reserves_ids_before_a_new_page() {
+        let mut document = OfdDocument::new();
+        document.add_blank_page(10., 10.).unwrap();
+        let resource = document.add_composite_graphic_resource(0,[4.,4.],|id,_,_|format!(
+            "<ofd:PathObject ID=\"{id}\" Boundary=\"0 0 4 4\" Fill=\"true\"><ofd:AbbreviatedData>M 0 0 L 4 0 L 4 4 C</ofd:AbbreviatedData></ofd:PathObject>"
+        )).unwrap();
+        document.add_blank_page(10., 10.).unwrap();
+        let page = document.pages().unwrap().remove(1);
+        assert!(page.id.parse::<usize>().unwrap() > resource.parse::<usize>().unwrap() + 2);
+        document
+            .add_composite_object(1, &resource, [0., 0., 4., 4.], CompositeStyle::default())
+            .unwrap();
+        assert!(document.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_png(1, 25.4).unwrap(),
+            document.page_png(1, 25.4).unwrap()
+        );
     }
 
     #[test]
