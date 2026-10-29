@@ -5,6 +5,7 @@ mod cid_encoding;
 mod cid_unicode;
 mod font_style;
 mod mesh_shading;
+mod plane_shading;
 mod scalar_function;
 mod simple_encoding;
 mod simple_widths;
@@ -2450,7 +2451,7 @@ fn pdf_sampled_function_points(
     }
     let cubic = match pdf_function_integer(pdf, dictionary, b"Order", Some(1))? {
         1 => false,
-        3 => size >= 4,
+        3 => size >= 3,
         _ => {
             return Err(OfdError::Invalid(
                 "invalid PDF sampled Function Order".into(),
@@ -3204,7 +3205,7 @@ fn import_pdf_shading(
         .get(b"ShadingType")
         .and_then(Object::as_i64)
         .map_err(|_| OfdError::Invalid("PDF shading has no ShadingType".into()))?;
-    if !matches!(shading_type, 2..=7) {
+    if !matches!(shading_type, 1..=7) {
         return Err(OfdError::Invalid("unsupported PDF shading type".into()));
     }
     let bbox_clip = if let Ok(bbox) = shading.get(b"BBox") {
@@ -3246,6 +3247,13 @@ fn import_pdf_shading(
     } else {
         None
     };
+    if shading_type == 1 {
+        let mut state = state.clone();
+        if let Some(clip) = bbox_clip {
+            state.clips.push(clip);
+        }
+        return plane_shading::import(output, page, &state, shading, visible);
+    }
     if matches!(shading_type, 4..=7) {
         let Some(mesh) = mesh_shading::parse(source, page, state, shading_type)? else {
             return Ok(());

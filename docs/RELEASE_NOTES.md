@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- PDF Type 1 function-based shading imports two-input sampled/calculator
+  functions and component arrays with domain/matrix mapping, color conversion,
+  clips, opacity and blend modes. Arbitrary functions become bounded RGB PNG
+  resources at a target eight pixels/mm, capped at four million pixels.
+  Twelve Ghostscript references cover discontinuities, packed/cubic samples,
+  reversed mappings, CalGray/CMYK and transformed clips. Resource/work limits
+  and all standard sample bit depths have unit coverage; three-sample cubic
+  tables now also retain cubic interpolation in existing one-input importers.
+
 - PDF Type 6/7 Coons and tensor-product patch meshes import through bounded
   geometry/color refinement. Continuous bit streams, three shared-edge modes,
   curved boundaries, internal control points and bilinear source colors are

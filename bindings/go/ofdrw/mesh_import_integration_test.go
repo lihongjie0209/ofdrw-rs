@@ -81,3 +81,59 @@ func TestImportsGouraudMeshesFromPDF(t *testing.T) {
 		})
 	}
 }
+
+func TestImportsFunctionBasedShadingsFromPDF(t *testing.T) {
+	tests := []struct{ name string }{
+		{"plane-calculator-rgb"},
+		{"plane-calculator-step"},
+		{"plane-component-array"},
+		{"plane-sampled-rgb"},
+		{"plane-sampled-packed"},
+		{"plane-sampled-cubic"},
+		{"plane-sampled-cubic-small"},
+		{"plane-sampled-reversed"},
+		{"plane-cmyk"},
+		{"plane-calgray"},
+		{"plane-transformed"},
+		{"plane-bbox-background"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", tt.name+".pdf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, err := FromPDF(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			images, err := doc.PageImages(0)
+			if err != nil || len(images) != 1 {
+				t.Fatalf("function shading images = %v, error = %v", images, err)
+			}
+			png, err := doc.PagePNG(0, 72)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err = doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := FromBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			actual, err := reopened.PagePNG(0, 72)
+			if err != nil || !bytes.Equal(actual, png) {
+				t.Fatalf("function shading raster changed after round trip: %v", err)
+			}
+			issues, err := reopened.ValidateReferences()
+			if err != nil || len(issues) != 0 {
+				t.Fatalf("function shading references = %v, error = %v", issues, err)
+			}
+		})
+	}
+}

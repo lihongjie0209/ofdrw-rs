@@ -239,3 +239,11 @@ conversion rather than a machine's default CMYK ICC profile, as described in
 patches, continuous bit packing, three shared-edge modes, curved and folded
 surfaces, corner-color functions, clipping, opacity and transforms. Ghostscript
 produces the independent 72-DPI references; ordinary tests run entirely offline.
+
+`plane-*.pdf` and PNG references are authored by
+`scripts/generate_plane_shading_fixtures.py`. They exercise PDF Type 1 shading,
+two-input sampled/calculator functions, component arrays, three-point and
+multidimensional cubic interpolation, packed data, discontinuities, reversed
+mappings, CalGray/CMYK conversion and domain/matrix/clip mapping. Independent
+72-DPI references use Ghostscript; the CMYK case uses `-dUseFastColor` for the
+same simple subtractive device-color conversion used by the importer.

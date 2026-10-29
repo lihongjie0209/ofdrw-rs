@@ -1936,6 +1936,36 @@ test('import PDF Gouraud meshes and preserve their paints and rasters', () => {
   }
 });
 
+test('import two-input PDF function shadings through the C ABI', () => {
+  for (const name of [
+    'plane-calculator-rgb',
+    'plane-calculator-step',
+    'plane-component-array',
+    'plane-sampled-rgb',
+    'plane-sampled-packed',
+    'plane-sampled-cubic',
+    'plane-sampled-cubic-small',
+    'plane-sampled-reversed',
+    'plane-cmyk',
+    'plane-calgray',
+    'plane-transformed',
+    'plane-bbox-background',
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(name + '.pdf')));
+    try {
+      const images = document.pageImages(0);
+      assert.equal(images.length, 1);
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.pageImages(0), images);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
+
 test('import a Group 4 fax PDF image through the C ABI', () => {
   const document = Document.fromPdfBytes(fs.readFileSync(fixture('ccitt-g4.pdf')));
   try {

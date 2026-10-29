@@ -274,6 +274,22 @@ pub(crate) struct Calculation {
 }
 
 impl Calculator {
+    /// Conservative work estimate for one evaluation, including bounded stack moves.
+    pub(crate) fn work_cost(&self) -> usize {
+        fn cost(nodes: &[Node]) -> usize {
+            nodes
+                .iter()
+                .map(|node| match &node.instruction {
+                    Instruction::If(body) => 1 + cost(body),
+                    Instruction::IfElse(first, second) => 1 + cost(first).max(cost(second)),
+                    Instruction::Operator(Operator::Copy | Operator::Roll) => MAX_STACK,
+                    _ => 1,
+                })
+                .sum()
+        }
+        cost(&self.nodes).max(1)
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, OfdError> {
         if bytes.len() > MAX_CODE_BYTES {
             return Err(limit("code exceeds 64 KiB"));

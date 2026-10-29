@@ -165,7 +165,7 @@ impl Parser<'_> {
                 }
                 let cubic = match pdf_function_integer(self.pdf, dictionary, b"Order", Some(1))? {
                     1 => false,
-                    3 => size >= 4,
+                    3 => size >= 3,
                     _ => return Err(invalid("invalid interpolation Order")),
                 };
                 let encode = if dictionary.has(b"Encode") {

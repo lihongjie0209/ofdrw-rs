@@ -1937,14 +1937,16 @@ interval, and 10,000 color stops. Complex expressions exceeding these limits ret
 error. Axial and radial fixtures exercise the feature through all language
 bindings; the axial pixel regression uses an independent Ghostscript render.
 
-Sampled functions support linear and cubic (Order 3) interpolation, 1/2/4/8/12/16/24/32-bit
+Axial/radial sampled functions support linear and cubic (Order 3) interpolation, 1/2/4/8/12/16/24/32-bit
 samples, bounded byte-filter chains, reversed `Encode` and `Decode` mappings,
 and input/output clipping. Every sample-table knot is retained before adaptive
 color conversion so narrow color transitions are not skipped. Cubic functions
 retain interior turning points and clipping thresholds before adaptive sampling;
-table endpoints repeat their nearest sample. Tables with fewer than four samples
-use linear interpolation as required by PDF. An independent Ghostscript render
-checks cubic axial shading. Multi-input sampled functions remain unsupported.
+table endpoints repeat their nearest sample. Three-sample tables retain cubic
+interpolation; one- and two-sample tables use constant/linear interpolation. An
+independent Ghostscript render checks cubic axial shading. Two-input tables
+are supported for Type 1 shading; higher-dimensional sampled functions remain
+unsupported.
 Nonlinear color conversions use bounded adaptive color stops.
 
 Stitching bounds, reversed `Encode` intervals, and the stitching function's
@@ -1992,8 +1994,26 @@ with the same one-million color evaluation budget. Exhausted budgets or unmet
 error tolerances return errors. Folded patches, edge reuse, transformed clipping,
 opacity and functions have independent raster and round-trip regressions.
 Truncated patches and a reused edge without a preceding patch return errors.
-Type 1 function-based shading remains unsupported. Patch semantics follow
+Patch semantics follow
 [ISO 32000-1, sections 8.7.4.5.7–8](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+
+PDF Type 1 function-based shading accepts two-input sampled (FunctionType 0)
+and calculator (FunctionType 4) functions, including one two-input function
+per color component. Function domains must contain the shading domain. Domain
+and Matrix defaults, reflected/skewed transforms, current clips, BBox, opacity,
+blend modes and rendering intent are retained. Sample tables vary x first and
+support all standard bit depths, reversed Encode/Decode, multilinear and
+separable cubic interpolation, including three-sample axes. Function and color
+space output ranges are clipped before RGB encoding.
+These arbitrary, potentially discontinuous functions are sampled into RGB PNG
+resources at a target eight pixels/mm along transformed axes, uniformly reduced
+when needed to cap each image at four million pixels. This is a fixed-resolution
+representation; enlarging the resulting OFD cannot recover finer function detail.
+Parsing permits one million sample values across component functions. Rendering
+permits 100 million estimated work units (sample reads or calculator/stack work);
+complexity violations return errors. Calculator code keeps its existing syntax,
+stack and nesting bounds. Semantics follow
+[ISO 32000-1, sections 7.10.2, 7.10.5 and 8.7.4.5.2](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 
 An optional PDF shading `BBox` is transformed and intersected with the
 current clipping path. For direct `sh` painting, `Background` is ignored as

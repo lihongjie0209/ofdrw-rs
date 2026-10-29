@@ -344,6 +344,32 @@ def test_imports_pdf_gouraud_meshes_across_binding(name, kind):
             assert reopened.validate_references() == []
 
 
+@pytest.mark.parametrize("name", [
+    "plane-calculator-rgb",
+    "plane-calculator-step",
+    "plane-component-array",
+    "plane-sampled-rgb",
+    "plane-sampled-packed",
+    "plane-sampled-cubic",
+    "plane-sampled-cubic-small",
+    "plane-sampled-reversed",
+    "plane-cmyk",
+    "plane-calgray",
+    "plane-transformed",
+    "plane-bbox-background",
+])
+def test_imports_pdf_function_based_shadings_across_binding(name):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / (name + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        images = document.page_images(0)
+        assert len(images) == 1
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.page_images(0) == images
+            assert reopened.validate_references() == []
+
+
 def test_imports_group4_fax_pdf_image_across_binding():
     fixture = (Path(__file__).resolve().parents[3] / "crates" / "ofdrw" /
                "tests" / "fixtures" / "ccitt-g4.pdf")
