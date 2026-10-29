@@ -708,18 +708,54 @@ mod tests {
     }
 
     #[test]
-    fn every_bundled_horizontal_adobe_cmap_parses_without_network_access() {
+    fn every_bundled_adobe_cmap_parses_without_network_access() {
         let pdf = PdfDocument::new();
         for (name, ordering) in named::NAMES {
             let map = CidEncoding::parse(&pdf, &Object::Name(name.as_bytes().to_vec()))
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(
+                map.is_vertical(),
+                name.ends_with("-V") || *name == "V",
+                "{name}"
+            );
+            assert_eq!(
                 map.ordering(),
-                (*name != "Identity-H").then_some(*ordering),
+                (!matches!(*name, "Identity-H" | "Identity-V")).then_some(*ordering),
                 "{name}"
             );
         }
-        assert_eq!(named::NAMES.len(), 116);
+        assert_eq!(named::NAMES.len(), 189);
+        assert_eq!(
+            named::NAMES
+                .iter()
+                .filter(|(name, _)| name.ends_with("-V") || *name == "V")
+                .count(),
+            73
+        );
+    }
+
+    #[test]
+    fn named_vertical_maps_override_punctuation_and_preserve_horizontal_bases() {
+        let pdf = PdfDocument::new();
+        for (horizontal, vertical, code, expected) in [
+            ("UniCNS-UTF16-H", "UniCNS-UTF16-V", 0x3008_u16, 150),
+            ("UniGB-UTF16-H", "UniGB-UTF16-V", 0x3001, 575),
+            ("UniJIS-UTF16-H", "UniJIS-UTF16-V", 0x3001, 7887),
+        ] {
+            let h =
+                CidEncoding::parse(&pdf, &Object::Name(horizontal.as_bytes().to_vec())).unwrap();
+            let v = CidEncoding::parse(&pdf, &Object::Name(vertical.as_bytes().to_vec())).unwrap();
+            assert!(!h.is_vertical());
+            assert!(v.is_vertical());
+            assert_eq!(v.decode(&code.to_be_bytes()).unwrap()[0].cid, expected);
+            assert_ne!(h.decode(&code.to_be_bytes()).unwrap()[0].cid, expected);
+            // A cached vertical map retains its own mode after the base is loaded.
+            assert!(
+                CidEncoding::parse(&pdf, &Object::Name(vertical.as_bytes().to_vec()))
+                    .unwrap()
+                    .is_vertical()
+            );
+        }
     }
 
     #[test]

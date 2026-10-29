@@ -1,6 +1,6 @@
 Adobe CMap resources
 Source: https://github.com/adobe-type-tools/cmap-resources/tree/f5cf3bca7fdfeaceb77aa82847e974f2306c20b4
-Unmodified horizontal CMap source files, compressed for inclusion in the native library.
+Unmodified horizontal and vertical CMap source files, compressed for inclusion in the native library.
 Each archived resource also retains its original copyright and license header.
 
 Copyright 1990-2023 Adobe. All rights reserved.

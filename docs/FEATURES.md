@@ -1775,18 +1775,19 @@ Vertical metric values must be finite and within ±10,000 glyph units, and
 W2 expansion is limited to 1,000,000 assignments including overwrites.
 Independent Ghostscript rasters cover default/custom metrics, spacing,
 mirroring and shear; Rust and Python/Go/Node tests cover text and round trips.
-Named vertical Adobe CMaps remain unsupported until their resources are bundled.
 These metrics follow
 [ISO 32000-1, sections 9.4.4 and 9.7.4.3](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
 
-The native library also bundles 116 horizontal Adobe CMap resources,
+The native library also bundles 189 Adobe CMap resources (116 horizontal and
+73 vertical),
 including GBK-EUC-H, UniGB-UTF16-H, UniCNS-UTF16-H, UniJIS-UTF16-H and
-UniKS-UTF16-H. They cover the current Adobe CNS1, GB1, Japan1, Korea1, KR,
+UniKS-UTF16-H and their vertical counterparts. They cover the current Adobe CNS1, GB1, Japan1, Korea1, KR,
 Identity and Manga1 collections and require no runtime downloads. Named
 maps and embedded UseCMap bases use the same bounded parser. A named map's
 Adobe Registry and Ordering must match the descendant CIDFont's
-CIDSystemInfo; indirect collection metadata is accepted. Identity-H remains
-collection-neutral.
+CIDSystemInfo; indirect collection metadata is accepted. Identity-H and
+Identity-V remain collection-neutral. Vertical resources inherit their horizontal
+base mappings and retain source-defined punctuation CID substitutions.
 Up to sixteen parsed named maps share immutable tables; local overrides
 copy only the table being changed, and cache hits still charge parsing budgets.
 Comments may appear between mapping operands without changing percent signs
@@ -1799,7 +1800,7 @@ Git blob hashes and SHA-256 digests; original source headers and the
 
 When a Type0 font omits ToUnicode, an Adobe CNS1, GB1, Japan1, Korea1 or KR
 descendant collection can supply Unicode through the bundled official
-CID-to-Unicode maps. This also applies to Identity-H and embedded Encoding
+CID-to-Unicode maps. This also applies to Identity-H/Identity-V and embedded Encoding
 CMaps when the descendant declares a supported Adobe collection. Registry,
 Ordering and a nonnegative integer Supplement are required and may be
 indirect. Source codes first map to CIDs, then to Unicode; their numeric

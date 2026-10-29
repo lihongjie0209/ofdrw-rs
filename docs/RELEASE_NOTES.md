@@ -1,11 +1,16 @@
 Unreleased source changes after v0.1.0:
 
+- All 189 current Adobe CMap resources are bundled, including 73 vertical
+  maps. Tests parse every resource offline, verify original source digests
+  and licenses, check vertical punctuation CID substitutions through embedded
+  font glyph selection, and exercise named CJK mappings with and without
+  ToUnicode through Rust and language bindings.
+
 - Vertical Type0 text imports with Identity-V or embedded WMode 1 CMaps.
   DW2/W2 select two-dimensional glyph origins and vertical advances; TJ,
   spacing, text rise, scaling and transformed baselines retain PDF geometry.
   Tests cover inherited modes, indirect metrics, malformed/oversized tables,
   independent Ghostscript raster references and all three language bindings.
-  Named vertical Adobe resources are not yet bundled.
 
 - Simple-font Differences without ToUnicode decode Adobe glyph-name sequences,
   including underscore components, multiple BMP groups and AGL combining
@@ -30,7 +35,7 @@ Unreleased source changes after v0.1.0:
   cover indirect metadata, CJK text, supplementary-plane characters, raster
   and package equivalence, source integrity and language bindings.
 
-- The native library includes 116 pinned horizontal Adobe CMap resources for
+- The native library includes 189 pinned horizontal/vertical Adobe CMap resources for
   named CJK encodings. Named maps validate CIDFont collection metadata and
   retain independent Unicode/CID lookups. A bounded cache shares immutable
   mappings across text runs while preserving copy-on-write inheritance and

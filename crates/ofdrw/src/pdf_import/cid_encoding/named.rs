@@ -12,10 +12,10 @@ include!(concat!(
 pub(super) fn data(name: &[u8]) -> Result<(&'static str, &'static str, Vec<u8>), OfdError> {
     let index = NAMES
         .binary_search_by(|(candidate, _)| candidate.as_bytes().cmp(name))
-        .map_err(|_| invalid("unsupported named or vertical CMap"))?;
+        .map_err(|_| invalid("unsupported named CMap"))?;
     let (name, ordering) = NAMES[index];
     let mut archive = zip::ZipArchive::new(Cursor::new(
-        include_bytes!("../../../assets/cmaps/horizontal.zip").as_slice(),
+        include_bytes!("../../../assets/cmaps/cmaps.zip").as_slice(),
     ))
     .map_err(|_| invalid("invalid built-in CMap archive"))?;
     let mut data = Vec::new();

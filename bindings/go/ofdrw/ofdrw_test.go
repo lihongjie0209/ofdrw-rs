@@ -1002,6 +1002,8 @@ func TestImportsToUnicodePDF(t *testing.T) {
 		"metadata-tounicode.pdf", "outline-tounicode.pdf", "type0-identity-tounicode.pdf",
 		"type0-indirect-widths.pdf", "type0-mixed-cmap.pdf", "encoding-differences.pdf", "custom-type1-differences.pdf",
 		"type0-gbk-cmap.pdf", "type0-cns-cmap.pdf",
+		"type0-gbk-vertical-cmap.pdf", "type0-gbk-vertical-collection.pdf",
+		"type0-cns-vertical-cmap.pdf", "type0-cns-vertical-collection.pdf",
 		"type0-gbk-collection-unicode.pdf", "type0-cns-collection-unicode.pdf", "type0-identity-collection-unicode.pdf",
 		"type0-embedded-collection-unicode.pdf",
 		"simple-indirect-widths.pdf", "text-default-origin.pdf",

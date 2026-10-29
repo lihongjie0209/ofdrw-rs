@@ -14,12 +14,14 @@ ASSETS = ROOT / "crates/ofdrw/assets/cmaps"
 class AdobeCmapResourcesTest(unittest.TestCase):
     def test_manifest_matches_original_git_blobs_and_runtime_resource_names(self):
         manifest = json.loads((ASSETS / "manifest.json").read_text())
-        payload = (ASSETS / "horizontal.zip").read_bytes()
+        self.assertEqual(len(manifest["resources"]), 189)
+        self.assertEqual(sum(item["writing_mode"] == 1 for item in manifest["resources"]), 73)
+        payload = (ASSETS / "cmaps.zip").read_bytes()
         self.assertEqual(hashlib.sha256(payload).hexdigest(), manifest["archive_sha256"])
         names = re.findall(r'\("([^"]+)", "([^"]+)"\)', (ASSETS / "names.rs").read_text())
         self.assertEqual(names, [(item["name"], item["ordering"]) for item in manifest["resources"]])
         self.assertEqual([name for name, _ in names], sorted({name for name, _ in names}))
-        with zipfile.ZipFile(ASSETS / "horizontal.zip") as archive:
+        with zipfile.ZipFile(ASSETS / "cmaps.zip") as archive:
             self.assertEqual(archive.namelist(), [name for name, _ in names])
             dependencies = set()
             for item in manifest["resources"]:
@@ -29,7 +31,7 @@ class AdobeCmapResourcesTest(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(data).hexdigest(), item["sha256"])
                     self.assertEqual(hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest(), item["git_blob_sha1"])
                     self.assertIn(b"Copyright", data)
-                    self.assertRegex(data, rb"/WMode\s+0\s+def")
+                    self.assertRegex(data, rb"/WMode\s+" + str(item["writing_mode"]).encode() + rb"\s+def")
                     self.assertRegex(data, rb"/Ordering\s+\(" + re.escape(item["ordering"].encode()) + rb"\)")
                     dependencies.update(name.decode() for name in re.findall(rb"/(\S+)\s+usecmap", data))
             self.assertLessEqual(dependencies, {name for name, _ in names})
