@@ -1712,17 +1712,19 @@ and four million pixels per canvas. Each activated mask caches up to eight
 canvases and allows 256 million painted pixels of work; mask nesting is limited
 to 32 levels, and cycles across masks, Forms and patterns fail explicitly.
 Sampling limits apply to both detail and transfer-function thresholds. Masked
-paints use image content for appearance. Direct text objects also retain native
-nonpainting text (`Fill=false`, `Stroke=false`) with their original fonts,
+paints use image content for appearance. Direct text objects and text inside
+nested isolated groups retain native nonpainting text (`Fill=false`, `Stroke=false`) with their original fonts,
 positions and glyph mappings, so extraction, search and region queries remain
 available after saving and reopening the OFD. This semantic text describes the
-source text even where the mask hides glyphs. Text inside a group rasterized as
-a whole still loses its semantic representation. PDF export is not guaranteed
-to retain nonpainting text. Unmasked text retains its native representation. Luminosity groups in other
+source text even where the mask hides glyphs. Group text is flattened into page
+coordinates with fresh IDs; existing composite resources are not modified.
+Invisible/zero-alpha objects and text used only in clip or pattern definitions
+are excluded. PDF export is not guaranteed to retain nonpainting text.
+Unmasked text retains its native representation. Luminosity groups in other
 blending color spaces, transparent knockout groups and `AIS=true` shape masks
 remain unsupported. Existing painting restrictions continue to apply.
 
-The authored soft-mask corpus has 39 original-PDF raster references plus five
+The authored soft-mask corpus has 44 original-PDF raster references plus five
 analytic pixel checks, resource/round-trip tests and optional PDF-export raster
 checks (`OFDRW_GHOSTSCRIPT=gs cargo test -p ofdrw --test soft_mask_pdf_import`).
 The inline-image reference uses original-source Poppler because Ghostscript

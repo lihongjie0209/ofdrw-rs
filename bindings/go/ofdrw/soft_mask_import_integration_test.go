@@ -11,9 +11,12 @@ import (
 )
 
 func TestImportsGraphicsSoftMasksFromPDF(t *testing.T) {
-	tests := []struct{ name string }{
+	tests := []struct{ name, text string }{
 		{name: "alpha"}, {name: "luminosity-bc"}, {name: "captured-ctm"},
-		{name: "text"}, {name: "text-fill-stroke-alpha"},
+		{name: "text", text: "A"}, {name: "text-fill-stroke-alpha", text: "A"},
+		{name: "group-text", text: "A"}, {name: "nested-group-text", text: "AB"},
+		{name: "group-text-reuse", text: "AA"}, {name: "group-text-inner-mask", text: "A"},
+		{name: "group-text-transform", text: "A"},
 		{name: "group"}, {name: "nested-masks"}, {name: "pattern-cell-mask"}, {name: "fill-stroke-alpha"},
 	}
 	for _, tt := range tests {
@@ -55,14 +58,14 @@ func TestImportsGraphicsSoftMasksFromPDF(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			if tt.name == "text" || tt.name == "text-fill-stroke-alpha" {
+			if tt.text != "" {
 				for _, document := range []*Document{doc, reopened} {
 					text, err := document.PageText(0)
-					if err != nil || strings.Join(text, "") != "A" {
+					if err != nil || strings.Join(text, "") != tt.text {
 						t.Fatalf("masked text = %v, error = %v", text, err)
 					}
 					objects, err := document.PageTextObjects(0)
-					if err != nil || len(objects) != 1 {
+					if err != nil || len(objects) == 0 {
 						t.Fatalf("masked text objects = %v, error = %v", objects, err)
 					}
 				}

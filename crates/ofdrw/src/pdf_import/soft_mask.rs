@@ -345,7 +345,19 @@ impl Source {
             .map_err(|_| invalid("cannot encode painted raster"))?;
         let mut remaining = parsed.input_text().to_owned();
         for range in selected.into_iter().rev() {
-            remaining.replace_range(range, "");
+            let mut replacement = String::new();
+            if let Some(object) = direct_page_objects(parsed.root_element()).find(|object| {
+                object.range() == range && is_ofd_element(*object, "CompositeObject")
+            }) {
+                for text in semantic_text::from_composite(output, page.index, object)? {
+                    output.append_page_object(page.index, |_, id| {
+                        let xml = text.with_id(id);
+                        replacement.push_str(&xml);
+                        xml
+                    })?;
+                }
+            }
+            remaining.replace_range(range, &replacement);
         }
         output.set_entry(&path, remaining.into_bytes())?;
         // Retain native text geometry and glyph mappings for search/extraction.

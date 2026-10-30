@@ -13,6 +13,7 @@ mod pattern;
 mod plane_shading;
 mod radial_shading;
 mod scalar_function;
+mod semantic_text;
 mod separation_color;
 mod shading_pattern;
 mod simple_encoding;

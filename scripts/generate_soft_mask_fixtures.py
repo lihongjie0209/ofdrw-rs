@@ -11,13 +11,17 @@ CASES = ['alpha', 'luminosity', 'alpha-invert', 'luminosity-bc', 'mask-matrix',
          'lum-nonisolated', 'indirect', 'image', 'inline-image', 'ordinary-form',
          'shaded-paint', 'pattern', 'pattern-cell-mask', 'sampled', 'calculator',
          'stitching', 'nested-masks', 'resource-scope', 'fill-stroke-alpha',
-         'replace', 'rotate', 'user-unit', 'lum-nonisolated-blend', 'text-fill-stroke-alpha', 'text-clip', 'compressed', 'mask-group-oc', 'hidden-mask-content']
+         'replace', 'rotate', 'user-unit', 'lum-nonisolated-blend', 'text-fill-stroke-alpha', 'text-clip', 'compressed', 'mask-group-oc', 'hidden-mask-content',
+         'group-text', 'nested-group-text', 'group-text-reuse', 'group-text-inner-mask', 'group-text-transform']
 
 
 def fixture(name):
     resources = (b'<< /ExtGState << /M 6 0 R /CH 8 0 R /Clear 15 0 R /N 22 0 R >> '
                  b'/Font << /F1 9 0 R >> /XObject << /F 11 0 R /Im 19 0 R >> '
                  b'/Shading << /S 13 0 R >> /Pattern << /P 21 0 R >> /Properties << /H 25 0 R >> >>')
+    group_text = name in ('group-text', 'nested-group-text', 'group-text-reuse', 'group-text-inner-mask', 'group-text-transform')
+    if group_text:
+        resources = resources.replace(b'/F 11 0 R', b'/F 11 0 R /G 26 0 R')
     lum = name.startswith('lum')
     mask = b'<< /Type /Mask /S '+(b'/Luminosity' if lum else b'/Alpha')+b' /G 5 0 R'
     if name == 'alpha-invert':
@@ -105,7 +109,22 @@ def fixture(name):
     child = b'/ca .5 /BM /Screen' if name == 'lum-nonisolated-blend' else b'/ca .5'
     catalog_attrs = b' /OCProperties << /OCGs [25 0 R] /D << /BaseState /OFF /OFF [25 0 R] >> >>' if name in ('mask-group-oc', 'hidden-mask-content') else b''
     group_oc = b' /OC 25 0 R' if name == 'mask-group-oc' else b''
-    return pdf_bytes([
+    form_body = b'1 0 0 rg 8 8 48 40 re f 0 0 1 rg 32 20 48 36 re f'
+    form_matrix = b''
+    if group_text:
+        content = background+b'/M gs /F Do'
+        form_body = b'0 0 1 rg BT /F1 30 Tf 12 16 Td (A) Tj ET'
+    if name == 'nested-group-text':
+        form_body = b'q .8 .2 -.1 .9 6 2 cm /G Do Q BT /F1 20 Tf 44 28 Td (B) Tj ET'
+    elif name == 'group-text-reuse':
+        content = background+b'/M gs /F Do /Clear gs q .6 0 0 .6 30 4 cm /F Do Q'
+    elif name == 'group-text-inner-mask':
+        form_body = b'/N gs '+form_body
+    elif name == 'group-text-transform':
+        content = background+b'.8 .1 .2 .8 3 2 cm /M gs /F Do'
+        form_matrix = b' /Matrix [.9 -.1 .1 .9 2 3]'
+        form_body = b'BT /F1 30 Tf .9 .2 -.2 .9 12 16 Tm (A) Tj ET'
+    objects = [
         b'<< /Type /Catalog /Pages 2 0 R'+catalog_attrs+b' >>', b'<< /Type /Pages /Count 1 /Kids [3 0 R] >>',
         b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 64]'+page_attrs+b' /Resources '+resources+b' /Contents 4 0 R >>',
         stream(b'',content),
@@ -113,8 +132,7 @@ def fixture(name):
         b'<< /SMask 7 0 R '+parent+b' >>', mask, b'<< '+child+b' >>',
         b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
         transfer,
-        stream(b'/Type /XObject /Subtype /Form /BBox [0 0 96 64]'+form_group+b' /Resources '+form_resources,
-               b'1 0 0 rg 8 8 48 40 re f 0 0 1 rg 32 20 48 36 re f'),
+        stream(b'/Type /XObject /Subtype /Form /BBox [0 0 96 64]'+form_group+form_matrix+b' /Resources '+form_resources, form_body),
         b'null',
         b'<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [8 8 88 56] /Extend [true true] /Function 14 0 R >>',
         b'<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >>',
@@ -126,7 +144,11 @@ def fixture(name):
         stream(b'/Type /XObject /Subtype /Form /BBox [0 0 96 64] /Group << /S /Transparency /CS /DeviceRGB /I true >> /Resources '+resources,
                b'/CH gs 0 g 0 0 96 64 re f'),
         b'<< /Type /OCG /Name (Hidden mask) >>',
-    ])
+    ]
+    if group_text:
+        objects.append(stream(b'/Type /XObject /Subtype /Form /BBox [0 0 96 64] /Group << /S /Transparency /CS /DeviceRGB /I true >> /Resources '+resources,
+                              b'0 0 1 rg BT /F1 30 Tf 12 16 Td (A) Tj ET'))
+    return pdf_bytes(objects)
 
 
 if __name__ == '__main__':

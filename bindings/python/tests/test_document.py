@@ -7684,14 +7684,18 @@ def test_pdf_graphics_soft_masks_across_binding(kind):
             assert reopened.validate_references() == []
 
 
-@pytest.mark.parametrize("kind", ["text", "text-fill-stroke-alpha"])
-def test_masked_direct_pdf_text_retains_semantics(kind):
+@pytest.mark.parametrize("kind,expected", [
+    ("text", "A"), ("text-fill-stroke-alpha", "A"), ("group-text", "A"),
+    ("nested-group-text", "AB"), ("group-text-reuse", "AA"),
+    ("group-text-inner-mask", "A"), ("group-text-transform", "A"),
+])
+def test_masked_pdf_group_and_direct_text_retains_semantics(kind, expected):
     fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("soft-mask-" + kind + ".pdf")
     with Document.from_pdf_bytes(fixture.read_bytes()) as document:
-        assert document.page_text(0) == ["A"]
+        assert "".join(document.page_text(0)) == expected
         objects = document.page_text_objects(0)
-        assert len(objects) == 1
+        assert len(objects) > 0
         with Document.from_bytes(document.to_bytes()) as reopened:
-            assert reopened.page_text(0) == ["A"]
+            assert "".join(reopened.page_text(0)) == expected
             assert reopened.page_text_objects(0) == objects
             assert reopened.validate_references() == []

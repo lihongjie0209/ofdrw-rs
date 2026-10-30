@@ -4074,16 +4074,16 @@ test('import PDF graphics-state soft masks through the C ABI', () => {
 });
 
 
-test('masked direct PDF text retains semantics through the C ABI', () => {
-  for (const kind of ['text', 'text-fill-stroke-alpha']) {
+test('masked PDF group and direct text retains semantics through the C ABI', () => {
+  for (const [kind, expected] of [['text', 'A'], ['text-fill-stroke-alpha', 'A'], ['group-text', 'A'], ['nested-group-text', 'AB'], ['group-text-reuse', 'AA'], ['group-text-inner-mask', 'A'], ['group-text-transform', 'A']]) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture('soft-mask-' + kind + '.pdf')));
     try {
-      assert.deepEqual(document.pageText(0), ['A']);
+      assert.equal(document.pageText(0).join(''), expected);
       const objects = document.pageTextObjects(0);
-      assert.equal(objects.length, 1);
+      assert.ok(objects.length > 0);
       const reopened = Document.fromBytes(document.toBytes());
       try {
-        assert.deepEqual(reopened.pageText(0), ['A']);
+        assert.equal(reopened.pageText(0).join(''), expected);
         assert.deepEqual(reopened.pageTextObjects(0), objects);
         assert.deepEqual(reopened.validateReferences(), []);
       } finally { reopened.close(); }

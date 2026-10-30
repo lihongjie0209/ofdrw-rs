@@ -222,3 +222,68 @@ fn masked_and_unmasked_text_preserve_order_without_duplicates() {
         assert!(reopened.validate_references().unwrap().is_empty());
     }
 }
+
+mask_case!(group_text, "group-text");
+mask_case!(nested_group_text, "nested-group-text");
+mask_case!(group_text_reuse, "group-text-reuse");
+mask_case!(group_text_inner_mask, "group-text-inner-mask");
+mask_case!(group_text_transform, "group-text-transform");
+
+#[test]
+fn masked_group_text_retains_order_geometry_and_unique_ids() {
+    for (name, expected) in [
+        ("group-text", "A"),
+        ("nested-group-text", "AB"),
+        ("group-text-reuse", "AA"),
+        ("group-text-inner-mask", "A"),
+        ("group-text-transform", "A"),
+    ] {
+        let bytes = std::fs::read(format!(
+            "{}/tests/fixtures/soft-mask-{name}.pdf",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(document.page_text(0).unwrap().concat(), expected, "{name}");
+        // Mask state does not alter text positioning. Compare with the same PDF
+        // with its masks cleared, rather than deriving expected coordinates
+        // from the semantic-layer implementation.
+        let mut control = lopdf::Document::load_mem(&bytes).unwrap();
+        for id in [(6, 0), (22, 0)] {
+            control
+                .get_object_mut(id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("SMask", lopdf::Object::Name(b"None".to_vec()));
+        }
+        let mut bytes = Vec::new();
+        control.save_to(&mut bytes).unwrap();
+        let control = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        for region in [
+            [0., 0., 40., 40.],
+            [0., 0., 10., 10.],
+            [10., 0., 10., 40.],
+            [20., 0., 20., 40.],
+        ] {
+            assert_eq!(
+                document.page_text_in_region(0, region).unwrap(),
+                control.page_text_in_region(0, region).unwrap(),
+                "{name}: {region:?}"
+            );
+        }
+        let before = document.page_png(0, 144.).unwrap();
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap().concat(), expected, "{name}");
+        assert_eq!(reopened.page_png(0, 144.).unwrap(), before);
+        assert!(
+            reopened.validate_references().unwrap().is_empty(),
+            "{name}: {:?}",
+            reopened.validate_references().unwrap()
+        );
+        document.add_blank_page(40., 30.).unwrap();
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap().concat(), expected);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+}
