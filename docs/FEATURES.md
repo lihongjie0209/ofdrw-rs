@@ -1322,6 +1322,18 @@ or DPI create a different cache key.
 
 Documents can be exported to a multi-page vector PDF with the same drawing
 coverage. Resolved fonts are embedded with ToUnicode maps for selectable text.
+Generated ToUnicode streams use `CMapType 2` and a minimal metadata header;
+normalization edits only font-referenced maps, preserving character mappings and
+embedded font data. The type follows the
+[Adobe ToUnicode tutorial](https://pdfa.org/norm-refs/5411.ToUnicode.pdf).
+Seventeen export cases cover masked text, nested groups, ligatures, Chinese,
+supplementary Unicode, variation selectors and rotated text. Tests decode Form
+font scopes with lopdf and compare original exported PDFs with Poppler using
+`OFDRW_PDFTOTEXT=pdftotext cargo test -p ofdrw --test pdf_text_export`.
+Linux CI requires the Poppler check. For the variation-selector fixture, lopdf
+emits extra replacement characters for unmapped glyphs while Poppler extracts
+the original characters; tests retain both reader-specific expectations.
+Right-to-left extraction order remains a separate limitation.
 OFD attachments export as PDF `EmbeddedFiles` with Unicode filenames and their
 original bytes. Duplicate attachment names receive distinct name-tree keys
 while retaining their filenames. Creation and modification timestamps are
@@ -1719,7 +1731,9 @@ available after saving and reopening the OFD. This semantic text describes the
 source text even where the mask hides glyphs. Group text is flattened into page
 coordinates with fresh IDs; existing composite resources are not modified.
 Invisible/zero-alpha objects and text used only in clip or pattern definitions
-are excluded. PDF export is not guaranteed to retain nonpainting text.
+are excluded. PDF export retains this nonpainting text through embedded fonts
+and ToUnicode maps; the export corpus verifies the tested soft-mask cases.
+Right-to-left extraction order still has the limitation described above.
 Unmasked text retains its native representation. Luminosity groups in other
 blending color spaces, transparent knockout groups and `AIS=true` shape masks
 remain unsupported. Existing painting restrictions continue to apply.

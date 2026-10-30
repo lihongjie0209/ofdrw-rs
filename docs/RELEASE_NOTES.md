@@ -1,5 +1,13 @@
 Unreleased source changes after v0.1.0:
 
+- PDF export normalizes font ToUnicode maps to type 2 and removes optional
+  CMapVersion/WMode metadata that prevents some readers from decoding them.
+  Character mappings and font payloads are retained. Seventeen text-export
+  cases verify masked text, nested groups, ligatures, Chinese, supplementary
+  Unicode, variation selectors and rotation. Linux CI also runs Poppler against
+  the exported PDFs. Native/Poppler differences for unmapped variation-cluster
+  glyphs remain explicit, and RTL extraction order is still unresolved.
+
 - Graphics-state PDF soft masks support Alpha and DeviceRGB Luminosity groups,
   BC backdrops and the four scalar transfer-function families. Activation CTM
   and resource scope, mask replacement/reset, nesting, image-mask precedence,
@@ -8,8 +16,8 @@ Unreleased source changes after v0.1.0:
   direct masked text and text inside nested isolated groups retain a native
   nonpainting semantic layer for extraction, search and positioned region queries after OFD save/reopen. Group placement
   is flattened with fresh object IDs, retaining font and glyph data without
-  modifying shared composite resources. Exported PDF text retention is not
-  guaranteed. Transparent knockout groups, other luminosity blending spaces and AIS shape masks remain unsupported.
+  modifying shared composite resources. PDF export retains the tested semantic
+  text cases through embedded fonts and ToUnicode maps. Transparent knockout groups, other luminosity blending spaces and AIS shape masks remain unsupported.
   Forty-four original-source raster scenes, analytic pixels, negative/unit
   coverage and Python/Go/Node integration cover the feature. Inline-image
   fractional alpha uses a Poppler reference; the other references use

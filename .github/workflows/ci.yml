@@ -77,6 +77,13 @@ jobs:
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo build -p ofdrw-ffi --locked
+      - name: Independent PDF text extraction
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+          OFDRW_PDFTOTEXT=pdftotext cargo test -p ofdrw --test pdf_text_export --locked
       - name: Release PDF corpus regression
         if: matrix.runner == 'ubuntu-24.04'
         run: cargo test --release -p ofdrw --locked imports_java_xbrl_pdf_with_rgb_page_group_in_release_mode

@@ -19548,9 +19548,15 @@ mod tests {
         };
         assert_eq!(unsafe { ofd_to_pdf(handle, &mut output) }, 0);
         let pdf = unsafe { std::slice::from_raw_parts(output.data, output.len) };
-        assert!(pdf
-            .windows(b"/Subtype /Link".len())
-            .any(|slice| slice == b"/Subtype /Link"));
+        let imported = OfdDocument::from_pdf_bytes(pdf).unwrap();
+        let annotations = imported.annotations().unwrap();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].annotation_type, "Link");
+        assert_eq!(annotations[0].actions[0].kind, "URI");
+        assert_eq!(
+            annotations[0].actions[0].attributes["URI"],
+            "https://example.org/?a=1&b=2"
+        );
         unsafe { ofd_buffer_free(output) };
         assert_ne!(
             unsafe { ofd_add_page_object_uri_action(handle, 0, id.as_ptr(), ptr::null()) },
