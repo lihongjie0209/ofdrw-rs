@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- OFD-A preparation removes Audio/Video declarations from document, public,
+  page and referenced-template resource scopes. Existing action normalization
+  removes playback actions. Obsolete payloads are pruned only when no XML value
+  still references them; shared images and the implicit OFD.xml entry point are
+  retained. Namespace lookalikes and foreign-wrapped image/media declarations
+  are left intact. Core and Python/Go/Node tests cover resource scopes, source
+  preservation, round trips and path/reference edge cases. Other unresolved
+  OFD-A rules still require inspection after conversion.
+
 - PDF export decomposes matching glyph-mapped RTL text into hidden positioned
   graphemes, fixing the tested Lam-Alef extraction reversals while retaining
   original outlines, explicit spaces and OFD/public-SVG logical text. Eleven

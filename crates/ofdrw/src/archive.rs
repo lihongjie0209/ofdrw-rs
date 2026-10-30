@@ -7,7 +7,7 @@ impl OfdDocument {
     ///
     /// This applies the metadata and presentation normalizations currently
     /// supported by this crate: `DocType`, permission, viewer preference, and extension declarations,
-    /// image interpolation, GIF images, custom image data, misplaced public and
+    /// image interpolation, GIF images, audio/video declarations, custom image data, misplaced public and
     /// page resources, safe horizontal text scaling, plain deep PageBlock wrappers and zero-area clips in pages
     /// and referenced templates, non-Goto actions, binary attachment summaries,
     /// plain annotation appearance blocks, annotation flags, duplicate page layer names,
@@ -133,9 +133,28 @@ impl OfdDocument {
             let mut edits = Vec::new();
             for media in resource
                 .descendants()
-                .filter(|node| is_ofd_element(*node, "MultiMedia"))
+                .filter(|node| is_ofd_descendant(*node, resource.root_element(), "MultiMedia"))
             {
-                if media.attribute("Type") != Some("Image") {
+                let kind = media.attribute("Type").unwrap_or("");
+                if kind.eq_ignore_ascii_case("Audio") || kind.eq_ignore_ascii_case("Video") {
+                    for file in media
+                        .children()
+                        .filter(|node| is_ofd_element(*node, "MediaFile"))
+                    {
+                        let loc = element_text(file);
+                        let loc = loc.trim();
+                        if loc.is_empty() || is_external_url(loc) {
+                            continue;
+                        }
+                        let path = resolve_path(&base, loc)?;
+                        if let Some(actual) = self.matching_entry_path(&path)? {
+                            obsolete_entries.insert(actual);
+                        }
+                    }
+                    edits.push((media.range(), String::new()));
+                    continue;
+                }
+                if kind != "Image" {
                     continue;
                 }
                 edits.extend(
@@ -1415,6 +1434,10 @@ fn archive_goto_action(action: Node<'_, '_>, namespace: Option<&str>) -> bool {
 
 fn prune_archive_obsolete_entries(document: &mut OfdDocument, paths: HashSet<String>) {
     for path in paths {
+        // The package entry point is an implicit reference, not an XML link.
+        if path.eq_ignore_ascii_case("OFD.xml") {
+            continue;
+        }
         let basename = path
             .rsplit('/')
             .next()
@@ -4438,5 +4461,187 @@ mod tests {
             prepared.attachments().unwrap()[0].format.as_deref(),
             Some("XML")
         );
+    }
+
+    fn audiovisual_archive_source(kind: &str, loc: &str) -> OfdDocument {
+        let mut doc = archival_document();
+        let path = "Doc_0/PublicRes.xml";
+        let xml = std::str::from_utf8(doc.required_entry(path).unwrap()).unwrap();
+        let xml = xml.replace("</ofd:Res>", &format!("<ofd:MultiMedias><ofd:MultiMedia ID=\"42\" Type=\"{kind}\"><ofd:MediaFile>{loc}</ofd:MediaFile></ofd:MultiMedia></ofd:MultiMedias></ofd:Res>"));
+        doc.set_entry(path, xml.into_bytes()).unwrap();
+        doc
+    }
+
+    #[test]
+    fn archival_preparation_removes_audio_video_and_preserves_the_source() {
+        for kind in ["Audio", "Video", "aUdIo", "vIdEo"] {
+            let mut source = audiovisual_archive_source(kind, "tone.bin");
+            source
+                .set_entry("Doc_0/Res/tone.bin", b"original media".to_vec())
+                .unwrap();
+            let before = source.to_bytes().unwrap();
+            let prepared = source.prepare_archive().unwrap();
+            assert!(prepared
+                .archive_violations()
+                .unwrap()
+                .iter()
+                .all(|v| v.rule != "AUDIO_VIDEO"));
+            assert!(prepared.entry("Doc_0/Res/tone.bin").unwrap().is_none());
+            assert!(prepared
+                .document_multimedia_resources(0)
+                .unwrap()
+                .is_empty());
+            assert_eq!(source.to_bytes().unwrap(), before);
+            assert_eq!(prepared.page_text(0).unwrap(), source.page_text(0).unwrap());
+            assert!(prepared.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn archival_audio_paths_join_comments_cdata_and_unique_case() {
+        let mut source =
+            audiovisual_archive_source("Audio", "Nested/to<!--split-->ne<![CDATA[.MP3]]>");
+        source
+            .set_entry("Doc_0/Res/nested/TONE.mp3", b"audio".to_vec())
+            .unwrap();
+        let prepared = source.prepare_archive().unwrap();
+        assert!(prepared
+            .entry("Doc_0/Res/nested/TONE.mp3")
+            .unwrap()
+            .is_none());
+        assert!(prepared
+            .document_multimedia_resources(0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn archival_audio_missing_external_and_absent_payloads_need_no_fetch() {
+        for loc in ["missing.wav", "https://example.invalid/video.mp4", ""] {
+            let source = audiovisual_archive_source("Audio", loc);
+            let prepared = source.prepare_archive().unwrap();
+            assert!(prepared
+                .archive_violations()
+                .unwrap()
+                .iter()
+                .all(|v| v.rule != "AUDIO_VIDEO"));
+        }
+    }
+
+    #[test]
+    fn archival_audio_keeps_payloads_referenced_by_other_xml() {
+        let mut source = audiovisual_archive_source("Audio", "tone.mp3");
+        source
+            .set_entry("Doc_0/Res/tone.mp3", b"shared audio".to_vec())
+            .unwrap();
+        source
+            .set_entry(
+                "Custom.XML",
+                b"<keep><file>Doc_0/Res/to<!--split-->ne<![CDATA[.mp3]]></file></keep>".to_vec(),
+            )
+            .unwrap();
+        let prepared = source.prepare_archive().unwrap();
+        assert_eq!(
+            prepared.entry("Doc_0/Res/tone.mp3").unwrap(),
+            Some(b"shared audio".as_slice())
+        );
+        assert!(prepared
+            .document_multimedia_resources(0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn archival_audio_rejects_ambiguous_case_and_traversal_without_mutation() {
+        let mut ambiguous = audiovisual_archive_source("Video", "tone.mp4");
+        ambiguous
+            .set_entry("Doc_0/Res/tone.mp4", b"first".to_vec())
+            .unwrap();
+        ambiguous
+            .set_entry("Doc_0/Res/TONE.mp4", b"second".to_vec())
+            .unwrap();
+        let traversal = audiovisual_archive_source("Video", "../../../escape.mp4");
+        for source in [ambiguous, traversal] {
+            let before = source.to_bytes().unwrap();
+            assert!(source.prepare_archive().is_err());
+            assert_eq!(source.to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn archival_media_preserves_foreign_namespace_and_wrapped_lookalikes() {
+        let mut source = audiovisual_archive_source("Audio", "tone.mp3");
+        source
+            .set_entry("Doc_0/Res/tone.mp3", b"shared".to_vec())
+            .unwrap();
+        let path = "Doc_0/PublicRes.xml";
+        let xml = std::str::from_utf8(source.required_entry(path).unwrap()).unwrap();
+        let foreign = "<x:MultiMedia xmlns:x=\"urn:custom\" ID=\"43\" Type=\"Audio\"><x:MediaFile>tone.mp3</x:MediaFile></x:MultiMedia><x:Wrap xmlns:x=\"urn:custom\"><ofd:MultiMedia ID=\"44\" Type=\"Video\"><ofd:MediaFile>tone.mp3</ofd:MediaFile></ofd:MultiMedia></x:Wrap>";
+        let foreign_image = "<x:Wrap xmlns:x=\"urn:custom\"><ofd:MultiMedia ID=\"45\" Type=\"Image\" Format=\"GIF\"><ofd:MediaFile>opaque.gif</ofd:MediaFile></ofd:MultiMedia></x:Wrap>";
+        let xml = xml.replace("</ofd:Res>", &format!("{foreign}{foreign_image}</ofd:Res>"));
+        source.set_entry(path, xml.into_bytes()).unwrap();
+        source
+            .set_entry(
+                "Doc_0/Res/opaque.gif",
+                b"GIF89a opaque extension data".to_vec(),
+            )
+            .unwrap();
+        let prepared = source.prepare_archive().unwrap();
+        let xml = std::str::from_utf8(prepared.required_entry(path).unwrap()).unwrap();
+        assert!(xml.contains(foreign));
+        assert!(xml.contains(foreign_image));
+        assert_eq!(
+            prepared.entry("Doc_0/Res/opaque.gif").unwrap(),
+            Some(b"GIF89a opaque extension data".as_slice())
+        );
+        assert!(!xml.contains("ID=\"42\""));
+        assert_eq!(
+            prepared.entry("Doc_0/Res/tone.mp3").unwrap(),
+            Some(b"shared".as_slice())
+        );
+    }
+
+    #[test]
+    fn archival_audio_pruning_keeps_payloads_when_other_xml_cannot_be_read() {
+        let mut source = archival_document();
+        let path = "Doc_0/Res/tone.mp3";
+        source.set_entry(path, b"shared".to_vec()).unwrap();
+        source
+            .entries
+            .insert("Unknown.xml".into(), b"<unknown".to_vec());
+        prune_archive_obsolete_entries(&mut source, HashSet::from([path.to_owned()]));
+        assert!(source.entry(path).unwrap().is_some());
+    }
+
+    #[test]
+    fn archival_media_legacy_namespaces_remove_only_the_real_resource() {
+        let mut source = audiovisual_archive_source("Video", "tone.mp4");
+        source
+            .set_entry("Doc_0/Res/tone.mp4", b"video".to_vec())
+            .unwrap();
+        let path = "Doc_0/PublicRes.xml";
+        let xml = std::str::from_utf8(source.required_entry(path).unwrap())
+            .unwrap()
+            .replace(OFD_NS, OFD_NS_LEGACY);
+        source.set_entry(path, xml.into_bytes()).unwrap();
+        let prepared = source.prepare_archive().unwrap();
+        assert!(prepared.entry("Doc_0/Res/tone.mp4").unwrap().is_none());
+        assert!(prepared
+            .document_multimedia_resources(0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn archival_audio_keeps_the_implicit_package_entry_point() {
+        let source = audiovisual_archive_source("Audio", "/OFD.xml");
+        let prepared = source.prepare_archive().unwrap();
+        assert!(prepared.entry("OFD.xml").unwrap().is_some());
+        assert_eq!(prepared.doc_roots().unwrap().len(), 1);
+        assert!(prepared
+            .document_multimedia_resources(0)
+            .unwrap()
+            .is_empty());
+        assert!(prepared.validate_references().unwrap().is_empty());
     }
 }

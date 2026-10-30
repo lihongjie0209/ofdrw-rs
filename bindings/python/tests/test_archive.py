@@ -271,3 +271,25 @@ def test_prepare_archive_creates_public_resources_across_python_binding():
             assert prepared.page_svg(0) == before
             assert prepared.validate_references() == []
             assert all(issue["rule"] != "RESOURCE_PLACEMENT" for issue in prepared.archive_violations())
+
+
+def test_prepare_archive_removes_document_and_page_audio_video():
+    with Document.new() as source:
+        source.add_blank_page(30, 20)
+        source.add_multimedia_resource(0, "Audio", "MP3", b"audio")
+        source.add_page_multimedia_resource(0, "Video", "MP4", b"video")
+        resources = source.page_multimedia_resources(0)
+        assert len(resources) == 2
+        assert any(item["rule"] == "AUDIO_VIDEO" for item in source.archive_violations())
+        before = source.to_bytes()
+        with source.prepare_archive() as prepared:
+            assert prepared.page_multimedia_resources(0) == []
+            assert all(item["rule"] != "AUDIO_VIDEO" for item in prepared.archive_violations())
+            for item in resources:
+                assert item["path"] not in prepared.entries()
+            assert prepared.validate_references() == []
+            with Document.from_bytes(prepared.to_bytes()) as reopened:
+                assert reopened.page_multimedia_resources(0) == []
+                assert reopened.validate_references() == []
+        assert source.to_bytes() == before
+        assert len(source.page_multimedia_resources(0)) == 2

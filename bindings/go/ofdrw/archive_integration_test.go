@@ -479,3 +479,76 @@ func TestPrepareArchiveCreatesPublicResourcesAcrossBinding(t *testing.T) {
 		}
 	}
 }
+
+func TestPrepareArchiveRemovesAudioVideoAcrossBinding(t *testing.T) {
+	doc, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	if err := doc.AddBlankPage(30, 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.AddMultimediaResource(0, "Audio", "MP3", []byte("audio")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.AddPageMultimediaResource(0, "Video", "MP4", []byte("video")); err != nil {
+		t.Fatal(err)
+	}
+	resources, err := doc.PageMultimediaResources(0)
+	if err != nil || len(resources) != 2 {
+		t.Fatalf("source media: %+v, %v", resources, err)
+	}
+	before, err := doc.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := doc.PrepareArchive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	media, err := prepared.PageMultimediaResources(0)
+	if err != nil || len(media) != 0 {
+		t.Fatalf("prepared media: %+v, %v", media, err)
+	}
+	issues, err := prepared.ArchiveViolations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, issue := range issues {
+		if issue.Rule == "AUDIO_VIDEO" {
+			t.Fatalf("audio/video violation remains: %+v", issue)
+		}
+	}
+	entries, err := prepared.Entries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range resources {
+		if slices.Contains(entries, resource.Path) {
+			t.Fatalf("obsolete media remains: %s", resource.Path)
+		}
+	}
+	data, err := prepared.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := FromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	media, err = reopened.PageMultimediaResources(0)
+	if err != nil || len(media) != 0 {
+		t.Fatalf("reopened media: %+v, %v", media, err)
+	}
+	refs, err := reopened.ValidateReferences()
+	if err != nil || len(refs) != 0 {
+		t.Fatalf("prepared references: %+v, %v", refs, err)
+	}
+	after, err := doc.ToBytes()
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("source changed: %v", err)
+	}
+}

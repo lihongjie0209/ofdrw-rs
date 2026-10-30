@@ -4111,3 +4111,30 @@ test('shaped RTL PDF export keeps OFD and public SVG logical text', () => {
     } finally { document.close(); }
   }
 });
+
+test('archival preparation removes audio and video from document and page resources', () => {
+  const source = Document.create();
+  try {
+    source.addBlankPage(30, 20);
+    source.addMultimediaResource(0, 'Audio', 'MP3', Buffer.from('audio'));
+    source.addPageMultimediaResource(0, 'Video', 'MP4', Buffer.from('video'));
+    const resources = source.pageMultimediaResources(0);
+    assert.equal(resources.length, 2);
+    assert.ok(source.archiveViolations().some(item => item.rule === 'AUDIO_VIDEO'));
+    const before = source.toBytes();
+    const prepared = source.prepareArchive();
+    try {
+      assert.deepEqual(prepared.pageMultimediaResources(0), []);
+      assert.ok(!prepared.archiveViolations().some(item => item.rule === 'AUDIO_VIDEO'));
+      for (const item of resources) assert.ok(!prepared.entries().includes(item.path));
+      assert.deepEqual(prepared.validateReferences(), []);
+      const reopened = Document.fromBytes(prepared.toBytes());
+      try {
+        assert.deepEqual(reopened.pageMultimediaResources(0), []);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { prepared.close(); }
+    assert.deepEqual(source.toBytes(), before);
+    assert.equal(source.pageMultimediaResources(0).length, 2);
+  } finally { source.close(); }
+});

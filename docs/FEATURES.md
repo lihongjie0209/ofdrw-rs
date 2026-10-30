@@ -2906,7 +2906,10 @@ are partial, and OFD-A conversion is incomplete.
 `ofd_prepare_archive()` (C) return a separate package after setting `DocType`
 to `OFD-A`, removing document permission, viewer preference, and extension declarations, disabling
 image interpolation in pages, referenced templates, and annotation appearances,
-converting GIF image resources referenced through pages or templates to PNG, moving compatible
+converting GIF image resources referenced through pages or templates to PNG,
+removing Audio/Video declarations from linked document/public resources and
+resources used by pages or referenced templates (including legacy OFD namespaces),
+moving compatible
 misplaced public resources into an existing or newly linked `DocumentRes` and page or template fonts/color spaces into
 `PublicRes` (creating a linked public resource file when needed), flattening
 pure horizontal `CTM` scaling into `HScale` for unrotated text without clips or
@@ -2922,8 +2925,14 @@ referencing objects in pages and templates, setting annotation `ReadOnly`, `NoZo
 flags, removing redundant paint attributes from page, template, and annotation objects,
 and assigning unique names to duplicate direct page layers. Non-TXT/XML attachments are replaced with XML summaries containing their
 original name, format, byte count, and SHA-256 digest. Obsolete attachment and
-GIF payload files are removed when no XML value still references their paths;
-ambiguous references retain the old files.
+GIF and removed audio/video payload files are removed when no XML value still
+references their paths; ambiguous references retain the old files. Shared image
+payloads, foreign-namespace declarations and OFD-looking declarations inside
+foreign wrappers are retained. `OFD.xml` remains protected as the implicit package
+entry point even if a removed media declaration names it. Playback actions are
+removed by the existing non-Goto action normalization. Tests cover document,
+page and template-only media, shared payloads, source preservation, saved output
+and path/namespace edge cases across the Rust core and language bindings.
 
 Archival checks and preparation join XML text split by comments or CDATA when
 reading resource paths, text codes, external URLs, and `MaxUnitID`; replacing a
