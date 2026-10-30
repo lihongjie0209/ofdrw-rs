@@ -8,6 +8,7 @@ mod archive;
 mod bilevel;
 mod encryption;
 mod pdf_calculator;
+mod pdf_export;
 mod pdf_import;
 
 pub use encryption::{
@@ -17877,7 +17878,7 @@ impl OfdDocument {
             pdf.stream(content_ref, &content.finish());
             pdf.extend(&chunk);
         }
-        Ok(pdf.finish())
+        pdf_export::finish(pdf.finish())
     }
 
     fn render_svg_object(
@@ -17987,7 +17988,11 @@ impl OfdDocument {
             "luminosity" => "luminosity",
             _ => return Err(OfdError::Invalid("unsupported graphic BlendMode".into())),
         };
-        let blend_style = if blend_mode == "normal" {
+        // A composite graphic unit is painted as one object. Its children
+        // must blend against the group's transparent backdrop, not the page.
+        let blend_style = if is_element(object, "CompositeObject") {
+            format!(" style=\"isolation:isolate;mix-blend-mode:{blend_mode}\"")
+        } else if blend_mode == "normal" {
             String::new()
         } else {
             format!(" style=\"mix-blend-mode:{blend_mode}\"")

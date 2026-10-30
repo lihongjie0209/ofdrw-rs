@@ -5,6 +5,7 @@ mod cid_encoding;
 mod cid_unicode;
 mod device_n;
 mod font_style;
+mod isolated_group;
 mod jpx_color;
 mod mesh_shading;
 mod multi_function;
@@ -72,6 +73,7 @@ struct GraphicsState {
     stroke_pattern: Option<Arc<pattern::Source>>,
     active_patterns: Vec<Option<ObjectId>>,
     uncolored_pattern: bool,
+    isolated_group: bool,
 }
 
 #[derive(Clone)]
@@ -357,6 +359,7 @@ impl Default for GraphicsState {
             stroke_pattern: None,
             active_patterns: Vec::new(),
             uncolored_pattern: false,
+            isolated_group: false,
         }
     }
 }
@@ -683,12 +686,17 @@ fn page_rotation(pdf: &PdfDocument, id: ObjectId) -> Result<u16, OfdError> {
     Ok(degrees.rem_euclid(360) as u16)
 }
 
+#[derive(Clone, Copy)]
+struct TransparencyGroup {
+    isolated: bool,
+    knockout: bool,
+}
+
 fn validate_rgb_transparency_group(
     pdf: &PdfDocument,
     value: &Object,
     owner: &str,
-    allow_opaque_flags: bool,
-) -> Result<bool, OfdError> {
+) -> Result<TransparencyGroup, OfdError> {
     let (_, value) = pdf
         .dereference(value)
         .map_err(|error| OfdError::Invalid(format!("invalid PDF {owner} group: {error}")))?;
@@ -713,9 +721,6 @@ fn validate_rgb_transparency_group(
     let color_space = entry(b"CS")?;
     let isolated = entry(b"I")?;
     let knockout = entry(b"K")?;
-    let requires_opaque_content = [isolated.as_ref(), knockout.as_ref()]
-        .into_iter()
-        .any(|value| value.is_some_and(|value| value.as_bool().ok() == Some(true)));
     if group_type
         .as_ref()
         .is_some_and(|value| value.as_name().ok() != Some(b"Group"))
@@ -723,18 +728,23 @@ fn validate_rgb_transparency_group(
         || color_space
             .as_ref()
             .is_some_and(|value| value.as_name().ok() != Some(b"DeviceRGB"))
-        || [isolated, knockout].iter().any(|value| {
-            value.as_ref().is_some_and(|value| match value.as_bool() {
-                Ok(flag) => flag && !allow_opaque_flags,
-                Err(_) => true,
-            })
-        })
+        || [isolated.as_ref(), knockout.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|value| value.as_bool().is_err())
     {
         return Err(OfdError::Invalid(format!(
             "PDF {owner} transparency group is unsupported"
         )));
     }
-    Ok(requires_opaque_content)
+    Ok(TransparencyGroup {
+        isolated: isolated
+            .as_ref()
+            .is_some_and(|v| v.as_bool().ok() == Some(true)),
+        knockout: knockout
+            .as_ref()
+            .is_some_and(|v| v.as_bool().ok() == Some(true)),
+    })
 }
 
 fn queue_object_attribute(
@@ -6561,12 +6571,13 @@ fn import_form(
     let stream = value
         .as_stream()
         .map_err(|_| OfdError::Invalid("PDF Form XObject is not a stream".into()))?;
-    let has_transparency_group = if let Ok(group) = stream.dict.get(b"Group") {
-        validate_rgb_transparency_group(page.pdf, group, "Form", true)?;
-        true
-    } else {
-        false
-    };
+    let group = stream
+        .dict
+        .get(b"Group")
+        .ok()
+        .map(|group| validate_rgb_transparency_group(page.pdf, group, "Form"))
+        .transpose()?;
+    let isolated = group.is_some_and(|group| group.isolated && !group.knockout);
     if let Ok(form_type) = stream.dict.get(b"FormType") {
         if form_type.as_i64().ok() != Some(1) {
             return Err(OfdError::Invalid("unsupported PDF FormType".into()));
@@ -6579,6 +6590,15 @@ fn import_form(
         return Err(OfdError::Invalid("cyclic PDF Form XObject".into()));
     }
     let mut graphics = state.clone();
+    if isolated {
+        // Group alpha/blending and the caller's clip apply to the finished
+        // group; constituent objects start with default transparency values.
+        graphics.fill_alpha = 1.;
+        graphics.stroke_alpha = 1.;
+        graphics.blend_mode = "Normal";
+        graphics.clips.clear();
+        graphics.isolated_group = true;
+    }
     if let Ok(matrix) = stream.dict.get(b"Matrix") {
         let (_, matrix) = page
             .pdf
@@ -6635,7 +6655,7 @@ fn import_form(
         return Err(OfdError::Limit("PDF Form content is too large".into()));
     }
     let content = decode_pdf_content_with_inline_images(&bytes, page.pdf, resources)?;
-    if has_transparency_group {
+    if group.is_some() && !isolated {
         if state.fill_alpha != 1.0 || state.stroke_alpha != 1.0 || state.blend_mode != "Normal" {
             return Err(OfdError::Invalid(
                 "PDF Form transparency group requires opaque content".into(),
@@ -6651,7 +6671,11 @@ fn import_form(
     if let Some(id) = form_id {
         active_forms.push(id);
     }
-    let result = import_content(output, &nested_page, content, graphics, active_forms);
+    let result = if isolated {
+        isolated_group::import(output, &nested_page, state, content, graphics, active_forms)
+    } else {
+        import_content(output, &nested_page, content, graphics, active_forms)
+    };
     if form_id.is_some() {
         active_forms.pop();
     }
@@ -7755,7 +7779,10 @@ fn import_page(
     let requires_opaque_content = page
         .get(b"Group")
         .ok()
-        .map(|group| validate_rgb_transparency_group(pdf, group, "page", true))
+        .map(|group| {
+            validate_rgb_transparency_group(pdf, group, "page")
+                .map(|group| group.isolated || group.knockout)
+        })
         .transpose()?
         .unwrap_or(false);
     let bytes = pdf
@@ -8049,7 +8076,10 @@ fn import_content(
                     .as_name()
                     .map_err(|_| OfdError::Invalid("PDF gs has no resource name".into()))?;
                 apply_ext_gstate(pdf, page_context.resources, name, &mut state, &mut text)?;
-                if !state.active_patterns.is_empty() && state.blend_mode != "Normal" {
+                if !state.active_patterns.is_empty()
+                    && !state.isolated_group
+                    && state.blend_mode != "Normal"
+                {
                     return Err(OfdError::Invalid(
                         "PDF Pattern cells with non-Normal blending are unsupported".into(),
                     ));

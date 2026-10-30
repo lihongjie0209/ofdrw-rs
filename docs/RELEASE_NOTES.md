@@ -1,5 +1,22 @@
 Unreleased source changes after v0.1.0:
 
+- Isolated PDF Form transparency groups (`I=true`, `K=false`) import as native
+  vector composite graphic units. Group opacity/blending/clipping applies once
+  after member composition; member alpha and blend mode start at defaults.
+  Nested groups, text, images, gradients and Forms inside pattern cells retain
+  resources and text extraction. Composite SVG rendering now enforces isolation.
+  Twenty-eight source/reference scenes, analytic opacity/backdrop checks,
+  negative/unit coverage and Python/Go/Node integration cover the feature.
+  One reference uses original-source Poppler because Ghostscript loses Form
+  isolation inside a pattern; the others use original-source Ghostscript.
+  Optional Ghostscript export checks cover every scene. Transparent non-isolated
+  and knockout groups and graphics-state soft masks remain unsupported.
+
+- Generated PDF raster images and alpha masks set `Interpolate=true`, matching
+  SVG/PNG preview sampling. Their original image samples are preserved. PDF
+  import still does not preserve enlarged nearest-neighbor image display when
+  the source uses `Interpolate=false`; that separate limitation is documented.
+
 - General PDF radial shading supports nonnested/equal-radius circles, separate
   endpoint extension, point circles and the tangent linear limit. A stable
   quadratic selects the greatest valid parameter with a nonnegative radius.

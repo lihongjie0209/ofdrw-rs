@@ -1532,12 +1532,28 @@ codestream samples before applying color-key masks and retains embedded opacity.
 Form XObjects import recursively with their matrix, BBox clipping, inherited
 graphics state, and local font, image, and ExtGState resources. Nested forms
 restore the caller's state and cyclic references return an error. Form
-transparency groups with DeviceRGB or an inherited blending space and opaque content
-are imported, including isolated and knockout groups; nested Forms and image
-XObjects, inline images, and supported axial or radial shadings are also
-imported when their content can be checked recursively as opaque. Groups with
-transparency state, image masks, or image alpha still return an error because
-group compositing is not represented.
+transparency groups with DeviceRGB or an inherited RGB blending space and
+`I=true`, `K=false` import as native OFD composite graphic units. Their members
+start with Normal blending and alpha constants of 1; the caller's nonstroking
+alpha, blend mode and clip apply once to the finished group. Overlapping
+translucent members therefore retain their group opacity. Internal blend modes
+see a transparent backdrop, including when an isolated Form appears inside a
+tiling-pattern cell. Text, paths, images, gradients and nested groups retain
+native resources and text extraction; no raster fallback is introduced.
+Ordinary Forms retain individual-object painting semantics. Non-isolated and
+knockout groups remain accepted only when recursively proven opaque; transparent
+versions of those groups and graphics-state soft masks remain unsupported.
+
+Twenty-eight authored group scenes have original-PDF raster references and OFD
+round-trip tests. Twenty-seven use Ghostscript; the Form-inside-pattern scene
+uses Poppler because Ghostscript 10.02 loses isolation in that case. Independent
+pixel-formula assertions check opacity, stroke-alpha reset and transparent
+backdrops. Export tests check native isolated PDF groups without image fallback;
+set `OFDRW_GHOSTSCRIPT=gs` when running `cargo test -p ofdrw --test
+isolated_group_pdf_import` to also render every exported PDF against its source
+reference. `scripts/generate_isolated_group_fixtures.py --references` regenerates
+the PDFs and rasters (requires Ghostscript and Poppler). Group execution follows
+[PDF 32000-1, section 11.6.6](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
 
 Reference XObjects import the embedded Form proxy appearance, including its
 matrix and BBox. The referenced external PDF page is not fetched. A page-level
@@ -1669,6 +1685,11 @@ a one-bit image-mask XObject also imports as RGBA PNG; its `Decode` polarity,
 row padding, and different mask resolution are respected. Directly painted
 image-mask XObjects use the current nonstroking RGB/gray color and also import
 as RGBA PNG. Graphics-state soft masks remain unsupported.
+Image display resampling currently follows the SVG renderer's smooth sampling.
+PDF `Interpolate=false` nearest-neighbor display is not preserved when enlarging
+an image; this is separate from the mask-resolution resampling described above.
+PDF export now sets `Interpolate=true` on its generated raster-image and alpha
+streams to retain the same sampling as SVG/PNG previews.
 
 Positive PDF `/UserUnit` page scaling (up to 75,000) applies to page boxes,
 paths, strokes, Type1 text, images, and clipping geometry. PDF `/Rotate`
@@ -2205,7 +2226,7 @@ preserved. Modes 4–7 also preserve glyph clipping after `ET`, including the
 union of multiple text runs and `q`/`Q` clip restoration. Zero-width text
 strokes use a 0.1 mm display width, matching imported zero-width paths.
 
-Transparency, graphics-state soft masks, and other
+Transparent non-isolated/knockout groups, graphics-state soft masks, and other
 unsupported painting operators currently return an error; this importer is
 not yet a complete PDF converter.
 PDF `BX`/`EX` compatibility sections may be nested. Unknown extension

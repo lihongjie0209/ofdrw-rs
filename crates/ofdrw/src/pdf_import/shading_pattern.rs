@@ -76,6 +76,7 @@ impl Source {
         state.fill_alpha = 1.;
         state.stroke_alpha = 1.;
         state.blend_mode = "Normal";
+        state.isolated_group = false;
         state.fill_pattern = None;
         state.stroke_pattern = None;
         if let Some(ext) = &self.ext_gstate {

@@ -170,6 +170,7 @@ impl Source {
         state.fill_alpha = 1.;
         state.stroke_alpha = 1.;
         state.blend_mode = "Normal";
+        state.isolated_group = false;
         state.active_patterns = current.active_patterns.clone();
         state.active_patterns.push(self.id);
         state.uncolored_pattern = self.uncolored;

@@ -4040,3 +4040,19 @@ test('import general radial shadings through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+test('import isolated transparency groups through the C ABI', () => {
+  for (const kind of ['group-alpha', 'child-screen', 'clip', 'text', 'image-alpha', 'nested', 'pattern-cell']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('isolated-group-' + kind + '.pdf')));
+    try {
+      assert.equal(document.pageCount, 1);
+      assert.ok(document.pageSvg(0).includes('isolation:isolate'));
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
