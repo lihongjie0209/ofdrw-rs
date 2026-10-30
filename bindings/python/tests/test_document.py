@@ -12,6 +12,13 @@ from ofdrw_rs import Document, OfdError, create_ses_seal
 FIXTURES = Path(__file__).resolve().parents[4] / "ofdrw-reader" / "src" / "test" / "resources"
 
 
+def exported_pdf_link_count(document):
+    # PDF serialization may compact dictionary whitespace or compress objects.
+    # Reimport the exported PDF and inspect actual link annotations instead.
+    with Document.from_pdf_bytes(document.to_pdf()) as imported:
+        return sum(item["type"] == "Link" for item in imported.annotations())
+
+
 def test_explicit_native_library_path_does_not_fall_back(tmp_path):
     missing = tmp_path / "missing-native-library"
     environment = dict(os.environ, OFDRW_LIB_PATH=str(missing))
@@ -1035,7 +1042,7 @@ def test_promotes_and_applies_page_template(tmp_path):
         document.add_blank_page(30, 20)
         document.apply_page_template(2, template_id, "Foreground")
         assert document.page_text_with_templates(2) == ["shared"]
-        assert document.to_pdf().count(b"/Subtype /Link") == 3
+        assert exported_pdf_link_count(document) == 3
         before = document.page_sources(2)
         with pytest.raises(OfdError):
             document.apply_page_template(2, template_id)
@@ -3123,7 +3130,7 @@ def test_imports_pdf_link_annotations():
         assert len(annotations) == 2
         assert annotations[0]["actions"][0]["attributes"]["URI"] == "https://example.com/?a=1&b=2"
         assert annotations[1]["actions"][0]["destination"]["page_id"] == document.pages()[1]["id"]
-        assert document.to_pdf().count(b"/Subtype /Link") == 2
+        assert exported_pdf_link_count(document) == 2
         assert document.validate_references() == []
 
 
@@ -3269,7 +3276,7 @@ def test_imports_named_pdf_link_destinations(tmp_path):
         assert [item["actions"][0]["destination"]["kind"] for item in annotations] == ["XYZ", "Fit"]
         assert annotations[0]["actions"][0]["destination"]["zoom"] == 1.25
         assert all(item["actions"][0]["destination"]["page_id"] == document.pages()[1]["id"] for item in annotations)
-        assert document.to_pdf().count(b"/Subtype /Link") == 2
+        assert exported_pdf_link_count(document) == 2
         document.save(path)
     with Document.open(path) as reopened:
         assert reopened.annotations() == annotations
@@ -3282,7 +3289,7 @@ def test_imports_pdf_link_quadrilaterals(tmp_path):
         annotations = document.annotations()
         assert len(annotations[0]["actions"][0]["region"]["areas"]) == 2
         assert annotations[0]["actions"][0]["region"]["areas"][0]["commands"][3]["kind"] == "Close"
-        assert document.to_pdf().count(b"/Subtype /Link") == 2
+        assert exported_pdf_link_count(document) == 2
         document.save(path)
     with Document.open(path) as reopened:
         assert reopened.annotations() == annotations
@@ -4817,7 +4824,7 @@ def test_adds_goto_and_bookmark_link_annotations():
         assert [item["id"] for item in annotations] == [str(goto_id), str(bookmark_id)]
         assert annotations[0]["actions"][0]["destination"]["page_id"] == target
         assert annotations[1]["actions"][0]["bookmark"] == "chapter & 2"
-        assert document.to_pdf().count(b"/Subtype /Link") == 2
+        assert exported_pdf_link_count(document) == 2
         assert document.validate_references() == []
         with pytest.raises(OfdError):
             document.add_bookmark_link_annotation(0, "missing", (1, 1, 2, 2))
@@ -5097,7 +5104,7 @@ def test_adds_uri_actions_to_page_object(tmp_path):
         actions = document.page_object_actions(0, object_id)
         assert [item["kind"] for item in actions] == ["URI", "URI"]
         assert actions[0]["attributes"]["URI"] == "https://example.org/?a=1&b=2"
-        assert document.to_pdf().count(b"/Subtype /Link") == 1
+        assert exported_pdf_link_count(document) == 1
         document.save(path)
     with Document.open(path) as reopened:
         assert reopened.page_object_actions(0, object_id) == actions
@@ -5118,7 +5125,7 @@ def test_action_regions_roundtrip_and_pdf_links(tmp_path):
         action = document.page_object_actions(0, object_id)[0]
         assert len(action["region"]["areas"]) == 2
         assert action["region"]["areas"][0]["start"] == [2, 3]
-        assert document.to_pdf().count(b"/Subtype /Link") == 1
+        assert exported_pdf_link_count(document) == 1
         document.save(path)
     with Document.open(path) as reopened:
         assert reopened.page_object_actions(0, object_id)[0] == action
@@ -5144,7 +5151,7 @@ def test_adds_goto_action_with_page_destination(tmp_path):
         assert action["kind"] == "Goto"
         assert action["destination"]["page_id"] == str(page_id)
         assert action["destination"]["left"] == 12.5
-        assert document.to_pdf().count(b"/Subtype /Link") == 1
+        assert exported_pdf_link_count(document) == 1
         document.save(path)
     with Document.open(path) as reopened:
         assert reopened.page_object_actions(0, object_id)[0] == action
