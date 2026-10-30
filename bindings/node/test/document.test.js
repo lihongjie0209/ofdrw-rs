@@ -1877,6 +1877,26 @@ test('import indirect optional PDF content through Node.js', () => {
   }
 });
 
+test('import PDF normal annotation appearances through Node.js', () => {
+  for (const name of ['matrix', 'widget', 'link', 'image']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(`annotation-ap-${name}.pdf`)));
+    try {
+      assert.equal(document.pageCount, 1);
+      const annotations = document.annotations();
+      assert.equal(annotations.length, 1);
+      assert.equal(annotations[0].remark, 'custom appearance');
+      if (name === 'link') assert.equal(annotations[0].actions[0].attributes.URI, 'https://example.com/appearance');
+      const png = document.pagePng(0, 144);
+      assert.deepEqual(document.validateReferences(), []);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 144), png);
+        assert.equal(reopened.toPdf().subarray(0, 5).toString(), '%PDF-');
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
+
 test('import a sixteen-bit PDF image through the C ABI', () => {
   const document = Document.fromPdfBytes(fs.readFileSync(fixture('gray-16-bit.pdf')));
   try {

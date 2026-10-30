@@ -1,5 +1,15 @@
 Unreleased source changes after v0.1.0:
 
+- PDF annotation normal appearances import as native OFD composite appearances,
+  including state selection, transformed BBox/Rect placement, rotation, CropBox,
+  UserUnit, inherited resources, embedded text/images and supported transparency.
+  Links keep their actions and quadrilateral hit regions; FreeText/Stamp/Widget/
+  Caret/Redact/Watermark with AP are also accepted. Independent original-PDF
+  rasters, exported-PDF raster checks, negative cases and three-language tests
+  cover this path. Non-Link custom appearances flatten into PDF page content
+  on export; interactive forms, field values, alternate mouse states and
+  applying redactions remain outside this conversion.
+
 - Rust, C, Python, Go and Node.js expose per-page-image interpolation setters
   with a reset-to-default option. The setter changes only the chosen placement,
   preserves shared media, rejects signed pages and leaves failed edits intact.

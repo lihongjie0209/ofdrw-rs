@@ -150,9 +150,12 @@ cargo build --release --locked -p ofdrw-ffi
 指定自定义共享库；路径应为绝对路径。
 页面索引从 0 开始，页面尺寸和坐标使用毫米。
 
-## main 开发版：图像插值
+## main 开发版功能
 
-以下接口尚未包含在 v0.1.0 安装包中，需使用 main 源码及对应共享库。
+以下功能尚未包含在 v0.1.0 安装包中，需使用 main 源码及对应共享库。
+
+### 图像插值
+
 传入图像对象 ID（非媒体资源 ID），即可设置采样方式：
 
 | 语言 | 最近邻采样 | 清除设置，恢复平滑默认值 |
@@ -166,6 +169,12 @@ cargo build --release --locked -p ofdrw-ffi
 启用平滑采样时，Rust 使用 `Some(true)`、Python/Node.js 使用 `True`/`true`、
 Go 传入值为 `true` 的指针，C 使用 `1`。设置仅影响指定图像对象的放置位置；
 已签名页面拒绝编辑。
+
+### PDF 批注外观
+
+PDF 导入支持批注的正常外观流（`AP/N`），包括 Widget、FreeText
+和 Stamp 的已选外观。各语言继续使用现有 PDF 导入接口；交互表单行为和
+导出限制见[功能说明](docs/FEATURES.md#pdf-导入与兼容范围)。
 
 ## 测试与发布
 

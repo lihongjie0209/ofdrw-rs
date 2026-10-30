@@ -318,3 +318,12 @@ using the repository-authored CFF outlines from `generate_cff_pdf_fixtures.py`
 (Apache-2.0). A Span ActualText string replaces the two painted text runs with
 “中文”. Native import and Python/Go/Node tests check replacement text, original
 paint and repeated OFD/PDF round trips without requiring readable CJK glyphs.
+
+`annotation-ap-*.pdf` and their PNG references are generated with
+`uv run --with fonttools python scripts/generate_annotation_appearance_fixtures.py --references`.
+The vector/image content is repository-authored (Apache-2.0). The text case
+embeds an AP subset of the existing DejaVu Sans fixture under its existing
+license. Ghostscript renders the original PDFs at 144 dpi with CropBox and
+view output enabled; references never pass through the Rust importer.
+The cases cover matrices, clipping, rotations, page units, state dictionaries,
+resource scopes, shared streams, visibility, images, text and transparency.

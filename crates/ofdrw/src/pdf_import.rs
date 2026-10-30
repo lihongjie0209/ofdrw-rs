@@ -1,6 +1,7 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
 mod actual_text;
+mod annotation_appearance;
 pub(crate) mod cff_font;
 mod cid_encoding;
 mod cid_unicode;
@@ -10501,7 +10502,8 @@ fn import_page_links(
         if subtype == Some(b"Popup") && !standalone_popup {
             continue;
         }
-        if !matches!(
+        let has_appearance = annotation.has(b"AP");
+        let supported = matches!(
             subtype,
             Some(
                 b"Link"
@@ -10518,14 +10520,15 @@ fn import_page_links(
                     | b"PolyLine"
                     | b"Popup"
             )
-        ) {
+        );
+        let appearance_supported = has_appearance
+            && matches!(
+                subtype,
+                Some(b"FreeText" | b"Stamp" | b"Widget" | b"Caret" | b"Redact" | b"Watermark")
+            );
+        if !(supported || appearance_supported) {
             return Err(OfdError::Invalid(
                 "PDF page annotation subtype is not supported".into(),
-            ));
-        }
-        if annotation.has(b"AP") {
-            return Err(OfdError::Invalid(
-                "PDF annotation appearance is not supported".into(),
             ));
         }
         if optional_content_enabled {
@@ -10545,24 +10548,26 @@ fn import_page_links(
             .as_array()
             .map_err(|_| OfdError::Invalid("PDF Link Rect is not an array".into()))?;
         let boundary = pdf_link_boundary(pdf, &pages[page_index], rect)?;
-        let quads = if matches!(
-            subtype,
-            Some(
-                b"Text"
-                    | b"Square"
-                    | b"Circle"
-                    | b"Line"
-                    | b"Ink"
-                    | b"Polygon"
-                    | b"PolyLine"
-                    | b"Popup"
-            )
-        ) {
+        let quads = if (has_appearance && subtype != Some(b"Link"))
+            || matches!(
+                subtype,
+                Some(
+                    b"Text"
+                        | b"Square"
+                        | b"Circle"
+                        | b"Line"
+                        | b"Ink"
+                        | b"Polygon"
+                        | b"PolyLine"
+                        | b"Popup"
+                )
+            ) {
             Vec::new()
         } else {
             pdf_link_quads(pdf, annotation, &pages[page_index], rect)?
         };
         let kind = match subtype {
+            Some(b"Popup") if has_appearance => "Popup",
             Some(b"Text" | b"Popup") => "Text",
             Some(b"Square") => "Square",
             Some(b"Circle") => "Circle",
@@ -10574,10 +10579,26 @@ fn import_page_links(
             Some(b"Underline") => "Underline",
             Some(b"StrikeOut") => "StrikeOut",
             Some(b"Squiggly") => "Squiggly",
+            Some(b"FreeText") => "FreeText",
+            Some(b"Stamp") => "Stamp",
+            Some(b"Widget") => "Widget",
+            Some(b"Caret") => "Caret",
+            Some(b"Redact") => "Redact",
+            Some(b"Watermark") => "Watermark",
             _ => "Link",
         };
         let flags = pdf_annotation_flags(pdf, annotation, kind)?;
-        let id = if kind == "Text" {
+        let id = if has_appearance && kind != "Link" {
+            annotation_appearance::import(
+                output,
+                page_index,
+                pdf,
+                &pages[page_index],
+                annotation,
+                boundary,
+                None,
+            )?
+        } else if kind == "Text" {
             import_pdf_text_note(output, page_index, pdf, annotation, boundary)?
         } else if matches!(kind, "Square" | "Circle") {
             import_pdf_shape_annotation(
@@ -10675,6 +10696,21 @@ fn import_page_links(
                 "PDF Link has no action or destination".into(),
             ));
         };
+        if has_appearance && kind == "Link" {
+            annotation_appearance::import(
+                output,
+                page_index,
+                pdf,
+                &pages[page_index],
+                annotation,
+                boundary,
+                Some(&id),
+            )?;
+        }
+        if has_appearance {
+            output.set_annotation_subtype(page_index, &id, Some(kind))?;
+            output.set_annotation_parameter(page_index, &id, "PDFSourceSubtype", kind)?;
+        }
         import_pdf_annotation_flags(output, page_index, &id, flags)?;
         import_pdf_annotation_metadata(output, page_index, &id, pdf, annotation)?;
         if standalone_popup {

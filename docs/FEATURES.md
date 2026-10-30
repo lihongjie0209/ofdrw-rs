@@ -1576,6 +1576,30 @@ flags require the page's content and referenced Forms and images to pass the
 recursive opaque-content check; other page group configurations return an
 error. Group attributes can be direct values or indirect PDF objects.
 
+PDF annotations with a normal appearance (`AP/N`) now import that appearance
+through the native Form interpreter. A state dictionary uses the annotation's
+`AS` name; indirect dictionaries, streams, state names, BBox and Matrix values
+are accepted. The matrix-transformed BBox is mapped into Rect before page
+rotation, CropBox and UserUnit normalization. Paths, embedded text, images,
+clipping and supported transparency groups retain their native resources.
+Placement follows [ISO 32000-1, section 12.5.5](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
+Shared appearance streams are placed independently. Rollover/down appearances
+are not selected. Missing states, malformed geometry, cycles and unsupported
+Form painting return errors.
+
+This applies to the annotation types described below and to FreeText, Stamp,
+Widget, Caret, Redact and Watermark when they provide a normal appearance.
+The result is an OFD annotation with its source subtype, remark, creator,
+flags and normal appearance. Links retain their actions and QuadPoints hit
+regions. Other custom appearances are painted into PDF page content on export;
+their editable PDF geometry, field values, form actions and popup behavior are
+not reconstructed. Widgets import their selected appearance, not an interactive
+AcroForm. Redact appearances do not apply redactions to underlying content.
+Display/print visibility and optional-content selection still apply. The
+fixed-output normalization preserves flags but does not implement interactive
+zoom/rotation behavior. Twenty-four original-source Ghostscript raster scenes,
+malformed/state/flag tests and Python/Go/Node integration cover this path.
+
 PDF `Text` notes without appearance streams import with their remark, icon name,
 open state, RGB color, opacity, flags, author, and PDF name. OFD previews draw
 a simple filled note marker; PDF export recreates an editable text note and
@@ -1593,7 +1617,7 @@ PDF `Square` and `Circle` annotations without appearance streams import as OFD
 vector appearances and export again as editable PDF annotations. Solid or dashed
 borders, opacity, rectangle
 differences, flags, remark, author, and PDF name are retained. Border effects
-and custom appearance streams still return an error. Gray and CMYK outline or
+without a normal appearance still return an error. Gray and CMYK outline or
 interior colors are converted to RGB during import. Changing the OFD annotation
 appearance boundary also resizes the generated Square or Circle path and scales
 its PDF rectangle differences for export.
@@ -1603,8 +1627,8 @@ appearances and export as editable PDF annotations. Endpoints, solid or dashed
 borders, stroke color, opacity, flags, annotation metadata, `/LE` line ending
 styles, `/IC` interior color, and `/LL`, `/LLE`, `/LLO` leader-line geometry are
 retained. Standard line endings and leader lines have vector OFD previews that
-are redrawn when the annotation boundary changes. Captions and custom
-appearances remain unsupported.
+are redrawn when the annotation boundary changes. Captions without a normal
+appearance remain unsupported.
 
 PDF `Ink` annotations without appearance streams import as one OFD annotation
 with one path per stroke. The `InkList` coordinates remain relative to the
