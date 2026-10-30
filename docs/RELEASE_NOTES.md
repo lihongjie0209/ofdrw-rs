@@ -5,7 +5,10 @@ Unreleased source changes after v0.1.0:
   and resource scope, mask replacement/reset, nesting, image-mask precedence,
   group opacity, clipping, pattern cells and shading-pattern ExtGState masks are
   retained. A bounded RGBA fallback rasterizes masked paints, including text;
-  masked text is therefore unavailable to text extraction. Transparent knockout
+  direct masked text retains a native nonpainting semantic layer for extraction,
+  search and positioned region queries after OFD save/reopen. Text inside groups
+  rasterized as a whole still loses semantics; exported PDF text retention is
+  not guaranteed. Transparent knockout
   groups, other luminosity blending spaces and AIS shape masks remain unsupported.
   Thirty-nine original-source raster scenes, analytic pixels, negative/unit
   coverage and Python/Go/Node integration cover the feature. Inline-image

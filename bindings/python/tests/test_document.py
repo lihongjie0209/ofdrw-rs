@@ -7682,3 +7682,16 @@ def test_pdf_graphics_soft_masks_across_binding(kind):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+
+@pytest.mark.parametrize("kind", ["text", "text-fill-stroke-alpha"])
+def test_masked_direct_pdf_text_retains_semantics(kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("soft-mask-" + kind + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert document.page_text(0) == ["A"]
+        objects = document.page_text_objects(0)
+        assert len(objects) == 1
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_text(0) == ["A"]
+            assert reopened.page_text_objects(0) == objects
+            assert reopened.validate_references() == []

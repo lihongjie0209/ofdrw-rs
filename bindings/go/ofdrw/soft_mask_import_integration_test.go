@@ -13,6 +13,7 @@ import (
 func TestImportsGraphicsSoftMasksFromPDF(t *testing.T) {
 	tests := []struct{ name string }{
 		{name: "alpha"}, {name: "luminosity-bc"}, {name: "captured-ctm"},
+		{name: "text"}, {name: "text-fill-stroke-alpha"},
 		{name: "group"}, {name: "nested-masks"}, {name: "pattern-cell-mask"}, {name: "fill-stroke-alpha"},
 	}
 	for _, tt := range tests {
@@ -54,6 +55,18 @@ func TestImportsGraphicsSoftMasksFromPDF(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
+			if tt.name == "text" || tt.name == "text-fill-stroke-alpha" {
+				for _, document := range []*Document{doc, reopened} {
+					text, err := document.PageText(0)
+					if err != nil || strings.Join(text, "") != "A" {
+						t.Fatalf("masked text = %v, error = %v", text, err)
+					}
+					objects, err := document.PageTextObjects(0)
+					if err != nil || len(objects) != 1 {
+						t.Fatalf("masked text objects = %v, error = %v", objects, err)
+					}
+				}
+			}
 			actual, err := reopened.PagePNG(0, 72)
 			if err != nil || !bytes.Equal(actual, png) {
 				t.Fatalf("pattern raster changed after round trip: %v", err)

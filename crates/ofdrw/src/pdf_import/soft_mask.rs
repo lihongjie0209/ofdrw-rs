@@ -279,6 +279,7 @@ impl Source {
         let original = output.required_entry(&path)?.to_vec();
         let parsed = parse_xml(&path, &original)?;
         let mut selected = Vec::new();
+        let mut text_ids = Vec::new();
         let mut others = Vec::new();
         for object in direct_page_objects(parsed.root_element()) {
             if object
@@ -286,12 +287,18 @@ impl Source {
                 .and_then(|s| s.parse::<usize>().ok())
                 .is_some_and(|id| id >= first_id)
             {
-                selected.push(object.range());
+                if is_ofd_element(object, "TextObject") {
+                    if let Some(id) = object.attribute("ID") {
+                        text_ids.push(id.to_owned());
+                    }
+                } else {
+                    selected.push(object.range());
+                }
             } else {
                 others.push(object.range());
             }
         }
-        if selected.is_empty() {
+        if selected.is_empty() && text_ids.is_empty() {
             return Ok(());
         }
         let dpi = Self::dpi(page)?;
@@ -341,6 +348,20 @@ impl Source {
             remaining.replace_range(range, "");
         }
         output.set_entry(&path, remaining.into_bytes())?;
+        // Retain native text geometry and glyph mappings for search/extraction.
+        // The RGBA image supplies its appearance; painting the text again would
+        // bypass the mask and double the opacity.
+        for id in text_ids {
+            output.set_page_object_attributes(
+                page.index,
+                &id,
+                &[
+                    ("Fill", Some("false".into())),
+                    ("Stroke", Some("false".into())),
+                ],
+                Some("TextObject"),
+            )?;
+        }
         let width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
         let height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
         let id = output.add_image_object(page.index, &png, "png", [0., 0., width, height])?;

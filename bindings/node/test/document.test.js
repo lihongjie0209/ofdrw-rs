@@ -4072,3 +4072,21 @@ test('import PDF graphics-state soft masks through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+
+test('masked direct PDF text retains semantics through the C ABI', () => {
+  for (const kind of ['text', 'text-fill-stroke-alpha']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('soft-mask-' + kind + '.pdf')));
+    try {
+      assert.deepEqual(document.pageText(0), ['A']);
+      const objects = document.pageTextObjects(0);
+      assert.equal(objects.length, 1);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pageText(0), ['A']);
+        assert.deepEqual(reopened.pageTextObjects(0), objects);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});

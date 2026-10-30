@@ -138,3 +138,87 @@ mask_case!(compressed, "compressed");
 
 mask_case!(mask_group_oc, "mask-group-oc");
 mask_case!(hidden_mask_content, "hidden-mask-content");
+
+#[test]
+fn masked_direct_text_retains_searchable_geometry_after_round_trip() {
+    for name in ["text", "text-fill-stroke-alpha"] {
+        let source = std::fs::read(format!(
+            "{}/tests/fixtures/soft-mask-{name}.pdf",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let document = OfdDocument::from_pdf_bytes(&source).unwrap();
+        let original_geometry = document.page_text_objects(0).unwrap();
+        assert!(!original_geometry.is_empty(), "{name}");
+        assert_eq!(document.page_text(0).unwrap().concat(), "A", "{name}");
+        assert_eq!(
+            document
+                .page_text_in_region(0, [0., 0., 40., 40.])
+                .unwrap()
+                .concat(),
+            "A",
+            "{name}"
+        );
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap().concat(), "A", "{name}");
+        assert_eq!(
+            reopened.page_text_objects(0).unwrap(),
+            original_geometry,
+            "{name}"
+        );
+        let page = &reopened.pages().unwrap()[0];
+        let xml = std::str::from_utf8(reopened.entry(&page.path).unwrap().unwrap()).unwrap();
+        let parsed = roxmltree::Document::parse(xml).unwrap();
+        for text in parsed
+            .descendants()
+            .filter(|n| n.has_tag_name(("http://www.ofdspec.org/2016", "TextObject")))
+        {
+            assert_eq!(text.attribute("Fill"), Some("false"), "{name}");
+            assert_eq!(text.attribute("Stroke"), Some("false"), "{name}");
+        }
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn mask_definition_text_is_not_extracted_as_page_content() {
+    let document =
+        OfdDocument::from_pdf_bytes(include_bytes!("fixtures/soft-mask-resource-scope.pdf"))
+            .unwrap();
+    assert!(document.page_text(0).unwrap().is_empty());
+}
+
+#[test]
+fn masked_and_unmasked_text_preserve_order_without_duplicates() {
+    for mode in [0, 1, 2, 4, 5, 6] {
+        let mut source =
+            lopdf::Document::load_mem(include_bytes!("fixtures/soft-mask-text.pdf")).unwrap();
+        let content = format!("q /M gs BT /F1 20 Tf {mode} Tr 12 16 Td (A) Tj ET Q BT /F1 20 Tf 36 16 Td (B) Tj ET /M gs BT /F1 20 Tf {mode} Tr 60 16 Td (C) Tj ET");
+        let stream = source
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.set_plain_content(content.into_bytes());
+        let mut bytes = Vec::new();
+        source.save_to(&mut bytes).unwrap();
+        let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(
+            document.page_text(0).unwrap().concat(),
+            "ABC",
+            "mode {mode}"
+        );
+        assert_eq!(
+            document.page_text_objects(0).unwrap().len(),
+            3,
+            "mode {mode}"
+        );
+        let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.page_text(0).unwrap().concat(),
+            "ABC",
+            "mode {mode}"
+        );
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+}
