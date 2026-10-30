@@ -1878,7 +1878,7 @@ test('import indirect optional PDF content through Node.js', () => {
 });
 
 test('import PDF normal annotation appearances through Node.js', () => {
-  for (const name of ['matrix', 'widget', 'link', 'image']) {
+  for (const name of ['matrix', 'widget', 'link', 'image', 'nonprint', 'no-view']) {
     const document = Document.fromPdfBytes(fs.readFileSync(fixture(`annotation-ap-${name}.pdf`)));
     try {
       assert.equal(document.pageCount, 1);
@@ -1892,6 +1892,20 @@ test('import PDF normal annotation appearances through Node.js', () => {
       try {
         assert.deepEqual(reopened.pagePng(0, 144), png);
         assert.equal(reopened.toPdf().subarray(0, 5).toString(), '%PDF-');
+        const converted = Document.fromPdfBytes(reopened.toPdf());
+        try {
+          const annotations = converted.annotations();
+          assert.equal(annotations.length, 1);
+          assert.equal(annotations[0].remark, 'custom appearance');
+          if (name === 'nonprint') {
+            assert.equal(annotations[0].attributes.Print, 'false');
+            assert.ok(converted.pageSvg(0).includes('#ff0000'));
+          } else if (name === 'no-view') {
+            assert.equal(annotations[0].attributes.Visible, 'false');
+            assert.equal(annotations[0].attributes.Print ?? 'true', 'true');
+            assert.ok(!converted.pageSvg(0).includes('#ff0000'));
+          }
+        } finally { converted.close(); }
       } finally { reopened.close(); }
     } finally { document.close(); }
   }

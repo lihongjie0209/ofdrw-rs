@@ -7,6 +7,7 @@
 mod archive;
 mod bilevel;
 mod encryption;
+mod pdf_annotation_appearance;
 mod pdf_calculator;
 mod pdf_export;
 mod pdf_import;
@@ -16671,12 +16672,20 @@ impl OfdDocument {
             }
             svg.push_str("</g>");
         }
-        for annotation in self.annotations()?.into_iter().filter(|annotation| {
+        let page_annotations = self.annotations()?;
+        let separate_appearances = for_print
+            && page_annotations.iter().any(|a| {
+                a.document_index == page.document_index
+                    && same_page_id(&a.page_id, &page.id)
+                    && a.parameters.contains_key("PDFSourceSubtype")
+            });
+        for annotation in page_annotations.into_iter().filter(|annotation| {
             annotation.document_index == page.document_index
                 && same_page_id(&annotation.page_id, &page.id)
         }) {
             if for_print
-                && (annotation.parameters.contains_key("PDFMarkupQuads")
+                && (separate_appearances
+                    || annotation.parameters.contains_key("PDFMarkupQuads")
                     || annotation.parameters.contains_key("PDFTextIcon")
                     || annotation.parameters.contains_key("PDFShape"))
             {
@@ -17252,6 +17261,11 @@ impl OfdDocument {
         }
 
         for (page, page_ref) in pages.iter().zip(page_refs.iter().copied()) {
+            let separate_appearances = annotations.iter().any(|a| {
+                a.document_index == page.document_index
+                    && same_page_id(&a.page_id, &page.id)
+                    && a.parameters.contains_key("PDFSourceSubtype")
+            });
             let embedded_fonts: Vec<_> = self
                 .fonts_for_page_sources(page.index)?
                 .into_iter()
@@ -17333,12 +17347,15 @@ impl OfdDocument {
                 }) else {
                     continue;
                 };
-                for region in pdf_link_output_regions(
+                for mut region in pdf_link_output_regions(
                     action,
                     boundary,
                     physical_box,
                     !matches!(target, PdfLinkTarget::Attachment(_)),
                 )? {
+                    if separate_appearances && !matches!(target, PdfLinkTarget::Attachment(_)) {
+                        region.rect = pdf_link_rect(boundary, physical_box)?;
+                    }
                     links.push((
                         allocator.bump(),
                         region.rect,
@@ -17564,6 +17581,10 @@ impl OfdDocument {
                     ))
                     .flags(flags);
                 if let Some(metadata) = metadata {
+                    if separate_appearances {
+                        output_annotation
+                            .pair(Name(b"OfdAppearanceId"), Str(metadata.id.as_bytes()));
+                    }
                     let base = metadata
                         .parameters
                         .get("PDFName")
@@ -17623,6 +17644,9 @@ impl OfdDocument {
             }
             for (reference, annotation, kind, rect, quads, color, opacity, flags) in markups {
                 let mut output_annotation = pdf.annotation(reference);
+                if separate_appearances {
+                    output_annotation.pair(Name(b"OfdAppearanceId"), Str(annotation.id.as_bytes()));
+                }
                 if let Some(&popup_ref) = popup_by_parent.get(&reference) {
                     output_annotation.pair(Name(b"Popup"), popup_ref);
                 }
@@ -17667,6 +17691,9 @@ impl OfdDocument {
             }
             for (reference, annotation, rect, note, flags) in text_notes {
                 let mut output_annotation = pdf.annotation(reference);
+                if separate_appearances {
+                    output_annotation.pair(Name(b"OfdAppearanceId"), Str(annotation.id.as_bytes()));
+                }
                 if let Some(&popup_ref) = popup_by_parent.get(&reference) {
                     output_annotation.pair(Name(b"Popup"), popup_ref);
                 }
@@ -17716,6 +17743,9 @@ impl OfdDocument {
             }
             for (reference, annotation, rect, note, flags) in standalone_popups {
                 let mut output_annotation = pdf.annotation(reference);
+                if separate_appearances {
+                    output_annotation.pair(Name(b"OfdAppearanceId"), Str(annotation.id.as_bytes()));
+                }
                 let base = annotation
                     .parameters
                     .get("PDFName")
@@ -17761,6 +17791,9 @@ impl OfdDocument {
             }
             for (reference, annotation, rect, shape, flags) in shapes {
                 let mut output_annotation = pdf.annotation(reference);
+                if separate_appearances {
+                    output_annotation.pair(Name(b"OfdAppearanceId"), Str(annotation.id.as_bytes()));
+                }
                 if let Some(&popup_ref) = popup_by_parent.get(&reference) {
                     output_annotation.pair(Name(b"Popup"), popup_ref);
                 }
@@ -17925,7 +17958,8 @@ impl OfdDocument {
             pdf.stream(content_ref, &content.finish());
             pdf.extend(&chunk);
         }
-        pdf_export::finish(pdf.finish())
+        let bytes = pdf_annotation_appearance::write(self, pdf.finish(), options, &annotations)?;
+        pdf_export::finish(bytes)
     }
 
     fn render_svg_object(

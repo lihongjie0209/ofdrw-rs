@@ -6,8 +6,12 @@ Unreleased source changes after v0.1.0:
   Links keep their actions and quadrilateral hit regions; FreeText/Stamp/Widget/
   Caret/Redact/Watermark with AP are also accepted. Independent original-PDF
   rasters, exported-PDF raster checks, negative cases and three-language tests
-  cover this path. Non-Link custom appearances flatten into PDF page content
-  on export; interactive forms, field values, alternate mouse states and
+  cover this path. PDF export retains independent normal Form appearances:
+  Links keep actions/quads and other custom appearances become movable/resizable
+  Stamp annotations. Page content contains no duplicate appearance. Mixed
+  annotation order, unique names, Unicode metadata, popups, screen/print flags
+  and NoView survive the tested cycles. Linux CI compares both view and print
+  rasters. Interactive forms, field values, alternate mouse states and
   applying redactions remain outside this conversion.
 
 - Rust, C, Python, Go and Node.js expose per-page-image interpolation setters

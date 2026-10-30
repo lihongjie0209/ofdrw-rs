@@ -327,3 +327,8 @@ license. Ghostscript renders the original PDFs at 144 dpi with CropBox and
 view output enabled; references never pass through the Rust importer.
 The cases cover matrices, clipping, rotations, page units, state dictionaries,
 resource scopes, shared streams, visibility, images, text and transparency.
+The `no-view`, `nonprint`, `invisible-flag` and `hidden` cases also have
+`.print.png` references rendered directly from the original PDFs with
+`-dPrinted=true`; their ordinary PNGs use `-dPrinted=false`. They distinguish
+view visibility from print visibility without routing references through the
+Rust exporter.

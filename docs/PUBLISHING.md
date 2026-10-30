@@ -51,6 +51,11 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 
 ## 发布步骤
 
+转换器 [ofdrw-svg2pdf 0.13.0-ofdrw.1](https://crates.io/crates/ofdrw-svg2pdf/0.13.0-ofdrw.1)
+已发布，源提交为 `f919fd7c7ff717643c459ca005082b554000b142`。
+[发布工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41136637318)
+已成功，公开包的校验和、源码提交和核心所需的 `srgb_profile()` 接口均已核验。
+
 转换器依赖 `ofdrw-svg2pdf` 使用独立版本。首次发布或修改该分支时，
 先更新其 Cargo 版本及核心依赖，将提交推送到 main 并等待完整 CI 成功。
 然后运行 `Publish SVG PDF converter`（`publish-svg2pdf.yml`），输入该提交 SHA；

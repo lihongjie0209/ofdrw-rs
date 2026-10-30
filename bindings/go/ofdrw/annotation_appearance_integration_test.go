@@ -10,7 +10,7 @@ import (
 )
 
 func TestPDFNormalAnnotationAppearance(t *testing.T) {
-	for _, name := range []string{"matrix", "widget", "link", "image"} {
+	for _, name := range []string{"matrix", "widget", "link", "image", "nonprint", "no-view"} {
 		t.Run(name, func(t *testing.T) {
 			source, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "annotation-ap-"+name+".pdf"))
 			if err != nil {
@@ -52,6 +52,21 @@ func TestPDFNormalAnnotationAppearance(t *testing.T) {
 			pdf, err := reopened.ToPDF()
 			if err != nil || !bytes.HasPrefix(pdf, []byte("%PDF-")) {
 				t.Fatalf("export: %v", err)
+			}
+			converted, err := FromPDF(pdf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer converted.Close()
+			annotations, err = converted.Annotations()
+			if err != nil || len(annotations) != 1 {
+				t.Fatalf("exported annotation: %v, %v", annotations, err)
+			}
+			if name == "nonprint" && annotations[0].Attributes["Print"] != "false" {
+				t.Fatal("lost print flag")
+			}
+			if name == "no-view" && (annotations[0].Attributes["Visible"] != "false" || annotations[0].Attributes["Print"] == "false") {
+				t.Fatal("NoView incorrectly hides printing")
 			}
 		})
 	}

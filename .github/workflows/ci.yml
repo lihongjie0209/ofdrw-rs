@@ -83,7 +83,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y poppler-utils ghostscript
-          OFDRW_GHOSTSCRIPT=gs cargo test -p ofdrw --test annotation_appearance_pdf_import --locked
+          OFDRW_GHOSTSCRIPT=gs cargo test -p ofdrw --test annotation_appearance_pdf_import --test annotation_appearance_pdf_export --locked
           OFDRW_PDFTOTEXT=pdftotext cargo test -p ofdrw --test pdf_text_export --test rtl_pdf_export --test missing_glyph_pdf_export --locked
           mkdir -p "$RUNNER_TEMP/ofdrw-latin-fonts"
           cp crates/ofdrw/tests/fixtures/dejavu-sans.ttf "$RUNNER_TEMP/ofdrw-latin-fonts/"

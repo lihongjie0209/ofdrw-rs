@@ -13,7 +13,7 @@ from generate_nested_stitching_fixture import pdf_bytes, stream
 CASES = ["basic", "bbox", "matrix", "reflected", "rotate90", "rotate180", "rotate270",
          "crop", "user-unit", "states", "indirect", "inherited", "shared", "empty",
          "hidden", "link", "text", "image", "isolated", "alpha", "widget", "free-text",
-         "annotation-alpha", "no-rotate"]
+         "annotation-alpha", "no-rotate", "no-view", "nonprint", "invisible-flag"]
 
 
 def fixture(name):
@@ -81,6 +81,12 @@ def fixture(name):
     elif name == 'no-rotate':
         page = b' /Rotate 90'
         flags = b'20'
+    elif name == 'no-view':
+        flags = b'36'
+    elif name == 'nonprint':
+        flags = b'0'
+    elif name == 'invisible-flag':
+        flags = b'1'
     form_resources = b'' if name == 'inherited' else b' /Resources '+resources
     objects = [
         b'<< /Type /Catalog /Pages 2 0 R >>',
@@ -135,3 +141,7 @@ if __name__ == '__main__':
             subprocess.run(['gs', '-q', '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dUseCropBox',
                             '-dPrinted=false', '-sDEVICE=png16m', '-r144', '-dGraphicsAlphaBits=1',
                             f'-sOutputFile={path.with_suffix(".png")}', str(path)], check=True)
+            if name in ('no-view', 'nonprint', 'invisible-flag', 'hidden'):
+                subprocess.run(['gs', '-q', '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dUseCropBox',
+                                '-dPrinted=true', '-sDEVICE=png16m', '-r144', '-dGraphicsAlphaBits=1',
+                                f'-sOutputFile={path.with_suffix(".print.png")}', str(path)], check=True)

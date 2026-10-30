@@ -10710,8 +10710,21 @@ fn import_page_links(
         if has_appearance {
             output.set_annotation_subtype(page_index, &id, Some(kind))?;
             output.set_annotation_parameter(page_index, &id, "PDFSourceSubtype", kind)?;
+            output.set_annotation_parameter(
+                page_index,
+                &id,
+                "PDFSourceFlags",
+                &flags.to_string(),
+            )?;
         }
-        import_pdf_annotation_flags(output, page_index, &id, flags)?;
+        // Invisible only applies to an unrecognised subtype without a handler;
+        // the selected normal appearance supplies a handler for these types.
+        import_pdf_annotation_flags(
+            output,
+            page_index,
+            &id,
+            if has_appearance { flags & !1 } else { flags },
+        )?;
         import_pdf_annotation_metadata(output, page_index, &id, pdf, annotation)?;
         if standalone_popup {
             output.set_annotation_parameter(page_index, &id, "PDFPopupStandalone", "true")?;
@@ -10793,8 +10806,9 @@ fn pdf_popup_annotations(
         let parent = pdf
             .get_dictionary(parent_ref)
             .map_err(|error| OfdError::Invalid(format!("invalid PDF Popup Parent: {error}")))?;
-        if !matches!(
-            pdf_annotation_subtype(pdf, parent)?,
+        let parent_subtype = pdf_annotation_subtype(pdf, parent)?;
+        let supported_parent = matches!(
+            parent_subtype,
             Some(
                 b"Text"
                     | b"Highlight"
@@ -10808,7 +10822,12 @@ fn pdf_popup_annotations(
                     | b"Polygon"
                     | b"PolyLine"
             )
-        ) {
+        ) || (parent.has(b"AP")
+            && matches!(
+                parent_subtype,
+                Some(b"Stamp" | b"FreeText" | b"Caret" | b"Redact" | b"Watermark")
+            ));
+        if !supported_parent {
             return Err(OfdError::Invalid(
                 "PDF Popup Parent subtype is not supported".into(),
             ));

@@ -1591,14 +1591,27 @@ This applies to the annotation types described below and to FreeText, Stamp,
 Widget, Caret, Redact and Watermark when they provide a normal appearance.
 The result is an OFD annotation with its source subtype, remark, creator,
 flags and normal appearance. Links retain their actions and QuadPoints hit
-regions. Other custom appearances are painted into PDF page content on export;
-their editable PDF geometry, field values, form actions and popup behavior are
-not reconstructed. Widgets import their selected appearance, not an interactive
-AcroForm. Redact appearances do not apply redactions to underlying content.
-Display/print visibility and optional-content selection still apply. The
+regions. PDF export keeps these appearances in independent normal Form
+XObjects. Links retain their Link subtype and complete appearance rectangle;
+other custom appearances export as Stamp annotations that PDF viewers can move
+or resize. Names are unique per page, Unicode remarks/creators and dates are
+retained, and supported popup rectangles/open states have reciprocal parent
+references. Removing the exported annotations leaves no copy painted into page
+content. Mixed native and imported appearances on those pages keep their
+annotation paint order; generic native appearances use Stamp annotations too.
+
+NoView remains distinct from Hidden: an annotation can be absent from the
+screen and still print. Nonprinting appearances remain visible on screen.
+Invisible alone does not hide a recognized subtype with a normal appearance.
+Visibility edits can override the retained source setting. Display/print
+visibility and optional-content selection still apply. The
 fixed-output normalization preserves flags but does not implement interactive
-zoom/rotation behavior. Twenty-four original-source Ghostscript raster scenes,
-malformed/state/flag tests and Python/Go/Node integration cover this path.
+zoom/rotation behavior. Widgets import their selected appearance, not an
+interactive AcroForm; field values, field actions and the original editable
+non-Link subtype geometry are not reconstructed. Redact appearances do not
+apply redactions to underlying content. Twenty-seven original-source
+Ghostscript view scenes, four independent print references, 39 Rust regression
+cases and Python/Go/Node PDF round trips cover this path.
 
 PDF `Text` notes without appearance streams import with their remark, icon name,
 open state, RGB color, opacity, flags, author, and PDF name. OFD previews draw
@@ -1607,7 +1620,7 @@ omits the preview marker from PDF page content. PDF viewers choose the actual
 note icon and popup appearance.
 
 PDF `Popup` annotations linked to a supported Text, text markup, Square,
-Circle, or Line parent import with their rectangle and open state stored on
+Circle, or Line parent, or a supported custom markup appearance, import with their rectangle and open state stored on
 the OFD parent annotation. PDF export recreates the popup and its reciprocal
 parent reference. A standalone popup imports as an OFD text note with its own
 content and metadata; PDF export restores the `Popup` subtype without a parent.

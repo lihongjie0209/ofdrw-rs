@@ -43,6 +43,7 @@ fn check(name: &str, source: &[u8], reference: &[u8]) {
                 "-dSAFER",
                 "-dBATCH",
                 "-dNOPAUSE",
+                "-dPrinted=false",
                 "-sDEVICE=png16m",
                 "-r144",
                 "-dGraphicsAlphaBits=1",
@@ -96,6 +97,9 @@ case!(widget, "widget");
 case!(free_text, "free-text");
 case!(annotation_alpha, "annotation-alpha");
 case!(no_rotate, "no-rotate");
+case!(no_view, "no-view");
+case!(nonprint, "nonprint");
+case!(invisible_flag, "invisible-flag");
 
 fn modified(name: &str, change: impl FnOnce(&mut lopdf::Document)) -> Vec<u8> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -271,7 +275,7 @@ fn appearance_visibility_print_flags_and_optional_content_remain_effective() {
             .unwrap()
             .page_png(0, 144.)
             .unwrap(),
-        hidden
+        base.page_png(0, 144.).unwrap()
     );
     let bytes = modified("basic", |pdf| {
         pdf.objects.insert(
