@@ -14066,6 +14066,17 @@ func TestShapedRightToLeftTextRoundTrips(t *testing.T) {
 	if text, err := reopened.PageText(0); err != nil || !slices.Equal(text, []string{"سلام", "AسلامB"}) {
 		t.Fatalf("reopened Arabic text: %v, %v", text, err)
 	}
+	for _, document := range []*Document{doc, reopened} {
+		pdf, err := document.ToPDF()
+		if err != nil || !bytes.HasPrefix(pdf, []byte("%PDF-")) {
+			t.Fatalf("Arabic PDF export: %v", err)
+		}
+		svg, err := document.PageSVG(0)
+		if err != nil || !strings.Contains(svg, "سلام") || strings.Contains(svg, "data-ofd-rtl-semantic") {
+			t.Fatalf("public SVG logical text changed: %v", err)
+		}
+	}
+
 }
 
 func TestDuplicatesPageObjectAtomically(t *testing.T) {

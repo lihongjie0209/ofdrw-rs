@@ -7699,3 +7699,20 @@ def test_masked_pdf_group_and_direct_text_retains_semantics(kind, expected):
             assert "".join(reopened.page_text(0)) == expected
             assert reopened.page_text_objects(0) == objects
             assert reopened.validate_references() == []
+
+
+@pytest.mark.parametrize("text", ["سلام", "AسلامB"])
+def test_shaped_rtl_pdf_export_keeps_public_logical_text(text):
+    font = (Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures/dejavu-sans.ttf").read_bytes()
+    with Document.new() as document:
+        font_id = document.add_embedded_font("DejaVu Sans", font)
+        document.add_blank_page(120, 30)
+        document.add_text_object(0, text, (5, 5, 110, 20), 6, font_id, shape=True)
+        assert document.page_text(0) == [text]
+        assert text in document.page_svg(0)
+        assert "data-ofd-rtl-semantic" not in document.page_svg(0)
+        assert document.to_pdf().startswith(b"%PDF-")
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_text(0) == [text]
+            assert reopened.to_pdf().startswith(b"%PDF-")
+            assert reopened.validate_references() == []

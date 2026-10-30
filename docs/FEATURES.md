@@ -1333,7 +1333,7 @@ font scopes with lopdf and compare original exported PDFs with Poppler using
 Linux CI requires the Poppler check. For the variation-selector fixture, lopdf
 emits extra replacement characters for unmapped glyphs while Poppler extracts
 the original characters; tests retain both reader-specific expectations.
-Right-to-left extraction order remains a separate limitation.
+Right-to-left extraction has the qualified support and reader limitations described below.
 OFD attachments export as PDF `EmbeddedFiles` with Unicode filenames and their
 original bytes. Duplicate attachment names receive distinct name-tree keys
 while retaining their filenames. Creation and modification timestamps are
@@ -2313,9 +2313,25 @@ intents are ignored, allowing future extensions alongside known intents.
 
 When the catalog omits `OCProperties`, optional-content markers are ignored
 and their drawing is imported as visible.
-The current SVG-to-PDF text path can reorder Arabic letters in text extracted
-from the PDF; the OFD `TextCode` and its extracted text retain the original
-order. PDF extraction of right-to-left text still needs a dedicated fix.
+For glyph-mapped RTL text whose glyph sequence matches default shaping in the
+embedded font, PDF export splits the hidden semantic layer into positioned
+graphemes. Lam-Alef ligatures then have separate Unicode mappings without
+changing painted glyph outlines. Explicit spaces are retained. Positions inside
+a ligature are apportioned equally between its graphemes, so selection/caret
+geometry is approximate. OFD text and public SVG retain their logical text;
+only the PDF conversion path uses this decomposition.
+
+Eleven export cases and six unit tests cover Lam-Alef variants, Arabic words, Latin/Arabic and
+Latin/Hebrew runs, numbers, scaling and rotated glyphs. The tests check raw
+Unicode operators, OFD save/reopen and optional Ghostscript raster comparison;
+Linux CI also requires Poppler extraction for nine of these cases. Poppler's
+raw mode preserves the tested simple Latin/RTL runs, but its default page
+base-direction heuristics can still change mixed-run order. Numeric mixtures
+and rotated glyphs are checked for Unicode preservation and appearance without
+claiming a reader-independent logical extraction order. Pages containing combining-mark text retain the previous semantic path to
+prevent their shared font maps from overwriting decomposed letters. Glyph aliases
+that do not match default shaping also retain the previous path; they need further extraction work. This is not complete RTL extraction
+support.
 
 ## 模板与图层
 

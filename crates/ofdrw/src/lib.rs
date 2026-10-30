@@ -10,6 +10,7 @@ mod encryption;
 mod pdf_calculator;
 mod pdf_export;
 mod pdf_import;
+mod rtl_semantics;
 
 pub use encryption::{
     CertificateRecipient, EncryptionInfo, EncryptionRecipient, PasswordRecipient,
@@ -3846,6 +3847,8 @@ struct SvgRenderResources<'a> {
     colors: &'a ColorResources,
     embedded_font_families: Option<&'a HashMap<String, String>>,
     prefer_image_substitution: bool,
+    // PDF export uses the print path; public SVG/PNG keep logical text nodes.
+    pdf_semantics: bool,
 }
 
 struct SvgClipGroup {
@@ -16539,6 +16542,25 @@ impl OfdDocument {
         nested_seal_depth: usize,
         embed_fonts: bool,
     ) -> Result<String, OfdError> {
+        self.page_svg_for_output_inner(
+            index,
+            options,
+            for_print,
+            nested_seal_depth,
+            embed_fonts,
+            for_print,
+        )
+    }
+
+    fn page_svg_for_output_inner(
+        &self,
+        index: usize,
+        options: RenderOptions,
+        for_print: bool,
+        nested_seal_depth: usize,
+        embed_fonts: bool,
+        pdf_semantics: bool,
+    ) -> Result<String, OfdError> {
         let pages = self.pages()?;
         let page = pages.get(index).ok_or(OfdError::PageIndex {
             index,
@@ -16596,6 +16618,7 @@ impl OfdDocument {
             colors: &page_colors,
             embedded_font_families: font_families.as_ref(),
             prefer_image_substitution: options.prefer_image_substitution,
+            pdf_semantics,
         };
         for layer_info in self.page_layers(index)? {
             let source_path = &layer_info.source_path;
@@ -16617,6 +16640,7 @@ impl OfdDocument {
                 colors: &colors,
                 embedded_font_families: font_families.as_ref(),
                 prefer_image_substitution: options.prefer_image_substitution,
+                pdf_semantics,
             };
             let parsed = parse_xml(source_path, self.required_entry(source_path)?)?;
             let layer = parsed
@@ -16813,6 +16837,19 @@ impl OfdDocument {
             svg.push_str("</g>");
         }
         svg.push_str("</svg>");
+        if pdf_semantics
+            && svg.contains("data-ofd-rtl-semantic")
+            && rtl_semantics::has_shared_mark_clusters(&svg)?
+        {
+            return self.page_svg_for_output_inner(
+                index,
+                options,
+                for_print,
+                nested_seal_depth,
+                embed_fonts,
+                false,
+            );
+        }
         Ok(svg)
     }
 
@@ -18112,11 +18149,19 @@ impl OfdDocument {
             if glyph_paths.is_some() {
                 svg.push_str("<g opacity=\"0\">");
             }
-            for code in object
-                .descendants()
+            for (code_index, code) in object
+                .children()
                 .filter(|node| is_ofd_element(*node, "TextCode"))
+                .enumerate()
             {
                 let content = decode_text_code(element_text(code).as_ref())?;
+                if let Some(semantic) = glyph_paths
+                    .as_ref()
+                    .and_then(|paths| paths.semantics.get(&code_index))
+                {
+                    svg.push_str(&semantic.svg(&style, h_scale, direction)?);
+                    continue;
+                }
                 if glyph_paths.is_some() {
                     let code_x = text_code_coordinate(code, "X", 0.0)?;
                     let code_y = text_code_coordinate(code, "Y", size)?;
@@ -18146,7 +18191,7 @@ impl OfdDocument {
             }
             if let Some(paths) = glyph_paths {
                 svg.push_str("</g>");
-                svg.push_str(&paths);
+                svg.push_str(&paths.paths);
             }
         } else if is_element(object, "PathObject") {
             let data = descendant(object, "AbbreviatedData")
@@ -31935,6 +31980,11 @@ fn collect_svg_font_paths(root: Node<'_, '_>, fonts: &[FontInfo], used: &mut Has
     }
 }
 
+struct SvgGlyphPaths {
+    paths: String,
+    semantics: HashMap<usize, rtl_semantics::Semantic>,
+}
+
 fn svg_glyph_paths(
     document: &OfdDocument,
     object: Node<'_, '_>,
@@ -31943,7 +31993,7 @@ fn svg_glyph_paths(
     h_scale: f64,
     direction: i32,
     paint: &str,
-) -> Result<Option<String>, OfdError> {
+) -> Result<Option<SvgGlyphPaths>, OfdError> {
     let mut transforms = BTreeMap::new();
     for transform in parse_cg_transforms(object)? {
         let glyphs = transform
@@ -31987,6 +32037,7 @@ fn svg_glyph_paths(
         .map(pdf_import::cff_font::GlyphMatrices::parse)
         .transpose()?;
     let mut output = String::new();
+    let mut semantics = HashMap::new();
     let codes = object
         .children()
         .filter(|node| is_ofd_element(*node, "TextCode"))
@@ -32040,7 +32091,12 @@ fn svg_glyph_paths(
             "CGTransform starts inside a UTF-16 character".into(),
         ));
     }
-    for (code, glyphs) in codes.into_iter().zip(run_glyphs) {
+    for (code_index, (code, glyphs)) in codes.into_iter().zip(run_glyphs).enumerate() {
+        if resources.pdf_semantics && is_ofd_element(object, "TextObject") {
+            if let Some(semantic) = rtl_semantics::for_code(&face, code, &glyphs, size)? {
+                semantics.insert(code_index, semantic);
+            }
+        }
         if glyphs.is_empty() {
             continue;
         }
@@ -32104,7 +32160,10 @@ fn svg_glyph_paths(
             }
         }
     }
-    Ok(Some(output))
+    Ok(Some(SvgGlyphPaths {
+        paths: output,
+        semantics,
+    }))
 }
 
 fn expand_text_deltas(encoded: Option<&str>, moves: usize) -> Result<Option<Vec<f64>>, OfdError> {
@@ -32359,6 +32418,7 @@ fn svg_clip_groups(
                 if let Some(paths) =
                     svg_glyph_paths(document, shape, resources, size, h_scale, direction, &paint)?
                 {
+                    let paths = paths.paths;
                     if use_mask {
                         svg.push_str(&format!("<g transform=\"{transform}\">{paths}</g>"));
                     } else {

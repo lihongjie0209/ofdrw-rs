@@ -1,12 +1,22 @@
 Unreleased source changes after v0.1.0:
 
+- PDF export decomposes matching glyph-mapped RTL text into hidden positioned
+  graphemes, fixing the tested Lam-Alef extraction reversals while retaining
+  original outlines, explicit spaces and OFD/public-SVG logical text. Eleven
+  integration cases and six units cover extraction, round trips, scaling,
+  rotation, fallback and optional export-raster comparison. Linux CI includes
+  nine Poppler extraction checks. Pages with combining marks keep the original
+  semantic path to avoid collisions in shared font maps. Unmatched glyph aliases and
+  reader base-direction/numeric ordering remain limitations; positions inside
+  ligatures are apportioned equally rather than exact typographic caret data.
+
 - PDF export normalizes font ToUnicode maps to type 2 and removes optional
   CMapVersion/WMode metadata that prevents some readers from decoding them.
   Character mappings and font payloads are retained. Seventeen text-export
   cases verify masked text, nested groups, ligatures, Chinese, supplementary
   Unicode, variation selectors and rotation. Linux CI also runs Poppler against
   the exported PDFs. Native/Poppler differences for unmapped variation-cluster
-  glyphs remain explicit, and RTL extraction order is still unresolved.
+  glyphs remain explicit, and full RTL extraction order remains unresolved.
 
 - Graphics-state PDF soft masks support Alpha and DeviceRGB Luminosity groups,
   BC backdrops and the four scalar transfer-function families. Activation CTM

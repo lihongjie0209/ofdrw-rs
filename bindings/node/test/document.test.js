@@ -4090,3 +4090,24 @@ test('masked PDF group and direct text retains semantics through the C ABI', () 
     } finally { document.close(); }
   }
 });
+
+test('shaped RTL PDF export keeps OFD and public SVG logical text', () => {
+  for (const text of ['سلام', 'AسلامB']) {
+    const document = Document.create();
+    try {
+      const fontId = document.addEmbeddedFont('DejaVu Sans', fs.readFileSync(fixture('dejavu-sans.ttf')));
+      document.addBlankPage(120, 30);
+      document.addTextObject(0, text, [5, 5, 110, 20], { size: 6, font_id: fontId, shape: true });
+      assert.deepEqual(document.pageText(0), [text]);
+      assert.ok(document.pageSvg(0).includes(text));
+      assert.ok(!document.pageSvg(0).includes('data-ofd-rtl-semantic'));
+      assert.equal(document.toPdf().subarray(0, 5).toString(), '%PDF-');
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pageText(0), [text]);
+        assert.equal(reopened.toPdf().subarray(0, 5).toString(), '%PDF-');
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
