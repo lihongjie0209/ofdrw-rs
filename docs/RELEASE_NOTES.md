@@ -1,4 +1,6 @@
-Unreleased source changes after v0.1.0:
+# v0.1.1
+
+Changes since v0.1.0:
 
 - PDF annotation normal appearances import as native OFD composite appearances,
   including state selection, transformed BBox/Rect placement, rotation, CropBox,

@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "cbc 0.2.1",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "ofdrw",
