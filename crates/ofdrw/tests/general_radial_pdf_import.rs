@@ -83,7 +83,7 @@ fn nested_pattern_magnification_preserves_sampling_resolution() {
         let mut sizes = Vec::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            if entry.name().ends_with(".png") {
+            if entry.name().unwrap().ends_with(".png") {
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes).unwrap();
                 let image = image::load_from_memory(&bytes).unwrap();

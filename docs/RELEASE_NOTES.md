@@ -1,6 +1,25 @@
-# v0.1.1
+# v0.2.0
 
-Changes since v0.1.0:
+## Upgrade notes
+
+Rust callers matching the inner error of `OfdError::Zip` should use the zip 9
+error type. This public dependency change is why the release is 0.2.0.
+The C ABI version remains 1; language wrappers and native assets should use the
+same release version.
+
+## Changes since v0.1.0
+
+- Upgrade lopdf to 0.46.0 for bounded PDF object nesting, and zip to 9.1.3
+  for the patched extraction implementation. Rust dependency auditing is now
+  required in CI. The parser update addresses
+  [RUSTSEC-2026-0187](https://rustsec.org/advisories/RUSTSEC-2026-0187.html);
+  the ZIP update addresses RUSTSEC-2026-0367/0368/0369. The OFD reader uses
+  bounded in-memory entry reads rather than filesystem extraction.
+
+- Update the SM2 arithmetic dependency to crypto-bigint 0.7.10 and declare a
+  minimum of 0.7.6 for consumers, addressing
+  [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html).
+  The associated ctutils dependency is updated to 0.4.7.
 
 - PDF annotation normal appearances import as native OFD composite appearances,
   including state selection, transformed BBox/Rect placement, rotation, CropBox,

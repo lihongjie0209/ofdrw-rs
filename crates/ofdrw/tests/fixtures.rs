@@ -27065,7 +27065,6 @@ fn exports_multi_page_vector_pdf_with_physical_page_sizes() {
         assert!((width_pt - expected_width * 72.0 / 25.4).abs() < 0.1);
         assert!(!parsed
             .get_page_content(*pages.get(&index).unwrap())
-            .unwrap()
             .is_empty());
     }
     assert!(OfdDocument::new().to_pdf().is_err());
@@ -29606,7 +29605,7 @@ fn writes_even_odd_paths_through_public_style_api() {
     );
     let pdf = lopdf::Document::load_mem(&reopened.to_pdf().unwrap()).unwrap();
     let page_id = *pdf.get_pages().values().next().unwrap();
-    let content = lopdf::content::Content::decode(&pdf.get_page_content(page_id).unwrap()).unwrap();
+    let content = lopdf::content::Content::decode(&pdf.get_page_content(page_id)).unwrap();
     let even_odd_on_page = content
         .operations
         .iter()
@@ -33355,11 +33354,14 @@ fn reports_missing_signed_file_without_losing_other_digest_results() {
         let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..source.len() {
             let mut entry = source.by_index(index).unwrap();
-            if entry.is_dir() || entry.name() == missing_path {
+            if entry.is_dir() || entry.name().unwrap() == missing_path {
                 continue;
             }
             output
-                .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+                .start_file(
+                    entry.name().unwrap(),
+                    zip::write::SimpleFileOptions::default(),
+                )
                 .unwrap();
             std::io::copy(&mut entry, &mut output).unwrap();
         }

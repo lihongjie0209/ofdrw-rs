@@ -127,7 +127,8 @@ impl SimpleEncoding {
                 Self {
                     dingbats,
                     characters: std::array::from_fn(|index| {
-                        table[index].and_then(|value| char::from_u32(u32::from(value)))
+                        table[index]
+                            .and_then(|value| char::from_u32(u32::from(value.utf16_code_unit())))
                     }),
                     glyph_names: std::array::from_fn(|_| None),
                 }

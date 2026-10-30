@@ -5,13 +5,13 @@ not require cgo. Use the module and native assets from the same release;
 check GitHub Releases for version availability. Install the module:
 
 ```sh
-go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.1
+go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.2.0
 ```
 
 Download native ZIPs from [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases):
 
 ```sh
-curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.1/ofdrw-native-linux-x64-v0.1.1.zip
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.2.0/ofdrw-native-linux-x64-v0.2.0.zip
 unzip native.zip -d native
 ```
 
@@ -38,4 +38,4 @@ func main() {
 
 `Open`, `FromBytes` and `FromPDF` read documents; `PageSVG`, `PagePNG` and
 `ToPDF` export content. Page indexes start at zero and coordinates use millimeters.
-The Go module version tag is `bindings/go/v0.1.1` in the repository.
+The Go module version tag is `bindings/go/v0.2.0` in the repository.

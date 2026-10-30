@@ -11,7 +11,7 @@ pub fn extract(bytes: &[u8]) -> String {
         .as_dict()
         .unwrap()
         .clone();
-    let content = lopdf::content::Content::decode(&pdf.get_page_content(page_id).unwrap()).unwrap();
+    let content = lopdf::content::Content::decode(&pdf.get_page_content(page_id)).unwrap();
     let mut operations = Vec::new();
     let mut fonts = lopdf::Dictionary::new();
     flatten_forms(

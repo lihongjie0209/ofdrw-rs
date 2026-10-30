@@ -202,7 +202,7 @@ fn native_cff_actual_text_preserves_paint_and_repeated_round_trips() {
 fn wrap_replacement(source: &[u8], text: &str) -> Vec<u8> {
     let mut pdf = lopdf::Document::load_mem(source).unwrap();
     let page = pdf.get_pages()[&1];
-    let original = pdf.get_page_content(page).unwrap();
+    let original = pdf.get_page_content(page);
     let mut data = b"/Span << /ActualText <FEFF".to_vec();
     for unit in text.encode_utf16() {
         data.extend_from_slice(format!("{unit:04X}").as_bytes());

@@ -1,6 +1,6 @@
 {
   "name": "ofdrw-rs",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Node.js bindings for the Rust OFD core",
   "main": "index.js",
   "types": "index.d.ts",

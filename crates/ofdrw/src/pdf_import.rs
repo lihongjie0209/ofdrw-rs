@@ -7850,8 +7850,13 @@ fn import_page(
         .transpose()?
         .unwrap_or(false);
     let bytes = pdf
-        .get_page_content(id)
-        .map_err(|error| OfdError::Invalid(format!("cannot read PDF page content: {error}")))?;
+        .get_page_content_with_limit(id, MAX_ENTRY_BYTES as usize)
+        .map_err(|error| match error {
+            lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. }) => {
+                OfdError::Limit("PDF page content is too large".into())
+            }
+            error => OfdError::Invalid(format!("cannot read PDF page content: {error}")),
+        })?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
         return Err(OfdError::Limit("PDF page content is too large".into()));
     }

@@ -6,20 +6,20 @@
 使用 Rust 实现的 OFD 文档库，提供 **Rust、Python、Go、Node.js 和 C ABI**。
 以 [Java OFDRW](https://github.com/ofdrw/ofdrw) 为兼容性参考，优先实现包读写、页面对象、资源、布局、渲染和文档转换。
 
-当前源码版本为 **0.1.1**，已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
+当前源码版本为 **0.2.0**，已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
 本页安装命令对应此版本；是否已发布请以各原生仓库和 GitHub Releases 的记录为准。
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
-版本变更见 [v0.1.1 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
+版本变更见 [v0.2.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
 
 ## 安装渠道
 
 | 语言 | 原生仓库 | 对应版本安装方式 |
 | --- | --- | --- |
-| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `pip install ofdrw-rs==0.1.1` |
-| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs@0.1.1` |
-| Rust | [crates.io](https://crates.io/crates/ofdrw) | `ofdrw = "0.1.1"` |
-| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.1` |
+| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `pip install ofdrw-rs==0.2.0` |
+| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs@0.2.0` |
+| Rust | [crates.io](https://crates.io/crates/ofdrw) | `ofdrw = "0.2.0"` |
+| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.2.0` |
 
 各语言使用原生包管理工具，无需 ORAS 或 GitHub Packages 登录。
 Go / C 所需动态库、静态库和 C 头文件保留在 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases)。
@@ -33,11 +33,11 @@ Linux wheels 通过 auditwheel 检查并标记为 manylinux；预编译 native �
 需要 Python 3.10+，直接从 PyPI 安装：
 
 ```sh
-python -m pip install ofdrw-rs==0.1.1
+python -m pip install ofdrw-rs==0.2.0
 ```
 
 wheel 已带 Rust 共享库，不需要安装 Rust。它会自动安装 CFFI 依赖。
-也可从 [v0.1.1 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.1.1)
+也可从 [v0.2.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.2.0)
 下载匹配系统和架构的 wheel 后安装。
 
 ```python
@@ -62,7 +62,7 @@ with Document.open("hello.ofd") as document:
 需要 Node.js 20+。直接从 npm 安装：
 
 ```sh
-npm install ofdrw-rs@0.1.1
+npm install ofdrw-rs@0.2.0
 ```
 
 ```js
@@ -87,10 +87,10 @@ Go 包通过 purego 动态加载 C ABI，**不需要 cgo**。需要 Go 1.22+。
 先从 GitHub Releases 下载对应平台的 native ZIP 并解压，设置动态库的绝对路径：
 
 ```sh
-curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.1.1/ofdrw-native-linux-x64-v0.1.1.zip
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.2.0/ofdrw-native-linux-x64-v0.2.0.zip
 unzip native.zip -d native
-export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.1.1/libofdrw_ffi.so"
-go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.1.1
+export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.2.0/libofdrw_ffi.so"
+go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.2.0
 ```
 
 macOS 使用 `libofdrw_ffi.dylib`，Windows 使用 `ofdrw_ffi.dll`。
@@ -112,7 +112,7 @@ func main() {
 }
 ```
 
-Release 会同时创建 Go 子模块标签 `bindings/go/v0.1.1`。
+Release 会同时创建 Go 子模块标签 `bindings/go/v0.2.0`。
 更多内容见 [Go 说明](bindings/go/README.md)。
 
 ## Rust
@@ -121,7 +121,7 @@ Release 会同时创建 Go 子模块标签 `bindings/go/v0.1.1`。
 
 ```toml
 [dependencies]
-ofdrw = "0.1.1"
+ofdrw = "0.2.0"
 ```
 
 ```rust
@@ -153,7 +153,7 @@ cargo build --release --locked -p ofdrw-ffi
 
 ## 图像插值与 PDF 批注
 
-以下功能需要 0.1.1 或更新版本，也可使用此版本的源码及对应共享库。
+以下功能需要 0.2.0 或更新版本，也可使用此版本的源码及对应共享库。
 
 ### 图像插值
 

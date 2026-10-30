@@ -3914,7 +3914,7 @@ impl OfdDocument {
             if file.is_dir() {
                 continue;
             }
-            let path = normalize_path(file.name(), false)?;
+            let path = normalize_path(&file.name()?, false)?;
             if entries.contains_key(&path) {
                 return Err(OfdError::Invalid(format!("duplicate entry {path}")));
             }

@@ -14,7 +14,7 @@ strip = "debuginfo"
 [workspace.dependencies]
 roxmltree = "0.20"
 thiserror = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 
