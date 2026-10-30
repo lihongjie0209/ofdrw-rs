@@ -1981,13 +1981,19 @@ Source mappings and original notices are pinned to
 with [per-file hashes](../crates/ofdrw/assets/cid_unicode/manifest.json) checked
 offline in CI. ToUnicode CMaps also accept single-line XUID metadata.
 
-Other source fonts use the document's fallback font for previews. A usable font
-covering the text is required for reliable PDF text export as well: when multiple
-characters become the same missing glyph (`.notdef`), the current exporter can
-conflate their ToUnicode mappings. OFD text extraction retains the source text;
-this PDF export limitation is not resolved by the embedded test-only CJK font.
-The PDF semantic regression tests now embed their own geometric Unicode font
-and also run with a Latin-only system font configuration on Linux.
+Other source fonts use the document's fallback font for previews. PDF export
+adds per-occurrence `ActualText` to missing glyph 0 through the focused
+`ofdrw-svg2pdf` fork of svg2pdf 0.13.0. This retains distinct original characters
+when a font cannot display them, including repeated and supplementary-plane
+characters, while preserving the original missing-glyph outlines and placement.
+The font remains visibly missing. Readers which ignore `ActualText` can still
+conflate those characters through the shared `.notdef` ToUnicode entry. The
+current native PDF importer also reads ToUnicode rather than ActualText; an
+export/reimport cycle through that importer does not yet resolve this case.
+Seven regression cases force isolated TrueType or CFF font databases with fallback disabled;
+Poppler extraction and optional Ghostscript before/after pixel comparisons check
+the result. The other PDF semantic regression tests embed their own geometric
+Unicode font and run with a Latin-only system font configuration on Linux.
 Unbundled
 named CID CMaps remain unsupported. The `'` and `"` line operators
 are supported.

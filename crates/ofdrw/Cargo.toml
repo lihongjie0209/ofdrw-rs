@@ -18,7 +18,7 @@ sm3 = "0.5.0"
 sha2 = "0.11.0"
 base64 = "0.23.1"
 resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
-svg2pdf = { version = "0.13.0", default-features = false, features = ["image", "text"] }
+svg2pdf = { package = "ofdrw-svg2pdf", path = "../ofdrw-svg2pdf", version = "0.13.0-ofdrw.1", default-features = false, features = ["image", "text"] }
 pdf-writer = "0.12.1"
 lopdf = { version = "0.38.0", default-features = false }
 flate2 = "1.1"

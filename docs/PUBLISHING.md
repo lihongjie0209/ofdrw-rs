@@ -51,6 +51,15 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 
 ## 发布步骤
 
+转换器依赖 `ofdrw-svg2pdf` 使用独立版本。首次发布或修改该分支时，
+先更新其 Cargo 版本及核心依赖，将提交推送到 main 并等待完整 CI 成功。
+然后运行 `Publish SVG PDF converter`（`publish-svg2pdf.yml`），输入该提交 SHA；
+工作流验证同一提交的 CI、打包并使用现有 `CARGO_REGISTRY_TOKEN` 发布到 crates.io。
+确认该依赖版本可见后，再打包和发布依赖它的新核心版本。已发布的转换器版本
+保持不可变，后续修改需要递增版本。来源、许可证和改动见
+[转换器说明](../crates/ofdrw-svg2pdf/README.md)。
+
+
 1. 更新 Rust 核心、C ABI、Python 和 Node.js 的版本，运行 `scripts/check_release_version.py vX.Y.Z`。
 2. 将提交推送到 `main`，等待该提交的完整 CI 成功。
 3. 创建并推送相同提交的 `vX.Y.Z` 标签。

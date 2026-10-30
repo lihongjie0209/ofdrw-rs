@@ -10,6 +10,15 @@ that project. Test certificates and private keys are public test material,
 not production credentials. Fixture origins and additional font/profile
 license notices are recorded in crates/ofdrw/tests/fixtures/README.md.
 
+Bundled SVG-to-PDF converter:
+crates/ofdrw-svg2pdf is derived from typst/svg2pdf 0.13.0, upstream commit
+ccab6d7a3081f512d412dfef456caed2caf3a698.
+https://github.com/typst/svg2pdf
+Authors: Laurenz Stampfl and Martin Haug, and upstream contributors.
+License: MIT OR Apache-2.0; both license texts are retained in that directory.
+Changes add missing-glyph ActualText, explicit lifetimes, formatting and
+OFD-specific package metadata/default features. See its README for details.
+
 Additional font metric and glyph-list notices:
 
 Adobe Core 14 font metrics

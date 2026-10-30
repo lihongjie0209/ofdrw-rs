@@ -20,6 +20,28 @@ import (
 	"unicode/utf16"
 )
 
+// Inspect link annotations through the public importer, independent of PDF
+// dictionary whitespace and stream compression.
+func exportedPDFLinkCount(t *testing.T, data []byte) int {
+	t.Helper()
+	document, err := FromPDF(data)
+	if err != nil {
+		t.Fatalf("reimport exported PDF: %v", err)
+	}
+	defer document.Close()
+	annotations, err := document.Annotations()
+	if err != nil {
+		t.Fatalf("read exported PDF annotations: %v", err)
+	}
+	count := 0
+	for _, annotation := range annotations {
+		if annotation.Type == "Link" {
+			count++
+		}
+	}
+	return count
+}
+
 func TestNativeBindingsFitWindowsCallingConvention(t *testing.T) {
 	apiType := reflect.TypeOf(nativeAPI{})
 	for i := 0; i < apiType.NumField(); i++ {
@@ -3032,7 +3054,7 @@ func TestPromotesAndAppliesPageTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 3 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 3 {
 		t.Fatalf("template PDF links: %v", err)
 	}
 	sources, err := doc.PageSources(2)
@@ -3297,7 +3319,7 @@ func TestAddsURIActionToPageObject(t *testing.T) {
 		t.Fatalf("actions: %v, %v", actions, err)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 1 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 1 {
 		t.Fatalf("PDF object link: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "uri-action.ofd")
@@ -3349,7 +3371,7 @@ func TestActionRegionsRoundTripAndPDFLinks(t *testing.T) {
 		t.Fatalf("first area: %v", actions[0].Region.Areas[0])
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 1 || bytes.Count(pdf, []byte("/QuadPoints")) != 1 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 1 || bytes.Count(pdf, []byte("/QuadPoints")) != 1 {
 		t.Fatalf("PDF links: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "regions.ofd")
@@ -3421,7 +3443,7 @@ func TestAddsGotoActionToPageObject(t *testing.T) {
 		t.Fatalf("actions: %v, %v", actions, err)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 1 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 1 {
 		t.Fatalf("PDF object GoTo link: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "goto-action.ofd")
@@ -4321,7 +4343,7 @@ func TestImportsPDFLinkAnnotations(t *testing.T) {
 		t.Fatalf("GoTo action: %+v", annotations[1].Actions)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 2 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 2 {
 		t.Fatalf("PDF links: %v", err)
 	}
 	issues, err := doc.ValidateReferences()
@@ -4681,7 +4703,7 @@ func TestImportsNamedPDFLinkDestinations(t *testing.T) {
 		t.Fatalf("wrong page targets: %+v", annotations)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 2 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 2 {
 		t.Fatalf("PDF links: %v", err)
 	}
 }
@@ -4705,7 +4727,7 @@ func TestImportsPDFLinkQuadrilaterals(t *testing.T) {
 		t.Fatalf("quadrilateral areas: %+v", region)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 2 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 2 {
 		t.Fatalf("PDF links: %v", err)
 	}
 }
@@ -16414,7 +16436,7 @@ func TestAddsURILinkAnnotation(t *testing.T) {
 		t.Fatalf("invisible link changed image: %v", err)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || !bytes.Contains(pdf, []byte("/Subtype /Link")) {
+	if err != nil || exportedPDFLinkCount(t, pdf) == 0 {
 		t.Fatalf("PDF link missing: %v", err)
 	}
 	issues, err := doc.ValidateReferences()
@@ -16463,7 +16485,7 @@ func TestAddsGotoAndBookmarkLinkAnnotations(t *testing.T) {
 		t.Fatalf("link targets: %+v", annotations)
 	}
 	pdf, err := doc.ToPDF()
-	if err != nil || bytes.Count(pdf, []byte("/Subtype /Link")) != 2 {
+	if err != nil || exportedPDFLinkCount(t, pdf) != 2 {
 		t.Fatalf("PDF links: %v", err)
 	}
 	issues, err := doc.ValidateReferences()

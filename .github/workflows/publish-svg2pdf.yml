@@ -1,0 +1,46 @@
+name: Publish SVG PDF converter
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact source commit with successful main CI
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-svg2pdf
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Require successful CI for the exact source
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const source = (await exec.getExecOutput('git', ['rev-parse', 'HEAD'])).stdout.trim();
+            const {data} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: source, per_page: 100
+            });
+            const verified = data.workflow_runs.find(run =>
+              run.head_sha === source && run.event === 'push' && run.head_branch === 'main' &&
+              run.status === 'completed' && run.conclusion === 'success');
+            if (!verified) throw new Error('No successful main CI for this source');
+            core.notice(`Verified source using ${verified.html_url}`);
+      - name: Package converter
+        run: cargo package -p ofdrw-svg2pdf --locked
+      - name: Publish converter to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ofdrw-svg2pdf --locked

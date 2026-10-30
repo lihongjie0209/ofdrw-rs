@@ -175,3 +175,5 @@ bash scripts/check-rust-coverage.sh
 
 [Apache-2.0](LICENSE)。来源和测试材料说明见 [NOTICE](NOTICE) 及
 [fixtures README](crates/ofdrw/tests/fixtures/README.md)。
+内含的 [SVG→PDF 转换器分支](crates/ofdrw-svg2pdf/README.md)
+保留上游 MIT OR Apache-2.0 许可证。

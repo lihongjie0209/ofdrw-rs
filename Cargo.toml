@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ofdrw", "crates/ofdrw-ffi"]
+members = ["crates/ofdrw", "crates/ofdrw-ffi", "crates/ofdrw-svg2pdf"]
 resolver = "2"
 
 [workspace.package]

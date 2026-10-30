@@ -1,5 +1,15 @@
 Unreleased source changes after v0.1.0:
 
+- PDF export preserves per-occurrence source Unicode for missing glyph 0 with
+  ActualText, avoiding the tested “中文” → “文文” extraction collision. The
+  focused ofdrw-svg2pdf fork retains upstream licensing. Seven font-isolated
+  cases cover TrueType/CFF, BMP, supplementary, repeated and mixed text; Poppler checks the
+  extracted text and optional Ghostscript compares unchanged painted pixels.
+  Missing fonts remain visibly missing; readers ignoring ActualText still rely
+  on the ambiguous shared ToUnicode entry. The native PDF importer does not
+  yet consume ActualText, so this fixes extraction in supporting readers rather
+  than the native export/reimport cycle.
+
 - OFD-A preparation removes Audio/Video declarations from document, public,
   page and referenced-template resource scopes. Existing action normalization
   removes playback actions. Obsolete payloads are pruned only when no XML value
