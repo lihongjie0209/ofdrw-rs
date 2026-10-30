@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# Full debug symbols and incremental objects exhaust hosted runners when all
+# integration tests and examples are linked. Coverage instrumentation is separate.
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
 concurrency:
   group: ci-${{ github.ref }}
   # Let main finish all six targets so frequent source updates retain verified builds.
