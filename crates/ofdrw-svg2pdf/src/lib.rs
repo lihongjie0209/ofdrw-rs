@@ -64,8 +64,15 @@ use crate::util::context::Context;
 use crate::util::helper::{deflate, ContentExt, RectExt, TransformExt};
 use crate::util::resources::ResourceContainer;
 
+/// The exact sRGB profile used for RGB blending and colors in generated PDFs.
+/// Consumers can recognize this profile without treating arbitrary RGB ICC
+/// blending spaces as interchangeable with DeviceRGB.
+pub fn srgb_profile() -> &'static [u8] {
+    include_bytes!("icc/sRGB-v4.icc")
+}
+
 // The ICC profiles.
-static SRGB_ICC_DEFLATED: Lazy<Vec<u8>> = Lazy::new(|| deflate(include_bytes!("icc/sRGB-v4.icc")));
+static SRGB_ICC_DEFLATED: Lazy<Vec<u8>> = Lazy::new(|| deflate(srgb_profile()));
 static GRAY_ICC_DEFLATED: Lazy<Vec<u8>> = Lazy::new(|| deflate(include_bytes!("icc/sGrey-v4.icc")));
 
 /// Options for the resulting PDF file.

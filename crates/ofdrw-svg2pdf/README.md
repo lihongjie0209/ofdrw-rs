@@ -11,6 +11,9 @@ Local changes: missing-glyph ActualText, two explicit elided lifetimes for
 current Rust lint compatibility, formatting, self-contained runnable documentation examples, package metadata, and disabling
 raster filters in default features (still available through `filters`).
 
+The fork also exposes its exact built-in sRGB profile for faithful native
+transparency-group reimport.
+
 The converter has an independent version. After changes, bump its version and
 the core's dependency together. Once main CI succeeds for the exact commit,
 run the `Publish SVG PDF converter` workflow with that commit. Publish this

@@ -11,6 +11,7 @@ pub(super) fn import(
 ) -> Result<(), OfdError> {
     let width = (page.box_[2] - page.box_[0]) * MM_PER_PT;
     let height = (page.box_[3] - page.box_[1]) * MM_PER_PT;
+    let alpha = (parent.fill_alpha * 255.).round() as u8;
     let scratch = output.pages()?.len();
     output.add_blank_page(width, height)?;
     let path = output.pages()?[scratch].path.clone();
@@ -19,18 +20,37 @@ pub(super) fn import(
         ..*page
     };
     import_content(output, &context, content, graphics, active_forms)?;
-    let children = {
+    let (children, invisible_text) = {
         let bytes = output.required_entry(&path)?;
         let parsed = parse_xml(&path, bytes)?;
         let source = parsed.input_text();
-        direct_page_objects(parsed.root_element())
+        let children = direct_page_objects(parsed.root_element())
             .map(|node| &source[node.range()])
-            .collect::<String>()
+            .collect::<String>();
+        let invisible_text = if alpha == 0 {
+            let mut text = Vec::new();
+            for object in direct_page_objects(parsed.root_element()) {
+                text.extend(semantic_text::from_composite(output, scratch, object)?);
+            }
+            Some(text)
+        } else {
+            None
+        };
+        (children, invisible_text)
     };
     // Keep nested font/image/pattern resources in the shared document scope.
     // Only the temporary placement page is discarded.
     output.remove_page(scratch)?;
     output.remove_entry(&path)?;
+    // PDF text remains selectable when its group's compositing alpha is zero.
+    // Retain that text as nonpainting objects rather than hiding it behind an
+    // Alpha=0 OFD composite, which would also hide it from text extraction.
+    if let Some(texts) = invisible_text {
+        for text in texts {
+            output.append_page_object(page.index, |_, id| text.with_id(id))?;
+        }
+        return Ok(());
+    }
     if children.is_empty() {
         return Ok(());
     }
@@ -42,7 +62,7 @@ pub(super) fn import(
         &resource,
         [0., 0., width, height],
         crate::CompositeStyle {
-            alpha: Some((parent.fill_alpha * 255.).round() as u8),
+            alpha: Some(alpha),
             ..crate::CompositeStyle::default()
         },
     )?;

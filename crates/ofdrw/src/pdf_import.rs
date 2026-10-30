@@ -1,5 +1,6 @@
 //! Strict import of PDF page geometry and basic vector painting.
 
+mod actual_text;
 pub(crate) mod cff_font;
 mod cid_encoding;
 mod cid_unicode;
@@ -443,6 +444,7 @@ struct TextState {
     positioned: bool,
     clip_areas: Vec<String>,
     clip_requested: bool,
+    replacement_mapping: bool,
 }
 
 #[derive(Clone)]
@@ -468,6 +470,7 @@ impl Default for TextState {
             positioned: false,
             clip_areas: Vec::new(),
             clip_requested: false,
+            replacement_mapping: false,
         }
     }
 }
@@ -698,6 +701,47 @@ struct TransparencyGroup {
     knockout: bool,
 }
 
+fn supported_rgb_group_space(pdf: &PdfDocument, value: &Object) -> Result<bool, OfdError> {
+    let value = pdf_resolved_value(Some(pdf), value, "group color space")?;
+    if value.as_name().ok() == Some(b"DeviceRGB") {
+        return Ok(true);
+    }
+    let Ok(values) = value.as_array() else {
+        return Ok(false);
+    };
+    let [kind, profile] = values.as_slice() else {
+        return Ok(false);
+    };
+    if pdf_resolved_value(Some(pdf), kind, "group color space kind")?
+        .as_name()
+        .ok()
+        != Some(b"ICCBased")
+    {
+        return Ok(false);
+    }
+    let profile = pdf_resolved_value(Some(pdf), profile, "group ICC profile")?
+        .as_stream()
+        .map_err(|_| OfdError::Invalid("PDF group ICC profile is not a stream".into()))?;
+    let n = profile
+        .dict
+        .get(b"N")
+        .map_err(|_| OfdError::Invalid("PDF group ICC N is missing".into()))?;
+    if pdf_resolved_value(Some(pdf), n, "group ICC N")?
+        .as_i64()
+        .ok()
+        != Some(3)
+    {
+        return Ok(false);
+    }
+    if let Ok(range) = profile.dict.get(b"Range") {
+        if pdf_color_numbers::<6>(Some(pdf), range, "group ICC Range")? != [0., 1., 0., 1., 0., 1.]
+        {
+            return Ok(false);
+        }
+    }
+    Ok(pdf_byte_stream_data(profile, Some(pdf), "group ICC profile")? == svg2pdf::srgb_profile())
+}
+
 fn validate_rgb_transparency_group(
     pdf: &PdfDocument,
     value: &Object,
@@ -727,13 +771,16 @@ fn validate_rgb_transparency_group(
     let color_space = entry(b"CS")?;
     let isolated = entry(b"I")?;
     let knockout = entry(b"K")?;
+    let rgb = color_space
+        .as_ref()
+        .map(|space| supported_rgb_group_space(pdf, space))
+        .transpose()?
+        .unwrap_or(true);
     if group_type
         .as_ref()
         .is_some_and(|value| value.as_name().ok() != Some(b"Group"))
         || subtype.as_ref().and_then(|value| value.as_name().ok()) != Some(b"Transparency")
-        || color_space
-            .as_ref()
-            .is_some_and(|value| value.as_name().ok() != Some(b"DeviceRGB"))
+        || !rgb
         || [isolated.as_ref(), knockout.as_ref()]
             .into_iter()
             .flatten()
@@ -7211,7 +7258,7 @@ fn finish_import_text(
             text,
             cids,
             simple_codes,
-            vertical_positions.is_some(),
+            vertical_positions.is_some() || state.replacement_mapping,
         )?;
         let glyphs = embedded.as_ref().and_then(|font| font.glyphs.as_deref());
         if glyphs.is_none() && text.chars().count() != positions.len() {
@@ -7843,7 +7890,12 @@ fn import_content(
     let mut pending_clip = None;
     let mut text = TextState::default();
     let mut compatibility_depth = 0_usize;
-    let mut marked_content = Vec::new();
+    struct MarkedContent {
+        active: bool,
+        visible: bool,
+        replacement: Option<actual_text::Replacement>,
+    }
+    let mut marked_content = Vec::<MarkedContent>::new();
     for operation in content.operations {
         tiling_pattern::validate_operator(&operation, &state, page_context)?;
         if text.active
@@ -7886,7 +7938,10 @@ fn import_content(
                 "PDF clipping path must end before another path or graphics state".into(),
             ));
         }
-        let visible = marked_content.iter().all(|(_, visible)| *visible);
+        let visible = marked_content.iter().all(|scope| scope.visible);
+        text.replacement_mapping = marked_content
+            .iter()
+            .any(|scope| scope.replacement.is_some());
         let text_only_clip = matches!(operation.operator.as_str(), "Tj" | "TJ" | "'" | "\"")
             && matches!(text.render_mode, 3 | 7);
         let mask = if visible
@@ -7967,7 +8022,11 @@ fn import_content(
                             "PDF marked-content nesting is too deep".into(),
                         ));
                     }
-                    marked_content.push((text.active, true));
+                    marked_content.push(MarkedContent {
+                        active: text.active,
+                        visible: true,
+                        replacement: None,
+                    });
                 }
             }
             "DP" | "BDC" => {
@@ -7979,6 +8038,7 @@ fn import_content(
                 let tag = tag
                     .as_name()
                     .map_err(|_| OfdError::Invalid("PDF marked-content tag is invalid".into()))?;
+                let mut replacement = None;
                 let visible = if tag == b"OC" && !optional_content_enabled {
                     true
                 } else {
@@ -8002,9 +8062,15 @@ fn import_content(
                             optional_content_value_visible(pdf, properties)?
                         }
                     } else {
+                        let properties =
+                            pdf_resolved_value(Some(pdf), properties, "marked-content properties")?;
                         properties.as_dict().map_err(|_| {
                             OfdError::Invalid("PDF marked-content properties are invalid".into())
                         })?;
+                        if operation.operator == "BDC" {
+                            replacement =
+                                actual_text::Replacement::read(pdf, properties, output.next_id)?;
+                        }
                         true
                     }
                 };
@@ -8014,14 +8080,32 @@ fn import_content(
                             "PDF marked-content nesting is too deep".into(),
                         ));
                     }
-                    marked_content.push((text.active, visible));
+                    marked_content.push(MarkedContent {
+                        active: text.active,
+                        visible,
+                        replacement,
+                    });
                 }
             }
             "EMC" => {
-                if !operation.operands.is_empty()
-                    || marked_content.pop().map(|(active, _)| active) != Some(text.active)
-                {
+                if !operation.operands.is_empty() {
                     return Err(OfdError::Invalid("unbalanced PDF marked content".into()));
+                }
+                let scope = marked_content
+                    .pop()
+                    .ok_or_else(|| OfdError::Invalid("unbalanced PDF marked content".into()))?;
+                if scope.active != text.active {
+                    return Err(OfdError::Invalid("unbalanced PDF marked content".into()));
+                }
+                if scope.visible
+                    && marked_content.iter().all(|parent| parent.visible)
+                    && !marked_content
+                        .iter()
+                        .any(|parent| parent.replacement.is_some())
+                {
+                    if let Some(replacement) = scope.replacement {
+                        replacement.apply(output, page_index)?;
+                    }
                 }
             }
             "q" => {
@@ -8446,7 +8530,7 @@ fn import_content(
             }
             "ET" => {
                 text.require_active()?;
-                if marked_content.last().is_some_and(|(active, _)| *active) {
+                if marked_content.last().is_some_and(|scope| scope.active) {
                     return Err(OfdError::Invalid("PDF marked content crosses ET".into()));
                 }
                 if text.clip_requested {
@@ -15041,6 +15125,190 @@ mod tests {
         let mut deep = b"BX ".repeat(257);
         deep.extend_from_slice(&b"EX ".repeat(257));
         assert!(OfdDocument::from_pdf_bytes(&text_pdf(&deep, b"Helvetica")).is_err());
+    }
+
+    fn mapped_actual_text_pdf(content: &[u8]) -> Vec<u8> {
+        let mut pdf = PdfDocument::load_mem(&text_pdf_with_widths(
+            content,
+            b"DejaVuSans",
+            Some((65, &[684., 686.])),
+        ))
+        .unwrap();
+        let program = pdf.add_object(lopdf::Stream::new(
+            dictionary! {},
+            include_bytes!("../tests/fixtures/dejavu-sans.ttf").to_vec(),
+        ));
+        let descriptor = pdf.add_object(dictionary! {"Type" => "FontDescriptor", "FontName" => "DejaVuSans", "FontFile2" => program});
+        let font = pdf.get_object_mut((5, 0)).unwrap().as_dict_mut().unwrap();
+        font.set("Subtype", Object::Name(b"TrueType".to_vec()));
+        font.set("FontDescriptor", descriptor);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn imports_actual_text_across_mapped_runs_and_nested_scopes_without_changing_pixels() {
+        let plain = mapped_actual_text_pdf(b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET");
+        let reference = OfdDocument::from_pdf_bytes(&plain)
+            .unwrap()
+            .page_png(0, 72.)
+            .unwrap();
+        for content in [
+            b"/Span << /ActualText (word) >> BDC BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET EMC".as_slice(),
+            b"BT /F1 12 Tf 10 20 Td /Span << /ActualText (word) >> BDC (A) Tj (B) Tj EMC ET",
+            b"/Span << /ActualText (word) >> BDC /Span << /ActualText (ignored) >> BDC BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET EMC EMC",
+        ] {
+            let document = OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(content)).unwrap();
+            assert_eq!(document.page_text(0).unwrap().concat(), "word");
+            assert_eq!(document.page_png(0, 72.).unwrap(), reference);
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn actual_text_keeps_original_text_advance_and_clip_glyphs() {
+        for (plain, replacement) in [
+            (b"BT /F1 12 Tf 10 20 Td (AB) Tj (A) Tj ET".as_slice(), b"BT /F1 12 Tf 10 20 Td /Span << /ActualText (word) >> BDC (AB) Tj EMC (A) Tj ET".as_slice()),
+            (b"BT /F1 12 Tf 10 20 Td 7 Tr (AB) Tj ET 1 0 0 rg 0 0 72 72 re f".as_slice(), b"BT /F1 12 Tf 10 20 Td 7 Tr /Span << /ActualText (word) >> BDC (AB) Tj EMC ET 1 0 0 rg 0 0 72 72 re f".as_slice()),
+        ] {
+            let original = OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(plain)).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(replacement)).unwrap();
+            assert_eq!(document.page_text(0).unwrap()[0], "word");
+            assert_eq!(document.page_png(0, 72.).unwrap(), original.page_png(0, 72.).unwrap());
+            assert!(document.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn imports_named_and_indirect_actual_text_properties() {
+        let bytes =
+            mapped_actual_text_pdf(b"BT /F1 12 Tf 10 20 Td /Span /Replacement BDC (AB) Tj EMC ET");
+        let mut pdf = PdfDocument::load_mem(&bytes).unwrap();
+        let text = pdf.add_object(Object::string_literal("word"));
+        let property = pdf.add_object(dictionary! {"ActualText" => text});
+        let page = pdf.get_object_mut((3, 0)).unwrap().as_dict_mut().unwrap();
+        page.get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Properties", dictionary! {"Replacement" => property});
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert_eq!(
+            OfdDocument::from_pdf_bytes(&bytes)
+                .unwrap()
+                .page_text(0)
+                .unwrap(),
+            ["word"]
+        );
+    }
+
+    #[test]
+    fn actual_text_malformed_and_unsupported_sequences_return_explicit_errors() {
+        for content in [
+            b"/Span << /ActualText 123 >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC".as_slice(),
+            b"/Span << /ActualText <FEFF00> >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
+            b"/Span << /ActualText () >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
+            b"/Span << /ActualText (X) >> BDC BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET EMC",
+        ] {
+            assert!(
+                matches!(OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(content)), Err(OfdError::Invalid(message)) if message.contains("ActualText"))
+            );
+        }
+    }
+
+    #[test]
+    fn zero_alpha_pdf_groups_keep_selectable_text_without_painting_their_graphics() {
+        for alpha in [0.0_f32, 0.001] {
+            let source = mapped_actual_text_pdf(b"");
+            let mut pdf = PdfDocument::load_mem(&source).unwrap();
+            let resources = pdf
+                .get_object((3, 0))
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"Resources")
+                .unwrap()
+                .clone();
+            let group = pdf.add_object(lopdf::Stream::new(dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 72.into(), 72.into()],
+                "Resources" => resources,
+                "Group" => dictionary! {"S" => "Transparency", "CS" => "DeviceRGB", "I" => true},
+            }, b"BT /F1 12 Tf 10 20 Td (A) Tj ET 1 0 0 rg 0 0 20 20 re f".to_vec()));
+            let opacity = pdf.add_object(dictionary! {"ca" => alpha, "CA" => alpha});
+            pdf.get_object_mut((3, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set(
+                    "Resources",
+                    dictionary! {
+                        "XObject" => dictionary! {"Hidden" => group},
+                        "ExtGState" => dictionary! {"Opacity" => opacity},
+                    },
+                );
+            pdf.get_object_mut((4, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_plain_content(b"/Opacity gs /Hidden Do".to_vec());
+            let mut bytes = Vec::new();
+            pdf.save_to(&mut bytes).unwrap();
+            let document = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+            assert_eq!(document.page_text(0).unwrap(), ["A"]);
+            let image = image::load_from_memory(&document.page_png(0, 72.).unwrap())
+                .unwrap()
+                .to_rgb8();
+            assert!(image.pixels().all(|pixel| pixel.0 == [255, 255, 255]));
+            let reopened = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.page_text(0).unwrap(), ["A"]);
+            assert!(reopened.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_bundled_srgb_profile_for_icc_blending_groups() {
+        let mut pdf = PdfDocument::with_version("2.0");
+        let profile = pdf.add_object(lopdf::Stream::new(
+            dictionary! {"N" => 3, "Range" => vec![0.into(), 1.into(), 0.into(), 1.into(), 0.into(), 1.into()]},
+            svg2pdf::srgb_profile().to_vec(),
+        ));
+        let space = Object::Array(vec![
+            Object::Name(b"ICCBased".to_vec()),
+            Object::Reference(profile),
+        ]);
+        assert!(supported_rgb_group_space(&pdf, &space).unwrap());
+        let indirect = pdf.add_object(space.clone());
+        assert!(supported_rgb_group_space(&pdf, &Object::Reference(indirect)).unwrap());
+        pdf.get_object_mut(profile)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("N", 1);
+        assert!(!supported_rgb_group_space(&pdf, &space).unwrap());
+        let stream = pdf
+            .get_object_mut(profile)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.dict.set("N", 3);
+        stream.content[100] ^= 1;
+        assert!(!supported_rgb_group_space(&pdf, &space).unwrap());
+        let stream = pdf
+            .get_object_mut(profile)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.content = svg2pdf::srgb_profile().to_vec();
+        stream.dict.set(
+            "Range",
+            vec![0.into(), 2.into(), 0.into(), 1.into(), 0.into(), 1.into()],
+        );
+        assert!(!supported_rgb_group_space(&pdf, &space).unwrap());
+        assert!(!supported_rgb_group_space(&pdf, &Object::Name(b"DeviceCMYK".to_vec())).unwrap());
     }
 
     #[test]

@@ -1987,9 +1987,27 @@ adds per-occurrence `ActualText` to missing glyph 0 through the focused
 when a font cannot display them, including repeated and supplementary-plane
 characters, while preserving the original missing-glyph outlines and placement.
 The font remains visibly missing. Readers which ignore `ActualText` can still
-conflate those characters through the shared `.notdef` ToUnicode entry. The
-current native PDF importer also reads ToUnicode rather than ActualText; an
-export/reimport cycle through that importer does not yet resolve this case.
+conflate those characters through the shared `.notdef` ToUnicode entry.
+The native importer now reads marked-content ActualText from inline, named,
+and indirect property dictionaries, using PDFDocEncoding, UTF-16BE or BOM-led
+UTF-8. It retains complete native glyph mappings, original positions, text
+advance, clipping and paint while replacing TextCode values. Multi-run
+replacements distribute intact graphemes across those runs; individual caret
+positions are approximate because ActualText supplies no such positions.
+Graphic-only scopes add nonpainting semantic text. Nested replacements use the
+outer scope. The [replacement-text rule](https://pdf-issues.pdfa.org/32000-2-2020/clause14.html)
+applies to the marked sequence rather than independently to each glyph.
+Empty/shorter-than-run replacements of painted text, changed text without a
+usable embedded glyph program, scopes crossing composite objects and
+structure-tree ActualText remain unsupported. Those marked-content replacement
+cases return errors rather than silently importing the original text.
+
+Native page and Form transparency groups accept DeviceRGB and the converter's exact built-in
+sRGB ICC profile with default ranges. Other ICC blending spaces remain
+unsupported. Zero or quantized-zero group opacity preserves selectable text as
+nonpainting objects, so the converter's invisible semantic layer survives
+native PDF reimport without contributing visible pixels.
+
 Seven regression cases force isolated TrueType or CFF font databases with fallback disabled;
 Poppler extraction and optional Ghostscript before/after pixel comparisons check
 the result. The other PDF semantic regression tests embed their own geometric

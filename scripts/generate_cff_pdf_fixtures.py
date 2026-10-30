@@ -88,7 +88,7 @@ def font(cid=False, font_matrix=None, fd_matrix=None, dingbats=False, long_name=
     return output.getvalue(), raw
 
 
-def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal=False):
+def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal=False, actual_text=None):
     result = objects(font_bytes, simple=simple)
     if simple:
         result[4] = result[4].replace(b"/Subtype /TrueType", b"/Subtype /Type1")
@@ -122,6 +122,10 @@ def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal
         content = result[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
         result[3] = stream(b"", content)
         result[4] = result[4].replace(b"Identity-H", b"Identity-V")
+    if actual_text is not None:
+        content = result[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
+        replacement = (b"\xfe\xff" + actual_text.encode("utf-16-be")).hex().upper().encode()
+        result[3] = stream(b"", b"/Span << /ActualText <" + replacement + b"> >> BDC\n" + content + b"\nEMC")
     result[7] = result[7].replace(b"FontFile2", b"FontFile3")
     subtype = "OpenType" if not raw else ("Type1C" if simple or not cid else "CIDFontType0C")
     result[8] = stream(f"/Subtype /{subtype} /Filter /FlateDecode".encode(), zlib.compress(font_bytes, 9))

@@ -11,6 +11,27 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('retain ActualText through native CFF import and PDF round trips', () => {
+  let document = Document.fromPdfBytes(fs.readFileSync(fixture('actual-text-cff.pdf')));
+  for (let index = 0; index < 3; index += 1) {
+    let pdf;
+    try {
+      assert.equal(document.pageText(0).join(''), '中文');
+      assert.deepEqual(document.validateReferences(), []);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.equal(reopened.pageText(0).join(''), '中文');
+        pdf = reopened.toPdf();
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      document.close();
+    }
+    if (index < 2) document = Document.fromPdfBytes(pdf);
+  }
+});
+
 test('import Unicode sequences with original embedded PDF glyphs', () => {
   for (const [name, text, glyphs] of [
     ['type0-ligature-glyph.pdf', ['fiA', 'fi'], [3315, 36]],

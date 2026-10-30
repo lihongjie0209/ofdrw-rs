@@ -17,6 +17,20 @@ fn convert(text: &str, font: &[u8], family: &str) -> Vec<u8> {
 
 fn check_with_font(text: &str, replacements: &[&str], font: &[u8], family: &str) {
     let bytes = convert(text, font, family);
+    let imported = ofdrw::OfdDocument::from_pdf_bytes(&bytes).unwrap();
+    assert_eq!(imported.page_text(0).unwrap().concat(), text);
+    let reopened = ofdrw::OfdDocument::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.page_text(0).unwrap().concat(), text);
+    assert!(reopened.validate_references().unwrap().is_empty());
+    let exported = reopened.to_pdf().unwrap();
+    assert_eq!(
+        ofdrw::OfdDocument::from_pdf_bytes(&exported)
+            .unwrap()
+            .page_text(0)
+            .unwrap()
+            .concat(),
+        text
+    );
     let pdf = lopdf::Document::load_mem(&bytes).unwrap();
     let mut actual = Vec::new();
     for object in pdf.objects.values() {
@@ -46,27 +60,35 @@ fn check_with_font(text: &str, replacements: &[&str], font: &[u8], family: &str)
         }
     }
     assert_eq!(actual, replacements);
+    let mut legacy = pdf.clone();
+    for object in legacy.objects.values_mut() {
+        let Ok(stream) = object.as_stream_mut() else {
+            continue;
+        };
+        let Ok(data) = stream.get_plain_content() else {
+            continue;
+        };
+        let Ok(mut content) = lopdf::content::Content::decode(&data) else {
+            continue;
+        };
+        if !content.operations.iter().any(|op| op.operator == "BDC") {
+            continue;
+        }
+        content
+            .operations
+            .retain(|op| op.operator != "BDC" && op.operator != "EMC");
+        stream.set_plain_content(content.encode().unwrap());
+    }
+    let mut legacy_bytes = Vec::new();
+    legacy.save_to(&mut legacy_bytes).unwrap();
+    let legacy_native = ofdrw::OfdDocument::from_pdf_bytes(&legacy_bytes).unwrap();
+    assert_eq!(
+        imported.page_png(0, 72.).unwrap(),
+        legacy_native.page_png(0, 72.).unwrap(),
+        "ActualText changed native painted pixels"
+    );
     if let Some(gs) = std::env::var_os("OFDRW_GHOSTSCRIPT") {
         let temp = tempfile::tempdir().unwrap();
-        let mut legacy = pdf.clone();
-        for object in legacy.objects.values_mut() {
-            let Ok(stream) = object.as_stream_mut() else {
-                continue;
-            };
-            let Ok(data) = stream.get_plain_content() else {
-                continue;
-            };
-            let Ok(mut content) = lopdf::content::Content::decode(&data) else {
-                continue;
-            };
-            if !content.operations.iter().any(|op| op.operator == "BDC") {
-                continue;
-            }
-            content
-                .operations
-                .retain(|op| op.operator != "BDC" && op.operator != "EMC");
-            stream.set_plain_content(content.encode().unwrap());
-        }
         let before = temp.path().join("before.pdf");
         legacy.save(&before).unwrap();
         let after = temp.path().join("after.pdf");
@@ -155,4 +177,84 @@ fn supplementary_missing_character() {
 #[test]
 fn supported_glyphs_do_not_gain_actual_text() {
     check("AB", &[]);
+}
+
+#[test]
+fn native_cff_actual_text_preserves_paint_and_repeated_round_trips() {
+    let original =
+        ofdrw::OfdDocument::from_pdf_bytes(include_bytes!("fixtures/type1-raw-cff.pdf")).unwrap();
+    let document =
+        ofdrw::OfdDocument::from_pdf_bytes(include_bytes!("fixtures/actual-text-cff.pdf")).unwrap();
+    assert_eq!(document.page_text(0).unwrap(), ["中", "文"]);
+    assert_eq!(
+        document.page_png(0, 72.).unwrap(),
+        original.page_png(0, 72.).unwrap()
+    );
+    let mut bytes = document.to_pdf().unwrap();
+    for _ in 0..2 {
+        let imported = ofdrw::OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(imported.page_text(0).unwrap().concat(), "中文");
+        assert!(imported.validate_references().unwrap().is_empty());
+        bytes = imported.to_pdf().unwrap();
+    }
+}
+
+fn wrap_replacement(source: &[u8], text: &str) -> Vec<u8> {
+    let mut pdf = lopdf::Document::load_mem(source).unwrap();
+    let page = pdf.get_pages()[&1];
+    let original = pdf.get_page_content(page).unwrap();
+    let mut data = b"/Span << /ActualText <FEFF".to_vec();
+    for unit in text.encode_utf16() {
+        data.extend_from_slice(format!("{unit:04X}").as_bytes());
+    }
+    data.extend_from_slice(b"> >> BDC\n");
+    data.extend_from_slice(&original);
+    data.extend_from_slice(b"\nEMC");
+    let stream = pdf.add_object(lopdf::Stream::new(lopdf::dictionary! {}, data));
+    pdf.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Contents", stream);
+    let mut result = Vec::new();
+    pdf.save_to(&mut result).unwrap();
+    result
+}
+
+#[test]
+fn actual_text_retains_vertical_affine_stroked_and_clipped_cff_paint() {
+    for source in [
+        include_bytes!("fixtures/type0-vertical-cid-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type1-affine-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type1-stroked-affine-cff.pdf").as_slice(),
+        include_bytes!("fixtures/type0-clipped-fd-cff.pdf").as_slice(),
+    ] {
+        let original = ofdrw::OfdDocument::from_pdf_bytes(source).unwrap();
+        let imported =
+            ofdrw::OfdDocument::from_pdf_bytes(&wrap_replacement(source, "中文abcd")).unwrap();
+        assert_eq!(imported.page_text(0).unwrap().concat(), "中文abcd");
+        assert_eq!(
+            imported.page_png(0, 72.).unwrap(),
+            original.page_png(0, 72.).unwrap()
+        );
+        assert!(imported.validate_references().unwrap().is_empty());
+        let reopened = ofdrw::OfdDocument::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap().concat(), "中文abcd");
+    }
+}
+
+#[test]
+fn graphic_actual_text_retains_image_pixels_and_survives_native_pdf_export() {
+    let source = include_bytes!("fixtures/image.pdf");
+    let original = ofdrw::OfdDocument::from_pdf_bytes(source).unwrap();
+    let imported =
+        ofdrw::OfdDocument::from_pdf_bytes(&wrap_replacement(source, "caption")).unwrap();
+    assert_eq!(imported.page_text(0).unwrap(), ["caption"]);
+    assert_eq!(
+        imported.page_png(0, 72.).unwrap(),
+        original.page_png(0, 72.).unwrap()
+    );
+    assert!(imported.validate_references().unwrap().is_empty());
+    let reopened = ofdrw::OfdDocument::from_pdf_bytes(&imported.to_pdf().unwrap()).unwrap();
+    assert_eq!(reopened.page_text(0).unwrap().concat(), "caption");
 }

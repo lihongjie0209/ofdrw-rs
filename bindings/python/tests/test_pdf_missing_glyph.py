@@ -36,13 +36,34 @@ from ofdrw_rs import Document
 with Document.from_pdf_bytes(Path(sys.argv[1]).read_bytes()) as source:
     data = source.to_bytes()
 with Document.from_bytes(data) as reopened:
-    Path(sys.argv[2]).write_bytes(reopened.to_pdf())
+    exported = reopened.to_pdf()
+for _ in range(2):
+    with Document.from_pdf_bytes(exported) as imported:
+        assert "".join(imported.page_text(0)) == sys.argv[3]
+        assert imported.validate_references() == []
+        exported = imported.to_pdf()
+Path(sys.argv[2]).write_bytes(exported)
 """
     subprocess.run(
-        [sys.executable, "-c", program, str(fixtures / f"{name}.pdf"), str(output)],
+        [sys.executable, "-c", program, str(fixtures / f"{name}.pdf"), str(output), expected],
         env=dict(os.environ, FONTCONFIG_FILE=str(config)), check=True,
         capture_output=True, text=True,
     )
     result = subprocess.run([reader, "-raw", "-enc", "UTF-8", str(output), "-"],
                             check=True, capture_output=True, text=True)
     assert "".join(result.stdout.split()) == expected
+
+
+def test_imports_actual_text_with_native_cff_outlines():
+    from ofdrw_rs import Document
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures/actual-text-cff.pdf"
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert "".join(document.page_text(0)) == "中文"
+        assert document.validate_references() == []
+        data = document.to_bytes()
+    with Document.from_bytes(data) as reopened:
+        assert "".join(reopened.page_text(0)) == "中文"
+        exported = reopened.to_pdf()
+    with Document.from_pdf_bytes(exported) as imported:
+        assert "".join(imported.page_text(0)) == "中文"
+        assert imported.validate_references() == []
