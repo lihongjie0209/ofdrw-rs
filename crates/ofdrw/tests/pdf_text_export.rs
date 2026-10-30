@@ -4,7 +4,23 @@ use ofdrw::OfdDocument;
 mod pdf_text;
 
 fn check(name: &str, source: &[u8], expected: &str) {
-    let document = OfdDocument::from_pdf_bytes(source).unwrap();
+    let mut document = OfdDocument::from_pdf_bytes(source).unwrap();
+    // These fixtures deliberately have missing/nonembedded CJK fonts. Make
+    // semantic export independent of the runner's system fonts. This does not
+    // claim that an unavailable glyph can be rendered as a readable character.
+    if expected
+        .chars()
+        .any(|c| matches!(c, '中' | '文' | '\u{31350}'))
+    {
+        let font = include_bytes!("fixtures/pdf-text-fallback.ttf");
+        let face = ttf_parser::Face::parse(font, 0).unwrap();
+        for ch in expected.chars() {
+            assert!(face.glyph_index(ch).is_some(), "missing fixture glyph {ch}");
+        }
+        document
+            .add_embedded_font("OFD PDF Text Fixture", font)
+            .unwrap();
+    }
     assert_eq!(
         document.page_text(0).unwrap().concat(),
         expected,

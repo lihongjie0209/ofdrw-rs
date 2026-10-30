@@ -1981,7 +1981,14 @@ Source mappings and original notices are pinned to
 with [per-file hashes](../crates/ofdrw/assets/cid_unicode/manifest.json) checked
 offline in CI. ToUnicode CMaps also accept single-line XUID metadata.
 
-Other source fonts use the document's fallback font for previews. Unbundled
+Other source fonts use the document's fallback font for previews. A usable font
+covering the text is required for reliable PDF text export as well: when multiple
+characters become the same missing glyph (`.notdef`), the current exporter can
+conflate their ToUnicode mappings. OFD text extraction retains the source text;
+this PDF export limitation is not resolved by the embedded test-only CJK font.
+The PDF semantic regression tests now embed their own geometric Unicode font
+and also run with a Latin-only system font configuration on Linux.
+Unbundled
 named CID CMaps remain unsupported. The `'` and `"` line operators
 are supported.
 Text-state operators such as `Tr` and `Tf` are accepted before `BT`; text
