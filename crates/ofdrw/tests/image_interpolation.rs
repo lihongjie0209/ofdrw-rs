@@ -256,3 +256,64 @@ fn jpeg_sampling_keeps_original_compressed_payload() {
     assert_eq!(flags.iter().filter(|v| **v).count(), 1);
     assert_eq!(flags.iter().filter(|v| !**v).count(), 1);
 }
+
+#[test]
+fn image_sampling_api_edits_one_placement_and_restores_default() {
+    let mut doc = document();
+    let id = doc.page_objects(0).unwrap()[0].id.clone().unwrap();
+    doc.set_page_image_interpolate(0, &id, Some(true)).unwrap();
+    assert!(image_flags(&doc.to_pdf().unwrap())
+        .iter()
+        .all(|value| *value));
+    doc.set_page_image_interpolate(0, &id, Some(false)).unwrap();
+    assert_eq!(
+        image_flags(&doc.to_pdf().unwrap())
+            .iter()
+            .filter(|v| !**v)
+            .count(),
+        2
+    );
+    doc.set_page_image_interpolate(0, &id, None).unwrap();
+    assert!(image_flags(&doc.to_pdf().unwrap())
+        .iter()
+        .all(|value| *value));
+    let bytes = doc.to_bytes().unwrap();
+    for (page, object) in [(1, id.as_str()), (0, "missing"), (0, "")] {
+        assert!(doc
+            .set_page_image_interpolate(page, object, Some(false))
+            .is_err());
+        assert_eq!(doc.to_bytes().unwrap(), bytes);
+    }
+    let mut reopened = OfdDocument::from_bytes(&bytes).unwrap();
+    reopened
+        .set_page_image_interpolate(0, &id, Some(false))
+        .unwrap();
+    assert_eq!(
+        image_flags(&reopened.to_pdf().unwrap())
+            .iter()
+            .filter(|v| !**v)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn image_sampling_api_rejects_other_object_types_and_signed_pages() {
+    let mut doc = OfdDocument::new();
+    doc.add_text_page("text", 40., 20.).unwrap();
+    let id = doc.page_objects(0).unwrap()[0].id.clone().unwrap();
+    let before = doc.to_bytes().unwrap();
+    assert!(doc.set_page_image_interpolate(0, &id, Some(false)).is_err());
+    assert_eq!(doc.to_bytes().unwrap(), before);
+    let mut signed = OfdDocument::open(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../ofdrw-sign/src/test/resources/signedFile.ofd"),
+    )
+    .unwrap();
+    let before = signed.to_bytes().unwrap();
+    assert!(
+        matches!(signed.set_page_image_interpolate(0, "62", Some(false)),
+        Err(ofdrw::OfdError::Invalid(message)) if message.contains("signed"))
+    );
+    assert_eq!(signed.to_bytes().unwrap(), before);
+}

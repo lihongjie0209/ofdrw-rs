@@ -1,5 +1,12 @@
 Unreleased source changes after v0.1.0:
 
+- Rust, C, Python, Go and Node.js expose per-page-image interpolation setters
+  with a reset-to-default option. The setter changes only the chosen placement,
+  preserves shared media, rejects signed pages and leaves failed edits intact.
+  Integration tests exercise all language surfaces, null/closed handles,
+  invalid arguments, round trips and TypeScript types. README examples are
+  explicitly marked as unreleased main APIs.
+
 - Explicit native image Interpolate flags now control SVG/PNG and PDF sampling
   per placement, including shared media and matching alpha-image flags. PDF
   import keeps booleans and the standard false default. PDF normalization no

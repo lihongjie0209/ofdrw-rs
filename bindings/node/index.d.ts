@@ -851,6 +851,8 @@ export class Document {
   setPageObjectGouraudStroke(page: number, objectId: string, style: GouraudPaintStyle): void;
   setPageObjectPatternFill(page: number, objectId: string, style: PatternPaintStyle): void;
   setPageObjectPatternStroke(page: number, objectId: string, style: PatternPaintStyle): void;
+  /** false: nearest; true: smooth; null/omitted: restore smooth default. */
+  setPageImageInterpolate(page: number, objectId: string, interpolate?: boolean | null): void;
   setPageImageMask(page: number, objectId: string, resourceId?: string | null): void;
   setPageImageSubstitution(page: number, objectId: string, resourceId?: string | null): void;
   setPageImageBorder(page: number, objectId: string, style?: ImageBorderStyle | null): void;

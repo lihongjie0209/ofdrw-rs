@@ -11,6 +11,31 @@ const { Document, OfdError, createSesSeal } = require('..');
 const fixture = (name) => path.resolve(__dirname, '../../../crates/ofdrw/tests/fixtures', name);
 const javaPlainFixture = path.resolve(__dirname, '../../../../ofdrw-crypto/src/test/resources/hello.ofd');
 
+test('set image interpolation and restore the default', () => {
+  const document = Document.open(fixture('image-mask.ofd'));
+  try {
+    const baseline = document.pageSvg(0);
+    for (const [value, hint] of [[false, 'optimizeSpeed'], [true, 'optimizeQuality']]) {
+      document.setPageImageInterpolate(0, '5', value);
+      assert.ok(document.pageSvg(0).includes(`image-rendering="${hint}"`));
+    }
+    document.setPageImageInterpolate(0, '5');
+    assert.equal(document.pageSvg(0), baseline);
+    const before = document.toBytes();
+    assert.throws(() => document.setPageImageInterpolate(0, '5', 1), TypeError);
+    assert.throws(() => document.setPageImageInterpolate(-1, '5', false), RangeError);
+    assert.throws(() => document.setPageImageInterpolate(0, 'missing', false), OfdError);
+    assert.deepEqual(document.toBytes(), before);
+    document.setPageImageInterpolate(0, '5', false);
+    const reopened = Document.fromBytes(document.toBytes());
+    try {
+      assert.ok(reopened.pageSvg(0).includes('image-rendering="optimizeSpeed"'));
+      assert.deepEqual(reopened.validateReferences(), []);
+    } finally { reopened.close(); }
+  } finally { document.close(); }
+  assert.throws(() => document.setPageImageInterpolate(0, '5', false), OfdError);
+});
+
 test('retain ActualText through native CFF import and PDF round trips', () => {
   let document = Document.fromPdfBytes(fs.readFileSync(fixture('actual-text-cff.pdf')));
   for (let index = 0; index < 3; index += 1) {

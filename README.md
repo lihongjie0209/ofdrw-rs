@@ -150,6 +150,23 @@ cargo build --release --locked -p ofdrw-ffi
 指定自定义共享库；路径应为绝对路径。
 页面索引从 0 开始，页面尺寸和坐标使用毫米。
 
+## main 开发版：图像插值
+
+以下接口尚未包含在 v0.1.0 安装包中，需使用 main 源码及对应共享库。
+传入图像对象 ID（非媒体资源 ID），即可设置采样方式：
+
+| 语言 | 最近邻采样 | 清除设置，恢复平滑默认值 |
+| --- | --- | --- |
+| Rust | `doc.set_page_image_interpolate(0, &image_id, Some(false))?` | 最后一个参数改为 `None` |
+| Python | `doc.set_page_image_interpolate(0, image_id, False)` | 最后一个参数改为 `None` |
+| Node.js | `doc.setPageImageInterpolate(0, imageId, false)` | 最后一个参数改为 `null` 或省略 |
+| Go | `nearest := false; doc.SetPageImageInterpolate(0, imageID, &nearest)` | 最后一个参数改为 `nil` |
+| C | `ofd_set_page_image_interpolate(doc, 0, image_id, 0)` | 最后一个参数改为 `-1` |
+
+启用平滑采样时，Rust 使用 `Some(true)`、Python/Node.js 使用 `True`/`true`、
+Go 传入值为 `true` 的指针，C 使用 `1`。设置仅影响指定图像对象的放置位置；
+已签名页面拒绝编辑。
+
 ## 测试与发布
 
 CI 在 Linux、macOS、Windows 的 x64/ARM64 上运行 Rust 和三个语言绑定的测试，

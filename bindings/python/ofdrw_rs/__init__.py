@@ -257,6 +257,7 @@ _ffi.cdef(
     int ofd_remove_page_text_code(OfdDocument *handle, size_t page_index, const char *object_id, size_t code_index);
     int ofd_set_page_text_font(OfdDocument *handle, size_t page_index, const char *object_id, const char *font_id);
     int ofd_set_page_text_paint_flags_json(OfdDocument *handle, size_t page_index, const char *object_id, const char *flags_json);
+    int ofd_set_page_image_interpolate(OfdDocument *handle, size_t page_index, const char *object_id, int interpolate);
     int ofd_set_page_image_mask(OfdDocument *handle, size_t page_index, const char *object_id, const char *mask_resource_id);
     int ofd_set_page_image_substitution(OfdDocument *handle, size_t page_index, const char *object_id, const char *substitution_resource_id);
     int ofd_set_page_image_border_json(OfdDocument *handle, size_t page_index, const char *object_id, const char *style_json);
@@ -3163,6 +3164,18 @@ class Document:
         _check(_lib.ofd_set_page_text_paint_flags_json(
             self._handle, page_index, _utf8(str(object_id)),
             _utf8(json.dumps({"fill": fill, "stroke": stroke}))))
+
+    def set_page_image_interpolate(self, page_index: int, object_id: str | int,
+                                   interpolate: bool | None = None) -> None:
+        """Choose nearest (False), smooth (True), or restore smooth default (None)."""
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if interpolate is not None and not isinstance(interpolate, bool):
+            raise TypeError("interpolate must be a bool or None")
+        _check(_lib.ofd_set_page_image_interpolate(
+            self._handle, page_index, _utf8(str(object_id)),
+            -1 if interpolate is None else int(interpolate)))
 
     def set_page_image_mask(self, page_index: int, object_id: str | int,
                             mask_resource_id: str | int | None) -> None:

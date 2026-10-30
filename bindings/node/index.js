@@ -147,6 +147,7 @@ const api = {
   setPageObjectGouraudStroke: library.func('int ofd_set_page_object_gouraud_stroke_json(OfdDocument handle, size_t page, str object_id, str style)'),
   setPageObjectPatternFill: library.func('int ofd_set_page_object_pattern_fill_json(OfdDocument handle, size_t page, str object_id, str style)'),
   setPageObjectPatternStroke: library.func('int ofd_set_page_object_pattern_stroke_json(OfdDocument handle, size_t page, str object_id, str style)'),
+  setPageImageInterpolate: library.func('int ofd_set_page_image_interpolate(OfdDocument handle, size_t page, str object_id, int interpolate)'),
   setPageImageMask: library.func('int ofd_set_page_image_mask(OfdDocument handle, size_t page, str object_id, str mask_resource_id)'),
   setPageImageSubstitution: library.func('int ofd_set_page_image_substitution(OfdDocument handle, size_t page, str object_id, str substitution_resource_id)'),
   setPageImageBorder: library.func('int ofd_set_page_image_border_json(OfdDocument handle, size_t page, str object_id, str style)'),
@@ -928,6 +929,11 @@ class Document {
   }
   setPageObjectPatternStroke(page, objectId, style) {
     this._setPageObjectPaint(api.setPageObjectPatternStroke, page, objectId, style);
+  }
+  setPageImageInterpolate(page, objectId, interpolate = null) {
+    if (interpolate !== null && typeof interpolate !== 'boolean') throw new TypeError('interpolate must be a boolean or null');
+    check(api.setPageImageInterpolate(this._live(), index(page), utf8(objectId, 'objectId'),
+      interpolate === null ? -1 : Number(interpolate)));
   }
   setPageImageMask(page, objectId, resourceId = null) {
     check(api.setPageImageMask(this._live(), index(page), utf8(objectId, 'objectId'),

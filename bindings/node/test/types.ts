@@ -12,6 +12,12 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
   document.addTextObject(0, 'bad', [2, 2, 30, 8], {language: 'en'});
   // @ts-expect-error shaping requires a font ID
   document.addTextObject(0, 'bad', [2, 2, 30, 8], {shape: true});
+  document.setPageImageInterpolate(0, '5', false);
+  document.setPageImageInterpolate(0, '5', true);
+  document.setPageImageInterpolate(0, '5', null);
+  document.setPageImageInterpolate(0, '5');
+  // @ts-expect-error interpolation requires a boolean or null
+  document.setPageImageInterpolate(0, '5', 1);
   document.save('output.ofd');
   document.setFontAttribute(0, 'FamilyName', 'Example');
   document.setFontAttribute(0, 'Bold');

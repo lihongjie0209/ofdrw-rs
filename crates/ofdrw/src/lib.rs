@@ -24380,6 +24380,25 @@ impl OfdDocument {
         self.set_page_object_attributes(page_index, object_id, &attributes, Some("TextObject"))
     }
 
+    /// Set a direct page image's display interpolation, or clear the override.
+    ///
+    /// `Some(false)` selects nearest sampling, `Some(true)` selects smooth
+    /// sampling, and `None` restores this renderer's smooth default.
+    /// Signed pages reject the edit. Shared media and other placements are unchanged.
+    pub fn set_page_image_interpolate(
+        &mut self,
+        page_index: usize,
+        object_id: &str,
+        interpolate: Option<bool>,
+    ) -> Result<(), OfdError> {
+        self.set_page_object_attributes(
+            page_index,
+            object_id,
+            &[("Interpolate", interpolate.map(|value| value.to_string()))],
+            Some("ImageObject"),
+        )
+    }
+
     /// Set or clear the mask of a direct page image object.
     ///
     /// The mask must be an existing, decodable image resource with the same

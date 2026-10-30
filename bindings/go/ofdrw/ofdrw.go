@@ -270,6 +270,7 @@ type nativeAPI struct {
 	removePageTextCode              func(uintptr, uintptr, *byte, uintptr) int32
 	setPageTextFont                 func(uintptr, uintptr, *byte, *byte) int32
 	setPageTextPaintFlags           func(uintptr, uintptr, *byte, *byte) int32
+	setPageImageInterpolate         func(uintptr, uintptr, *byte, int32) int32
 	setPageImageMask                func(uintptr, uintptr, *byte, *byte) int32
 	setPageImageSubstitution        func(uintptr, uintptr, *byte, *byte) int32
 	setPageImageBorder              func(uintptr, uintptr, *byte, *byte) int32
@@ -631,6 +632,7 @@ func loadAPI() error {
 			{"ofd_remove_page_text_code", &api.removePageTextCode},
 			{"ofd_set_page_text_font", &api.setPageTextFont},
 			{"ofd_set_page_text_paint_flags_json", &api.setPageTextPaintFlags},
+			{"ofd_set_page_image_interpolate", &api.setPageImageInterpolate},
 			{"ofd_set_page_image_mask", &api.setPageImageMask},
 			{"ofd_set_page_image_substitution", &api.setPageImageSubstitution},
 			{"ofd_set_page_image_border_json", &api.setPageImageBorder},
@@ -8241,6 +8243,35 @@ func (doc *Document) SetPageTextPaintFlags(pageIndex int, objectID string, flags
 	defer runtime.UnlockOSThread()
 	if err := nativeError(api.setPageTextPaintFlags(doc.handle, uintptr(pageIndex), &id[0], &payload[0])); err != nil {
 		return fmt.Errorf("set page text paint flags: %w", err)
+	}
+	return nil
+}
+
+// SetPageImageInterpolate chooses nearest (false), smooth (true), or the smooth default (nil).
+func (doc *Document) SetPageImageInterpolate(pageIndex int, objectID string, interpolate *bool) error {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return err
+	}
+	if pageIndex < 0 {
+		return errors.New("negative page index")
+	}
+	id, err := cString(objectID)
+	if err != nil {
+		return err
+	}
+	value := int32(-1)
+	if interpolate != nil {
+		value = 0
+		if *interpolate {
+			value = 1
+		}
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := nativeError(api.setPageImageInterpolate(doc.handle, uintptr(pageIndex), &id[0], value)); err != nil {
+		return fmt.Errorf("set page image interpolation: %w", err)
 	}
 	return nil
 }

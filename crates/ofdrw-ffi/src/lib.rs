@@ -8043,6 +8043,30 @@ pub unsafe extern "C" fn ofd_set_page_text_paint_flags_json(
     })
 }
 
+/// Set image interpolation: -1 clears the override, 0 nearest, 1 smooth.
+///
+/// # Safety
+/// `handle` must be live and `object_id` must be NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_set_page_image_interpolate(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    object_id: *const c_char,
+    interpolate: i32,
+) -> i32 {
+    run(|| {
+        let interpolate = match interpolate {
+            -1 => None,
+            0 => Some(false),
+            1 => Some(true),
+            _ => return Err("interpolate must be -1, 0, or 1".into()),
+        };
+        document_mut(handle)?
+            .set_page_image_interpolate(page_index, input_string(object_id)?, interpolate)
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Set or clear a direct page image object's `ImageMask` resource reference.
 ///
 /// # Safety
@@ -20950,6 +20974,62 @@ mod tests {
             0
         );
         unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_sets_and_clears_page_image_interpolation() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../ofdrw/tests/fixtures/image-mask.ofd");
+        let path = CString::new(fixture.to_str().unwrap()).unwrap();
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_open(path.as_ptr(), &mut handle) }, 0);
+        let id = CString::new("5").unwrap();
+        for value in [0, 1, -1] {
+            assert_eq!(
+                unsafe { ofd_set_page_image_interpolate(handle, 0, id.as_ptr(), value) },
+                0
+            );
+            let svg = unsafe { document_ref(handle).unwrap() }
+                .page_svg(0)
+                .unwrap();
+            if value == 0 {
+                assert!(svg.contains("image-rendering=\"optimizeSpeed\""));
+            }
+            if value == 1 {
+                assert!(svg.contains("image-rendering=\"optimizeQuality\""));
+            }
+            if value == -1 {
+                assert!(!svg.contains("image-rendering="));
+            }
+        }
+        let before = unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap();
+        for value in [-2, 2, i32::MAX] {
+            assert_ne!(
+                unsafe { ofd_set_page_image_interpolate(handle, 0, id.as_ptr(), value) },
+                0
+            );
+        }
+        assert_ne!(
+            unsafe { ofd_set_page_image_interpolate(handle, 0, ptr::null(), 0) },
+            0
+        );
+        assert_ne!(
+            unsafe { ofd_set_page_image_interpolate(handle, usize::MAX, id.as_ptr(), 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        assert_ne!(
+            unsafe { ofd_set_page_image_interpolate(ptr::null_mut(), 0, id.as_ptr(), 0) },
+            0
+        );
+        unsafe { ofd_close(handle) };
+        assert_ne!(
+            unsafe { ofd_set_page_image_interpolate(handle, 0, id.as_ptr(), 0) },
+            0
+        );
     }
 
     #[test]

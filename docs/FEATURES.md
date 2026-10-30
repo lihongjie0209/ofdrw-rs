@@ -1698,6 +1698,14 @@ a one-bit image-mask XObject also imports as RGBA PNG; its `Decode` polarity,
 row padding, and different mask resolution are respected. Directly painted
 image-mask XObjects use the current nonstroking RGB/gray color and also import
 as RGBA PNG. Graphics-state soft masks are described below.
+
+`set_page_image_interpolate()` (Rust/Python), `SetPageImageInterpolate()`
+(Go), `setPageImageInterpolate()` (Node.js) and the corresponding C function
+set or clear a direct page image's sampling override. Optional booleans clear
+with None/nil/null; C uses -1/0/1 for default/nearest/smooth. Edits preserve
+shared media and other placements, reject signed pages, and remain atomic on
+validation errors.
+
 Explicit ImageObject `Interpolate=false` selects nearest-neighbor SVG/PNG
 sampling; `true` selects smooth sampling. Native objects without the attribute
 retain the existing smooth default. PDF image XObjects and inline images retain

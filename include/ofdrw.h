@@ -330,6 +330,8 @@ int32_t ofd_append_page_text_code_json(OfdDocument *handle, size_t page_index, c
 int32_t ofd_remove_page_text_code(OfdDocument *handle, size_t page_index, const char *object_id, size_t code_index);
 int32_t ofd_set_page_text_font(OfdDocument *handle, size_t page_index, const char *object_id, const char *font_id);
 int32_t ofd_set_page_text_paint_flags_json(OfdDocument *handle, size_t page_index, const char *object_id, const char *flags_json);
+/* interpolate: -1 clears the override, 0 nearest, 1 smooth. */
+int32_t ofd_set_page_image_interpolate(OfdDocument *handle, size_t page_index, const char *object_id, int32_t interpolate);
 int32_t ofd_set_page_image_mask(OfdDocument *handle, size_t page_index, const char *object_id, const char *mask_resource_id);
 int32_t ofd_set_page_image_substitution(OfdDocument *handle, size_t page_index, const char *object_id, const char *substitution_resource_id);
 int32_t ofd_set_page_image_border_json(OfdDocument *handle, size_t page_index, const char *object_id, const char *style_json);
