@@ -105,8 +105,8 @@ impl Render for Node {
                 group::render(group, chunk, content, ctx, accumulated_transform, None, rc)
             }
             #[cfg(feature = "image")]
-            Node::Image(ref image) => image::render(
-                image.is_visible(),
+            Node::Image(ref image) if image.is_visible() => image::render(
+                image.rendering_mode(),
                 image.kind(),
                 None,
                 chunk,
@@ -114,6 +114,8 @@ impl Render for Node {
                 ctx,
                 rc,
             ),
+            #[cfg(feature = "image")]
+            Node::Image(_) => Ok(()),
             #[cfg(not(feature = "image"))]
             Node::Image(_) => {
                 log::warn!(

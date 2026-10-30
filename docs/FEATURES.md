@@ -1698,11 +1698,19 @@ a one-bit image-mask XObject also imports as RGBA PNG; its `Decode` polarity,
 row padding, and different mask resolution are respected. Directly painted
 image-mask XObjects use the current nonstroking RGB/gray color and also import
 as RGBA PNG. Graphics-state soft masks are described below.
-Image display resampling currently follows the SVG renderer's smooth sampling.
-PDF `Interpolate=false` nearest-neighbor display is not preserved when enlarging
-an image; this is separate from the mask-resolution resampling described above.
-PDF export now sets `Interpolate=true` on its generated raster-image and alpha
-streams to retain the same sampling as SVG/PNG previews.
+Explicit ImageObject `Interpolate=false` selects nearest-neighbor SVG/PNG
+sampling; `true` selects smooth sampling. Native objects without the attribute
+retain the existing smooth default. PDF image XObjects and inline images retain
+their direct or indirect boolean Interpolate value on import; an omitted PDF
+value becomes false, following [ISO 32000-1, 8.9.5.3](https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf).
+The converter carries each placement's SVG image-rendering choice into both
+PDF color-image and alpha-image streams, including repeated placements sharing
+one OFD media resource. Normalization preserves those explicit flags. JPEG
+streams retain the original compressed payload. Rasterized filter output keeps
+smooth sampling. Readers choose their own smoothing implementation.
+PDF masks are still combined with color samples into RGBA at the color image's
+resolution; independent color/mask display interpolation is not separately
+represented. Mask-resolution resampling remains separate from display sampling.
 
 Graphics-state `/SMask` dictionaries support Alpha masks and DeviceRGB Luminosity
 masks, including optional `BC` backdrops, `TR=Identity`, and scalar sampled,

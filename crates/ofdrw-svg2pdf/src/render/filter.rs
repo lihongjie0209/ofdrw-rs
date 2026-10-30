@@ -53,7 +53,7 @@ pub fn render(
     let encoded_image = pixmap.encode_png().map_err(|_| UnknownError)?;
 
     image::render(
-        true,
+        usvg::ImageRendering::OptimizeQuality,
         &ImageKind::PNG(Arc::new(encoded_image)),
         Some(layer_bbox.to_rect()),
         chunk,

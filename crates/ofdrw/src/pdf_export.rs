@@ -2,9 +2,9 @@
 use crate::OfdError;
 
 pub(super) fn finish(bytes: Vec<u8>) -> Result<Vec<u8>, OfdError> {
-    // svg2pdf 0.13 writes RGB/gray image streams (including alpha masks)
-    // without Interpolate. PDF then defaults to nearest-neighbor sampling,
-    // unlike the smooth image sampling used by our SVG and PNG renderer.
+    // Backfill older generated image streams which lack a sampling flag.
+    // The converter now writes explicit per-placement sampling on both color
+    // and alpha images; preserve those choices during normalization.
     // This is only a fast-path hint: the parsed object type decides what is
     // edited, so matching bytes inside a stream cannot modify other objects.
     if ![b"/Image".as_slice(), b"/ToUnicode".as_slice()]
@@ -24,6 +24,7 @@ pub(super) fn finish(bytes: Vec<u8>) -> Result<Vec<u8>, OfdError> {
                 .and_then(lopdf::Object::as_name)
                 .ok()
                 == Some(b"Image".as_slice())
+                && stream.dict.get(b"Interpolate").is_err()
             {
                 stream.dict.set("Interpolate", true);
                 changed = true;

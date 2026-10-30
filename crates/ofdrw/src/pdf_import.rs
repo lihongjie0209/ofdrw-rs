@@ -6229,7 +6229,19 @@ fn import_image_stream(
     } else {
         image_bytes_with_soft_mask(pdf, resources, image, state.rendering_intent)?
     };
+    let interpolate = match image.dict.get(b"Interpolate") {
+        Ok(value) => pdf_resolved_value(Some(pdf), value, "image Interpolate")?
+            .as_bool()
+            .map_err(|_| OfdError::Invalid("PDF image Interpolate is not boolean".into()))?,
+        Err(_) => false,
+    };
     let id = output.add_image_object(page_index, &bytes, format, [min_x, min_y, width, height])?;
+    output.set_page_object_attributes(
+        page_index,
+        &id,
+        &[("Interpolate", Some(interpolate.to_string()))],
+        Some("ImageObject"),
+    )?;
     if top_right.1 != top_left.1
         || bottom_left.0 != top_left.0
         || top_right.0 <= top_left.0

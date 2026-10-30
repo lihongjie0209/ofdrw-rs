@@ -4,7 +4,7 @@ use crate::ConversionError::InvalidImage;
 use image::{ColorType, DynamicImage, ImageFormat, Luma, Rgb, Rgba};
 use miniz_oxide::deflate::{compress_to_vec_zlib, CompressionLevel};
 use pdf_writer::{Chunk, Content, Filter, Finish};
-use usvg::{ImageKind, Rect, Size, Transform, Tree};
+use usvg::{ImageKind, ImageRendering, Rect, Size, Transform, Tree};
 
 use crate::render::tree_to_xobject;
 use crate::util::context::Context;
@@ -14,7 +14,7 @@ use crate::Result;
 
 /// Render an image into a content stream.
 pub fn render(
-    is_visible: bool,
+    rendering: ImageRendering,
     kind: &ImageKind,
     view_box: Option<Rect>,
     chunk: &mut Chunk,
@@ -22,9 +22,10 @@ pub fn render(
     ctx: &mut Context,
     rc: &mut ResourceContainer,
 ) -> Result<()> {
-    if !is_visible {
-        return Ok(());
-    }
+    let interpolate = !matches!(
+        rendering,
+        ImageRendering::OptimizeSpeed | ImageRendering::CrispEdges | ImageRendering::Pixelated
+    );
 
     let load_with_format = |content, format| {
         image::load_from_memory_with_format(content, format).map_err(|_| InvalidImage)
@@ -37,19 +38,30 @@ pub fn render(
         ImageKind::JPEG(content) => {
             // JPEGs don't support alphas, so no extra processing is required.
             let image = load_with_format(content, ImageFormat::Jpeg)?;
-            create_raster_image(chunk, ctx, content, Filter::DctDecode, &image, None, rc)
+            create_raster_image(
+                chunk,
+                ctx,
+                content,
+                RasterOptions {
+                    filter: Filter::DctDecode,
+                    interpolate,
+                },
+                &image,
+                None,
+                rc,
+            )
         }
         ImageKind::PNG(content) => {
             let image = load_with_format(content, ImageFormat::Png)?;
-            create_transparent_image(chunk, ctx, &image, rc)
+            create_transparent_image(chunk, ctx, &image, interpolate, rc)
         }
         ImageKind::GIF(content) => {
             let image = load_with_format(content, ImageFormat::Gif)?;
-            create_transparent_image(chunk, ctx, &image, rc)
+            create_transparent_image(chunk, ctx, &image, interpolate, rc)
         }
         ImageKind::WEBP(content) => {
             let image = load_with_format(content, ImageFormat::WebP)?;
-            create_transparent_image(chunk, ctx, &image, rc)
+            create_transparent_image(chunk, ctx, &image, interpolate, rc)
         }
         // SVGs just get rendered recursively.
         ImageKind::SVG(tree) => create_svg_image(tree, chunk, ctx, rc)?,
@@ -85,6 +97,7 @@ fn create_transparent_image(
     chunk: &mut Chunk,
     ctx: &mut Context,
     image: &DynamicImage,
+    interpolate: bool,
     rc: &mut ResourceContainer,
 ) -> (Rc<String>, Size) {
     let color = image.color();
@@ -144,18 +157,26 @@ fn create_transparent_image(
         chunk,
         ctx,
         &compressed_image,
-        Filter::FlateDecode,
+        RasterOptions {
+            filter: Filter::FlateDecode,
+            interpolate,
+        },
         image,
         compressed_mask.as_deref(),
         rc,
     )
 }
 
+struct RasterOptions {
+    filter: Filter,
+    interpolate: bool,
+}
+
 fn create_raster_image(
     chunk: &mut Chunk,
     ctx: &mut Context,
     samples: &[u8],
-    filter: Filter,
+    options: RasterOptions,
     dynamic_image: &DynamicImage,
     alpha_mask: Option<&[u8]>,
     rc: &mut ResourceContainer,
@@ -164,7 +185,8 @@ fn create_raster_image(
     let alpha_mask = alpha_mask.map(|mask_bytes| {
         let soft_mask_id = ctx.alloc_ref();
         let mut s_mask = chunk.image_xobject(soft_mask_id, mask_bytes);
-        s_mask.filter(filter);
+        s_mask.filter(options.filter);
+        s_mask.interpolate(options.interpolate);
         s_mask.width(dynamic_image.width() as i32);
         s_mask.height(dynamic_image.height() as i32);
         s_mask.color_space().device_gray();
@@ -178,7 +200,8 @@ fn create_raster_image(
     let image_name = rc.add_x_object(image_ref);
 
     let mut image_x_object = chunk.image_xobject(image_ref, samples);
-    image_x_object.filter(filter);
+    image_x_object.filter(options.filter);
+    image_x_object.interpolate(options.interpolate);
     image_x_object.width(dynamic_image.width() as i32);
     image_x_object.height(dynamic_image.height() as i32);
 

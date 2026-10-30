@@ -1,5 +1,14 @@
 Unreleased source changes after v0.1.0:
 
+- Explicit native image Interpolate flags now control SVG/PNG and PDF sampling
+  per placement, including shared media and matching alpha-image flags. PDF
+  import keeps booleans and the standard false default. PDF normalization no
+  longer overwrites explicit nearest sampling. JPEG compressed bytes remain
+  unchanged. Seven integration tests cover mixed placements, alpha, source
+  defaults/indirect values/errors, round trips and optional Ghostscript pixels.
+  Native objects without a flag keep smooth sampling; separately filtered PDF
+  color/mask display remains unrepresented after RGBA merging.
+
 - Native PDF import consumes marked-content ActualText with inline, named and
   indirect properties. Complete glyph mappings retain original outlines,
   positions, advance and clipping; multi-run strings share intact graphemes.

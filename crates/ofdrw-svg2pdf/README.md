@@ -19,3 +19,7 @@ the core's dependency together. Once main CI succeeds for the exact commit,
 run the `Publish SVG PDF converter` workflow with that commit. Publish this
 dependency before packaging the next Rust core release. Previously released
 converter versions must not be replaced or republished.
+
+Raster conversion honors SVG image-rendering per placement. Nearest sampling
+sets PDF Interpolate=false; smooth sampling sets true on both color images and
+associated alpha images. JPEG samples retain their original compressed bytes.

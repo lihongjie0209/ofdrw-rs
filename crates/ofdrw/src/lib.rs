@@ -18364,9 +18364,23 @@ impl OfdDocument {
                     }
                 }
             }
+            let sampling = match object.attribute("Interpolate") {
+                None => "",
+                Some(value) if value.eq_ignore_ascii_case("true") => {
+                    " image-rendering=\"optimizeQuality\""
+                }
+                Some(value) if value.eq_ignore_ascii_case("false") => {
+                    " image-rendering=\"optimizeSpeed\""
+                }
+                Some(value) => {
+                    return Err(OfdError::Invalid(format!(
+                        "invalid image Interpolate: {value}"
+                    )))
+                }
+            };
             let encoded = STANDARD.encode(&image);
             // OFD image coordinates use a unit square; CTM defaults to identity.
-            svg.push_str(&format!("<image x=\"0\" y=\"0\" width=\"1\" height=\"1\" preserveAspectRatio=\"none\" href=\"data:{mime};base64,{encoded}\"/>"));
+            svg.push_str(&format!("<image x=\"0\" y=\"0\" width=\"1\" height=\"1\" preserveAspectRatio=\"none\"{sampling} href=\"data:{mime};base64,{encoded}\"/>"));
             if let Some(border) = object
                 .children()
                 .find(|node| is_ofd_element(*node, "Border"))
