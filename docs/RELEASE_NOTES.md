@@ -1,5 +1,19 @@
 Unreleased source changes after v0.1.0:
 
+- Graphics-state PDF soft masks support Alpha and DeviceRGB Luminosity groups,
+  BC backdrops and the four scalar transfer-function families. Activation CTM
+  and resource scope, mask replacement/reset, nesting, image-mask precedence,
+  group opacity, clipping, pattern cells and shading-pattern ExtGState masks are
+  retained. A bounded RGBA fallback rasterizes masked paints, including text;
+  masked text is therefore unavailable to text extraction. Transparent knockout
+  groups, other luminosity blending spaces and AIS shape masks remain unsupported.
+  Thirty-nine original-source raster scenes, analytic pixels, negative/unit
+  coverage and Python/Go/Node integration cover the feature. Inline-image
+  fractional alpha uses a Poppler reference; the other references use
+  Ghostscript. Optional export-raster checks compare the resulting PDFs too.
+  Form byte streams now share the bounded filter decoder. Unmasked content
+  continues through the existing native path.
+
 - Isolated PDF Form transparency groups (`I=true`, `K=false`) import as native
   vector composite graphic units. Group opacity/blending/clipping applies once
   after member composition; member alpha and blend mode start at defaults.
@@ -10,7 +24,8 @@ Unreleased source changes after v0.1.0:
   One reference uses original-source Poppler because Ghostscript loses Form
   isolation inside a pattern; the others use original-source Ghostscript.
   Optional Ghostscript export checks cover every scene. Transparent non-isolated
-  and knockout groups and graphics-state soft masks remain unsupported.
+  and knockout Form paints remain unsupported; supported soft masks are added
+  above.
 
 - Generated PDF raster images and alpha masks set `Interpolate=true`, matching
   SVG/PNG preview sampling. Their original image samples are preserved. PDF
@@ -50,7 +65,7 @@ Unreleased source changes after v0.1.0:
   scenes and explicit opacity checks cover the implementation; three alpha
   references include equivalent Form-group PDFs because common renderers
   ignore the pattern ExtGState alpha. Pattern blending that depends on the
-  backdrop and graphics-state soft masks remain unsupported.
+  backdrop remains unsupported. Explicit supported soft masks are added above.
 
 - PDF colored and uncolored tiling patterns import as native OFD pattern
   paints with reusable vector cell resources. Paths, strokes, text, stencils,

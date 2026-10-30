@@ -17,6 +17,7 @@ mod separation_color;
 mod shading_pattern;
 mod simple_encoding;
 mod simple_widths;
+mod soft_mask;
 mod standard_font_data;
 mod standard_fonts;
 mod tiling_pattern;
@@ -74,6 +75,8 @@ struct GraphicsState {
     active_patterns: Vec<Option<ObjectId>>,
     uncolored_pattern: bool,
     isolated_group: bool,
+    soft_mask: Option<Arc<soft_mask::Source>>,
+    active_soft_masks: Vec<Option<ObjectId>>,
 }
 
 #[derive(Clone)]
@@ -360,6 +363,8 @@ impl Default for GraphicsState {
             active_patterns: Vec::new(),
             uncolored_pattern: false,
             isolated_group: false,
+            soft_mask: None,
+            active_soft_masks: Vec::new(),
         }
     }
 }
@@ -2222,15 +2227,17 @@ fn apply_ext_gstate(
     let dictionary = value
         .as_dict()
         .map_err(|_| OfdError::Invalid("PDF ExtGState is not a dictionary".into()))?;
-    apply_ext_gstate_dictionary(pdf, dictionary, state, text)
+    apply_ext_gstate_dictionary(pdf, resources, dictionary, state, text)
 }
 
 fn apply_ext_gstate_dictionary(
     pdf: &PdfDocument,
+    resources: &Object,
     dictionary: &lopdf::Dictionary,
     state: &mut GraphicsState,
     text: &mut TextState,
 ) -> Result<(), OfdError> {
+    let mut mask = None;
     for (key, value) in dictionary.iter() {
         let (_, value) = pdf
             .dereference(value)
@@ -2350,7 +2357,7 @@ fn apply_ext_gstate_dictionary(
             b"TR2" if matches!(value.as_name().ok(), Some(b"Identity" | b"Default")) => {}
             b"BM" => state.blend_mode = pdf_blend_mode(pdf, value)?,
             b"AIS" if value.as_bool().ok() == Some(false) => {}
-            b"SMask" if value.as_name().ok() == Some(b"None".as_slice()) => {}
+            b"SMask" => mask = Some(value.clone()),
             b"OP" | b"op" | b"SA" if value.as_bool().ok() == Some(false) => {}
             b"OPM" if value.as_i64().ok() == Some(0) => {}
             b"TK" if value.as_bool().ok() == Some(true) => {}
@@ -2361,6 +2368,15 @@ fn apply_ext_gstate_dictionary(
                 )))
             }
         }
+    }
+    if let Some(value) = mask {
+        state.soft_mask = if value.as_name().ok() == Some(b"None") {
+            None
+        } else {
+            Some(Arc::new(soft_mask::Source::resolve(
+                pdf, resources, &value, state,
+            )?))
+        };
     }
     Ok(())
 }
@@ -6533,16 +6549,7 @@ fn validate_opaque_form_content(
                     }
                     Err(_) => resources,
                 };
-                let bytes = if stream.dict.get(b"Filter").is_ok() {
-                    stream.decompressed_content().map_err(|error| {
-                        OfdError::Invalid(format!("cannot read PDF Form content: {error}"))
-                    })?
-                } else {
-                    stream.content.clone()
-                };
-                if bytes.len() as u64 > MAX_ENTRY_BYTES {
-                    return Err(OfdError::Limit("PDF Form content is too large".into()));
-                }
+                let bytes = pdf_byte_stream_data(stream, Some(pdf), "Form content")?;
                 let nested = decode_pdf_content_with_inline_images(&bytes, pdf, nested_resources)?;
                 if let Some(id) = id {
                     active_forms.push(id);
@@ -6598,6 +6605,7 @@ fn import_form(
         graphics.blend_mode = "Normal";
         graphics.clips.clear();
         graphics.isolated_group = true;
+        graphics.soft_mask = None;
     }
     if let Ok(matrix) = stream.dict.get(b"Matrix") {
         let (_, matrix) = page
@@ -6644,19 +6652,14 @@ fn import_form(
         }
         Err(_) => page.resources,
     };
-    let bytes = if stream.dict.get(b"Filter").is_ok() {
-        stream
-            .decompressed_content()
-            .map_err(|error| OfdError::Invalid(format!("cannot read PDF Form content: {error}")))?
-    } else {
-        stream.content.clone()
-    };
-    if bytes.len() as u64 > MAX_ENTRY_BYTES {
-        return Err(OfdError::Limit("PDF Form content is too large".into()));
-    }
+    let bytes = pdf_byte_stream_data(stream, Some(page.pdf), "Form content")?;
     let content = decode_pdf_content_with_inline_images(&bytes, page.pdf, resources)?;
     if group.is_some() && !isolated {
-        if state.fill_alpha != 1.0 || state.stroke_alpha != 1.0 || state.blend_mode != "Normal" {
+        if state.fill_alpha != 1.0
+            || state.stroke_alpha != 1.0
+            || state.blend_mode != "Normal"
+            || state.soft_mask.is_some()
+        {
             return Err(OfdError::Invalid(
                 "PDF Form transparency group requires opaque content".into(),
             ));
@@ -7883,6 +7886,41 @@ fn import_content(
             ));
         }
         let visible = marked_content.iter().all(|(_, visible)| *visible);
+        let text_only_clip = matches!(operation.operator.as_str(), "Tj" | "TJ" | "'" | "\"")
+            && matches!(text.render_mode, 3 | 7);
+        let mask = if visible
+            && !text_only_clip
+            && matches!(
+                operation.operator.as_str(),
+                "S" | "s"
+                    | "f"
+                    | "f*"
+                    | "F"
+                    | "B"
+                    | "B*"
+                    | "b"
+                    | "b*"
+                    | "BI"
+                    | "Do"
+                    | "sh"
+                    | "Tj"
+                    | "TJ"
+                    | "'"
+                    | "\""
+            ) {
+            state.soft_mask.clone()
+        } else {
+            None
+        };
+        let first_id = output.next_id;
+        let blend = state.blend_mode;
+        let paint_state = mask.as_ref().map(|_| {
+            let mut graphics = state.clone();
+            graphics.soft_mask = None;
+            graphics.blend_mode = "Normal";
+            graphics
+        });
+        let mut finish_mask = true;
         let values;
         match operation.operator.as_str() {
             "ri" => {
@@ -8265,7 +8303,7 @@ fn import_content(
                     output,
                     page_context,
                     &mut path,
-                    &state,
+                    paint_state.as_ref().unwrap_or(&state),
                     PdfPaint {
                         fill,
                         stroke,
@@ -8313,7 +8351,7 @@ fn import_content(
                         pdf,
                         page_context.resources,
                         box_,
-                        &state,
+                        paint_state.as_ref().unwrap_or(&state),
                         &image,
                     )?;
                 }
@@ -8352,16 +8390,28 @@ fn import_content(
                     continue;
                 }
                 match subtype {
-                    b"Image" => import_image(
-                        output,
-                        page_index,
-                        pdf,
-                        page_context.resources,
-                        box_,
-                        &state,
-                        name,
-                    )?,
-                    b"Form" => import_form(output, page_context, &state, name, active_forms)?,
+                    b"Image" => {
+                        let own_mask =
+                            mask.is_some() && soft_mask::image_overrides(pdf, &xobject.dict)?;
+                        finish_mask = !own_mask;
+                        import_image(
+                            output,
+                            page_index,
+                            pdf,
+                            page_context.resources,
+                            box_,
+                            if own_mask {
+                                &state
+                            } else {
+                                paint_state.as_ref().unwrap_or(&state)
+                            },
+                            name,
+                        )?;
+                    }
+                    b"Form" => {
+                        finish_mask = false;
+                        import_form(output, page_context, &state, name, active_forms)?;
+                    }
                     _ => return Err(OfdError::Invalid("unsupported PDF XObject subtype".into())),
                 }
             }
@@ -8377,7 +8427,13 @@ fn import_content(
                 let name = name
                     .as_name()
                     .map_err(|_| OfdError::Invalid("PDF sh has no shading name".into()))?;
-                import_pdf_shading(output, page_context, &state, name, visible)?;
+                import_pdf_shading(
+                    output,
+                    page_context,
+                    paint_state.as_ref().unwrap_or(&state),
+                    name,
+                    visible,
+                )?;
             }
             "BT" => {
                 if !path.commands.is_empty() {
@@ -8502,7 +8558,7 @@ fn import_content(
                 import_text(
                     output,
                     page_context,
-                    &state,
+                    paint_state.as_ref().unwrap_or(&state),
                     &mut text,
                     std::slice::from_ref(value),
                     visible,
@@ -8515,7 +8571,14 @@ fn import_content(
                 let values = value
                     .as_array()
                     .map_err(|_| OfdError::Invalid("PDF TJ is not an array".into()))?;
-                import_text(output, page_context, &state, &mut text, values, visible)?;
+                import_text(
+                    output,
+                    page_context,
+                    paint_state.as_ref().unwrap_or(&state),
+                    &mut text,
+                    values,
+                    visible,
+                )?;
             }
             "'" => {
                 let [value] = operation.operands.as_slice() else {
@@ -8528,7 +8591,7 @@ fn import_content(
                 import_text(
                     output,
                     page_context,
-                    &state,
+                    paint_state.as_ref().unwrap_or(&state),
                     &mut text,
                     std::slice::from_ref(value),
                     visible,
@@ -8564,7 +8627,7 @@ fn import_content(
                 import_text(
                     output,
                     page_context,
-                    &state,
+                    paint_state.as_ref().unwrap_or(&state),
                     &mut text,
                     std::slice::from_ref(value),
                     visible,
@@ -8582,6 +8645,11 @@ fn import_content(
                         "unsupported PDF operator {other}"
                     )));
                 }
+            }
+        }
+        if finish_mask {
+            if let Some(mask) = mask {
+                mask.apply(output, page_context, first_id, blend)?;
             }
         }
     }

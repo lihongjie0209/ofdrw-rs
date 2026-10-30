@@ -36,6 +36,7 @@ pub(super) fn import(
     }
     let resource =
         output.add_composite_graphic_resource(page.index, [width, height], |_, _, _| children)?;
+    let first_id = output.next_id;
     let id = output.add_composite_object(
         page.index,
         &resource,
@@ -45,8 +46,12 @@ pub(super) fn import(
             ..crate::CompositeStyle::default()
         },
     )?;
-    attach_blend_mode(output, page.index, &id, parent.blend_mode)?;
-    attach_clips(output, page.index, &id, "CompositeObject", &parent.clips)
+    attach_clips(output, page.index, &id, "CompositeObject", &parent.clips)?;
+    if let Some(mask) = &parent.soft_mask {
+        mask.apply(output, page, first_id, parent.blend_mode)
+    } else {
+        attach_blend_mode(output, page.index, &id, parent.blend_mode)
+    }
 }
 
 #[cfg(test)]

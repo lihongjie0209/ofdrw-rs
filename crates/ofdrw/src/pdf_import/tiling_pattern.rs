@@ -171,7 +171,9 @@ impl Source {
         state.stroke_alpha = 1.;
         state.blend_mode = "Normal";
         state.isolated_group = false;
+        state.soft_mask = None;
         state.active_patterns = current.active_patterns.clone();
+        state.active_soft_masks = current.active_soft_masks.clone();
         state.active_patterns.push(self.id);
         state.uncolored_pattern = self.uncolored;
         if self.uncolored {

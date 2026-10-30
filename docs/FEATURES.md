@@ -1542,7 +1542,8 @@ tiling-pattern cell. Text, paths, images, gradients and nested groups retain
 native resources and text extraction; no raster fallback is introduced.
 Ordinary Forms retain individual-object painting semantics. Non-isolated and
 knockout groups remain accepted only when recursively proven opaque; transparent
-versions of those groups and graphics-state soft masks remain unsupported.
+versions of those groups remain unsupported. Supported graphics-state soft
+masks apply to an isolated group as a whole.
 
 Twenty-eight authored group scenes have original-PDF raster references and OFD
 round-trip tests. Twenty-seven use Ghostscript; the Form-inside-pattern scene
@@ -1684,12 +1685,49 @@ the original samples before the image `Decode` mapping. A `/Mask` reference to
 a one-bit image-mask XObject also imports as RGBA PNG; its `Decode` polarity,
 row padding, and different mask resolution are respected. Directly painted
 image-mask XObjects use the current nonstroking RGB/gray color and also import
-as RGBA PNG. Graphics-state soft masks remain unsupported.
+as RGBA PNG. Graphics-state soft masks are described below.
 Image display resampling currently follows the SVG renderer's smooth sampling.
 PDF `Interpolate=false` nearest-neighbor display is not preserved when enlarging
 an image; this is separate from the mask-resolution resampling described above.
 PDF export now sets `Interpolate=true` on its generated raster-image and alpha
 streams to retain the same sampling as SVG/PNG previews.
+
+Graphics-state `/SMask` dictionaries support Alpha masks and DeviceRGB Luminosity
+masks, including optional `BC` backdrops, `TR=Identity`, and scalar sampled,
+exponential, stitching and calculator transfer functions. The group matrix is
+combined with the CTM at `gs`; later CTM changes do not move the mask. Resource
+fallbacks also retain their activation scope. `SMask=None` clears the mask;
+selecting another mask replaces it. Nested masks, ordinary Forms, isolated
+transparent groups, paths, text, images, inline images, shadings and pattern
+paints use the shared path. Non-isolated luminosity mask groups composite
+against BC; opaque knockout mask groups retain the existing opaque checks.
+Image `Mask`/`SMask` and nonzero JPEG2000 `SMaskInData` take precedence over the
+graphics-state mask while keeping the image's other transparency parameters.
+Combined fill/stroke paints knock out the fill beneath the stroke during mask
+rasterization, including independent fill and stroke opacity.
+
+The importer samples affected paints as 8-bit RGBA images at a target of
+16 pixels/mm, adjusted for outer pattern magnification and capped at 1200 DPI
+and four million pixels per canvas. Each activated mask caches up to eight
+canvases and allows 256 million painted pixels of work; mask nesting is limited
+to 32 levels, and cycles across masks, Forms and patterns fail explicitly.
+Sampling limits apply to both detail and transfer-function thresholds. Masked
+text becomes image content and is not available through text extraction;
+unmasked text retains its native representation. Luminosity groups in other
+blending color spaces, transparent knockout groups and `AIS=true` shape masks
+remain unsupported. Existing painting restrictions continue to apply.
+
+The authored soft-mask corpus has 39 original-PDF raster references plus five
+analytic pixel checks, resource/round-trip tests and optional PDF-export raster
+checks (`OFDRW_GHOSTSCRIPT=gs cargo test -p ofdrw --test soft_mask_pdf_import`).
+The inline-image reference uses original-source Poppler because Ghostscript
+10.02 drops fractional group alpha in that case; the other references use
+original-source Ghostscript. Negative tests cover malformed dictionaries,
+transfer clipping, cycles, opaque-group checks and raster/work limits. A shading
+pattern ExtGState mask is also compared with the equivalent direct-shading
+reference. Regenerate inputs and references with
+`scripts/generate_soft_mask_fixtures.py --references` (Ghostscript and Poppler).
+Mask semantics follow [PDF 32000-1 sections 11.6.4–11.6.5](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf).
 
 Positive PDF `/UserUnit` page scaling (up to 75,000) applies to page boxes,
 paths, strokes, Type1 text, images, and clipping geometry. PDF `/Rotate`
@@ -1718,7 +1756,8 @@ Explicit default `OP=false`, `op=false`, `OPM=0`, `SA=false`, and `TK=true`
 entries are accepted. `TR=Identity` and `TR2=Identity/Default` are also
 accepted; nonidentity transfer functions remain unsupported. Nondefault values of these graphics-state controls
 remain unsupported because they can change compositing or stroke behavior.
-Soft masks and other unsupported extended graphics-state entries return an error.
+Other unsupported extended graphics-state entries return an error. Graphics-state
+soft masks support the configurations described below.
 Basic horizontal Type1 and simple TrueType text is
 imported as OFD text, using the document's fallback font. Consecutive text
 strings, `TJ` adjustments, and `Tc`/`Tw` spacing use explicit PDF font widths
@@ -1976,7 +2015,8 @@ is bounded at 32 levels and each period at 1000 overlapping cell placements;
 pattern byte filters use the shared bounded byte-stream decoder. Resource
 cycles, singular matrices, zero steps, malformed resource dictionaries, and
 excessive complexity return errors. Existing opaque transparency-group checks
-also inspect pattern cells. Graphics-state soft masks remain unsupported.
+also inspect pattern cells. Explicit soft masks inside cells are supported; a
+pattern starts with no inherited soft mask.
 Pattern cells with non-`Normal` blending also
 return an error until backdrop-dependent pattern compositing is implemented.
 Pattern-cell transparency parameters start at their defaults, including when
@@ -2010,7 +2050,9 @@ nonstroking alpha; stroke/text-only parameters do not affect shading. Source
 alpha multiplies the painting operation's fill or stroke alpha and applies to
 the entire pattern, including its background. This follows the implicit knockout
 group in [PDF 32000-1 section 11.6.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/standards/pdfstandards/pdf/PDF32000_2008.pdf).
-Backdrop-dependent blending and graphics-state soft masks still return errors.
+Backdrop-dependent pattern blending still returns an error. An explicit soft mask
+in the shading pattern ExtGState applies to the completed source, including its
+background, before the painting operation's alpha is applied.
 Existing shading-function, color-space, geometry and work limits remain in force.
 
 `ShadingType`, `BBox`, `Coords`, `Extend` and `Domain` also resolve indirect
@@ -2226,7 +2268,7 @@ preserved. Modes 4–7 also preserve glyph clipping after `ET`, including the
 union of multiple text runs and `q`/`Q` clip restoration. Zero-width text
 strokes use a 0.1 mm display width, matching imported zero-width paths.
 
-Transparent non-isolated/knockout groups, graphics-state soft masks, and other
+Transparent non-isolated/knockout Form paints, unsupported soft-mask configurations, and other
 unsupported painting operators currently return an error; this importer is
 not yet a complete PDF converter.
 PDF `BX`/`EX` compatibility sections may be nested. Unknown extension

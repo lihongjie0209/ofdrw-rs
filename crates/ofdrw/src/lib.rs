@@ -16849,6 +16849,16 @@ impl OfdDocument {
             ));
         }
         let svg = self.page_svg_for_output(index, options, false, nested_seal_depth, false)?;
+        self.render_page_svg(index, dpi, &svg, white_background)
+    }
+
+    fn render_page_svg(
+        &self,
+        index: usize,
+        dpi: f64,
+        svg: &str,
+        white_background: bool,
+    ) -> Result<Vec<u8>, OfdError> {
         let mut embedded_fonts = Vec::new();
         let mut input_bytes = svg.len();
         for font in self.fonts_for_page_sources(index)? {
@@ -16859,7 +16869,7 @@ impl OfdDocument {
             }
         }
         let key = (input_bytes <= RENDER_TREE_CACHE_INPUT_BYTES)
-            .then(|| render_tree_key(&svg, dpi as f32, &embedded_fonts));
+            .then(|| render_tree_key(svg, dpi as f32, &embedded_fonts));
         let (tree, cache_miss) = if let Some(cached) = key.and_then(cached_render_tree) {
             (cached, false)
         } else {
@@ -16876,7 +16886,7 @@ impl OfdDocument {
             {
                 set_fallback_font_family(options.fontdb_mut());
             }
-            let tree = Arc::new(usvg::Tree::from_str(&svg, &options).map_err(|error| {
+            let tree = Arc::new(usvg::Tree::from_str(svg, &options).map_err(|error| {
                 OfdError::Invalid(format!("cannot parse rendered SVG: {error}"))
             })?);
             (tree, true)

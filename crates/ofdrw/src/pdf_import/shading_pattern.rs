@@ -69,7 +69,11 @@ impl Source {
         })
     }
 
-    fn graphics(&self, pdf: &PdfDocument) -> Result<(GraphicsState, f64), OfdError> {
+    fn graphics(
+        &self,
+        pdf: &PdfDocument,
+        active_masks: &[Option<ObjectId>],
+    ) -> Result<(GraphicsState, f64), OfdError> {
         let mut state = (*self.parent).clone();
         state.ctm = [1., 0., 0., 1., 0., 0.];
         state.clips.clear();
@@ -77,6 +81,8 @@ impl Source {
         state.stroke_alpha = 1.;
         state.blend_mode = "Normal";
         state.isolated_group = false;
+        state.soft_mask = None;
+        state.active_soft_masks = active_masks.to_vec();
         state.fill_pattern = None;
         state.stroke_pattern = None;
         if let Some(ext) = &self.ext_gstate {
@@ -90,7 +96,13 @@ impl Source {
                     relevant.set(key.clone(), value.clone());
                 }
             }
-            apply_ext_gstate_dictionary(pdf, &relevant, &mut state, &mut TextState::default())?;
+            apply_ext_gstate_dictionary(
+                pdf,
+                &self.resources,
+                &relevant,
+                &mut state,
+                &mut TextState::default(),
+            )?;
         }
         if state.blend_mode != "Normal" {
             return Err(invalid("with backdrop-dependent blending is unsupported"));
@@ -103,8 +115,8 @@ impl Source {
     }
 
     pub(super) fn require_opaque(&self, pdf: &PdfDocument) -> Result<(), OfdError> {
-        let (_, alpha) = self.graphics(pdf)?;
-        if alpha != 1. {
+        let (state, alpha) = self.graphics(pdf, &[])?;
+        if alpha != 1. || state.soft_mask.is_some() {
             return Err(invalid(
                 "requires opaque content in this transparency group",
             ));
@@ -156,7 +168,7 @@ impl Source {
         ];
         let width = (bbox[2] - bbox[0]) * MM_PER_PT;
         let height = (bbox[3] - bbox[1]) * MM_PER_PT;
-        let (state, source_alpha) = self.graphics(page.pdf)?;
+        let (state, source_alpha) = self.graphics(page.pdf, &current.active_soft_masks)?;
         let key = page.box_.map(f64::to_bits);
         let cached = self
             .cells
@@ -214,8 +226,12 @@ impl Source {
             raster_scale: self.raster_scale
                 * pdf_linear_scale(crate::multiply_matrix(self.parent.ctm, self.matrix)),
         };
+        let first_id = output.next_id;
         self.background(output, &context, state)?;
         import_pdf_shading_source(output, &context, state, &self.shading, true)?;
+        if let Some(mask) = &state.soft_mask {
+            mask.apply(output, &context, first_id, "Normal")?;
+        }
         let xml = {
             let bytes = output.required_entry(&path)?;
             let parsed = parse_xml(&path, bytes)?;
@@ -643,7 +659,7 @@ mod tests {
             Arc::new(parent),
         )
         .unwrap();
-        let (state, alpha) = source.graphics(&pdf).unwrap();
+        let (state, alpha) = source.graphics(&pdf, &[]).unwrap();
         assert_eq!(alpha, 0.5);
         assert_eq!(state.fill_alpha, 1.);
         assert_eq!(state.stroke_alpha, 1.);

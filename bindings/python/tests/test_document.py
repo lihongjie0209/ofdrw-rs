@@ -7671,3 +7671,14 @@ def test_pdf_isolated_transparency_groups_across_binding(kind):
         with Document.from_bytes(document.to_bytes()) as reopened:
             assert reopened.page_png(0, 72) == png
             assert reopened.validate_references() == []
+
+@pytest.mark.parametrize("kind", ["alpha", "luminosity-bc", "captured-ctm", "group", "nested-masks", "pattern-cell-mask", "fill-stroke-alpha"])
+def test_pdf_graphics_soft_masks_across_binding(kind):
+    fixture = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures" / ("soft-mask-" + kind + ".pdf")
+    with Document.from_pdf_bytes(fixture.read_bytes()) as document:
+        assert document.page_count == 1
+        assert "<image" in document.page_svg(0)
+        png = document.page_png(0, 72)
+        with Document.from_bytes(document.to_bytes()) as reopened:
+            assert reopened.page_png(0, 72) == png
+            assert reopened.validate_references() == []

@@ -4056,3 +4056,19 @@ test('import isolated transparency groups through the C ABI', () => {
     } finally { document.close(); }
   }
 });
+
+test('import PDF graphics-state soft masks through the C ABI', () => {
+  for (const kind of ['alpha', 'luminosity-bc', 'captured-ctm', 'group', 'nested-masks', 'pattern-cell-mask', 'fill-stroke-alpha']) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture('soft-mask-' + kind + '.pdf')));
+    try {
+      assert.equal(document.pageCount, 1);
+      assert.ok(document.pageSvg(0).includes('<image'));
+      const png = document.pagePng(0, 72);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 72), png);
+        assert.deepEqual(reopened.validateReferences(), []);
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
