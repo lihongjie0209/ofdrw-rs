@@ -7,7 +7,7 @@ fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
         offsets.push(bytes.len());
-        write!(&mut bytes, "{} 0 obj\n", index + 1).unwrap();
+        writeln!(&mut bytes, "{} 0 obj", index + 1).unwrap();
         bytes.extend_from_slice(object);
         bytes.extend_from_slice(b"\nendobj\n");
     }

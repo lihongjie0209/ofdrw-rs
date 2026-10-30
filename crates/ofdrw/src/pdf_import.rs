@@ -6416,7 +6416,14 @@ fn decode_pdf_content_with_inline_images(
     resources: &Object,
 ) -> Result<lopdf::content::Content<Vec<Operation>>, OfdError> {
     if let Ok(content) = lopdf::content::Content::decode(bytes) {
-        return Ok(content);
+        // lopdf can report success after replacing an unsupported inline image
+        // with an empty BI operation. Recover its original bytes below instead.
+        if content.operations.iter().all(|operation| {
+            operation.operator != "BI"
+                || matches!(operation.operands.as_slice(), [Object::Stream(_)])
+        }) {
+            return Ok(content);
+        }
     }
     let mut operations = Vec::new();
     let mut cursor = 0;
