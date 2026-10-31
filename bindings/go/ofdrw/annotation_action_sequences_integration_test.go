@@ -3,18 +3,13 @@
 package ofdrw
 
 import (
-	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 )
 
 func TestAnnotationClickActionSequences(t *testing.T) {
-	region := func(x0, x1 int) string {
-		return fmt.Sprintf(`<ofd:Region><ofd:Area Start="%d 3"><ofd:Line Point1="%d 3"/><ofd:Line Point1="%d 7"/><ofd:Line Point1="%d 7"/><ofd:Close/></ofd:Area></ofd:Region>`, x0, x1, x1, x0)
-	}
 	for _, overlap := range []bool{false, true} {
 		t.Run(strconv.FormatBool(overlap), func(t *testing.T) {
 			document, err := New()
@@ -33,25 +28,50 @@ func TestAnnotationClickActionSequences(t *testing.T) {
 			if err != nil || len(annotations) != 1 {
 				t.Fatalf("annotations: %v, %v", annotations, err)
 			}
-			path := annotations[0].SourcePath
-			xml, err := document.Entry(path)
-			if err != nil {
+			annotationID := annotations[0].ID
+			objects, err := document.AnnotationObjects(0, annotationID)
+			if err != nil || len(objects) == 0 {
+				t.Fatalf("objects: %v, %v", objects, err)
+			}
+			if objects[0].ID == nil {
+				t.Fatal("missing annotation object id")
+			}
+			objectID := *objects[0].ID
+			if err := document.AddAnnotationObjectAction(0, annotationID, objectID, DocumentActionSpec{Kind: "uri", URI: "https://example.org/discard"}); err != nil {
 				t.Fatal(err)
 			}
-			text := string(xml)
-			if overlap {
-				text = strings.Replace(text, `<ofd:Action Event="CLICK">`, `<ofd:Action Event="CLICK">`+region(2, 8), 1)
-			}
-			if !strings.Contains(text, "</ofd:Actions>") {
-				t.Fatal("missing native action list")
-			}
-			area := ""
-			if overlap {
-				area = region(5, 11)
-			}
-			text = strings.Replace(text, "</ofd:Actions>", `<ofd:Action Event="CLICK">`+area+`<ofd:URI URI="`+expected[1]+`"/></ofd:Action></ofd:Actions>`, 1)
-			if err := document.SetEntry(path, []byte(text)); err != nil {
+			if err := document.RemoveAnnotationObjectAction(0, annotationID, objectID, 1); err != nil {
 				t.Fatal(err)
+			}
+			if err := document.AddAnnotationObjectAction(0, annotationID, objectID, DocumentActionSpec{Kind: "uri", URI: expected[1]}); err != nil {
+				t.Fatal(err)
+			}
+			if err := document.SetAnnotationObjectActionRegions(0, annotationID, objectID, 0, [][4]float64{{1, 1, 2, 2}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := document.SetAnnotationObjectActionRegions(0, annotationID, objectID, 0, nil); err != nil {
+				t.Fatal(err)
+			}
+			actions, err := document.AnnotationObjectActions(0, annotationID, objectID)
+			if err != nil || len(actions) != 2 || actions[0].Region != nil {
+				t.Fatalf("actions: %v, %v", actions, err)
+			}
+			if overlap {
+				if err := document.SetAnnotationObjectActionRegions(0, annotationID, objectID, 0, [][4]float64{{2, 3, 6, 4}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := document.SetAnnotationObjectActionRegions(0, annotationID, objectID, 1, [][4]float64{{5, 3, 6, 4}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := document.AddAnnotationObjectAction(0, annotationID, objectID, DocumentActionSpec{Kind: "uri", Event: "PO", URI: "x"}); err == nil {
+				t.Fatal("accepted PO action")
+			}
+			if err := document.RemoveAnnotationObjectAction(0, annotationID, objectID, 99); err == nil {
+				t.Fatal("accepted missing action")
+			}
+			if err := document.SetAnnotationObjectActionRegions(0, annotationID, objectID, 0, [][4]float64{{0, 0, -1, 2}}); err == nil {
+				t.Fatal("accepted invalid region")
 			}
 			data, err := document.ToBytes()
 			if err != nil {

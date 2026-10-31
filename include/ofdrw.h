@@ -159,6 +159,11 @@ int32_t ofd_to_pdf(const OfdDocument *handle, OfdBuffer *output);
 int32_t ofd_attachments_json(const OfdDocument *handle, OfdBuffer *output);
 int32_t ofd_annotations_json(const OfdDocument *handle, OfdBuffer *output);
 /* Direct annotation appearance objects in painting order. */
+/* Annotation graphic actions: CLICK; URI/page/bookmark/attachment. Empty regions restore the owner boundary. */
+int32_t ofd_annotation_object_actions_json(const OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, OfdBuffer *output);
+int32_t ofd_add_annotation_object_action_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, const char *action_json);
+int32_t ofd_remove_annotation_object_action(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, size_t action_index);
+int32_t ofd_set_annotation_object_action_regions_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, size_t action_index, const char *rectangles_json);
 int32_t ofd_annotation_objects_json(const OfdDocument *handle, size_t page_index, const char *annotation_id, OfdBuffer *output);
 /* JSON fields: boundary, ctm (array or null), visible, alpha. */
 int32_t ofd_update_annotation_object_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, const char *update_json);

@@ -207,6 +207,10 @@ const api = {
   addVersionSnapshot: library.func('int ofd_add_version_snapshot_json(OfdDocument handle, size_t document_index, str snapshot, _Out_ OfdBuffer *output)'),
   extractVersionSnapshot: library.func('int ofd_extract_version_snapshot(OfdDocument handle, size_t index, _Out_ OfdDocument *output)'),
   annotations: library.func('int ofd_annotations_json(OfdDocument handle, _Out_ OfdBuffer *output)'),
+  annotationObjectActions: library.func('int ofd_annotation_object_actions_json(OfdDocument handle, size_t page, str annotationId, str objectId, _Out_ OfdBuffer *output)'),
+  addAnnotationObjectAction: library.func('int ofd_add_annotation_object_action_json(OfdDocument handle, size_t page, str annotationId, str objectId, str action)'),
+  removeAnnotationObjectAction: library.func('int ofd_remove_annotation_object_action(OfdDocument handle, size_t page, str annotationId, str objectId, size_t actionIndex)'),
+  setAnnotationObjectActionRegions: library.func('int ofd_set_annotation_object_action_regions_json(OfdDocument handle, size_t page, str annotationId, str objectId, size_t actionIndex, str rectangles)'),
   annotationObjects: library.func('int ofd_annotation_objects_json(OfdDocument handle, size_t page, str annotationId, _Out_ OfdBuffer *output)'),
   updateAnnotationObject: library.func('int ofd_update_annotation_object_json(OfdDocument handle, size_t page, str annotationId, str objectId, str update)'),
   setAnnotationObjectName: library.func('int ofd_set_annotation_object_name(OfdDocument handle, size_t page, str annotationId, str objectId, str name)'),
@@ -1131,6 +1135,20 @@ class Document {
   annotations() { return this._json(api.annotations); }
   annotationObjects(page, annotationId) {
     return this._json(api.annotationObjects, index(page), utf8(String(annotationId), 'annotationId'));
+  }
+  annotationObjectActions(page, annotationId, objectId) {
+    return this._json(api.annotationObjectActions, index(page), utf8(String(annotationId), 'annotationId'), utf8(String(objectId), 'objectId'));
+  }
+  addAnnotationObjectAction(page, annotationId, objectId, action) {
+    const request = actionRequest({event: 'CLICK', ...optionsObject(action)});
+    check(api.addAnnotationObjectAction(this._live(), index(page), utf8(String(annotationId), 'annotationId'), utf8(String(objectId), 'objectId'), JSON.stringify(request)));
+  }
+  removeAnnotationObjectAction(page, annotationId, objectId, actionIndex) {
+    check(api.removeAnnotationObjectAction(this._live(), index(page), utf8(String(annotationId), 'annotationId'), utf8(String(objectId), 'objectId'), index(actionIndex, 'actionIndex')));
+  }
+  setAnnotationObjectActionRegions(page, annotationId, objectId, actionIndex, rectangles) {
+    if (!Array.isArray(rectangles)) throw new TypeError('rectangles must be an array');
+    check(api.setAnnotationObjectActionRegions(this._live(), index(page), utf8(String(annotationId), 'annotationId'), utf8(String(objectId), 'objectId'), index(actionIndex, 'actionIndex'), JSON.stringify(rectangles)));
   }
   appendAnnotationObjects(page, annotationId, objects) {
     if (!Array.isArray(objects)) throw new TypeError('objects must be an array');

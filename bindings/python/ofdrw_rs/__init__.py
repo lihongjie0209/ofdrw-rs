@@ -126,6 +126,10 @@ _ffi.cdef(
     int ofd_to_pdf_with_options(const OfdDocument *handle, int prefer_image_substitution, OfdBuffer *output);
     int ofd_attachments_json(const OfdDocument *handle, OfdBuffer *output);
     int ofd_annotations_json(const OfdDocument *handle, OfdBuffer *output);
+    int ofd_annotation_object_actions_json(const OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, OfdBuffer *output);
+    int ofd_add_annotation_object_action_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, const char *action_json);
+    int ofd_remove_annotation_object_action(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, size_t action_index);
+    int ofd_set_annotation_object_action_regions_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, size_t action_index, const char *rectangles_json);
     int ofd_annotation_objects_json(const OfdDocument *handle, size_t page_index, const char *annotation_id, OfdBuffer *output);
     int ofd_append_annotation_objects_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_json, OfdBuffer *output);
     int ofd_update_annotation_object_json(OfdDocument *handle, size_t page_index, const char *annotation_id, const char *object_id, const char *update_json);
@@ -1795,6 +1799,47 @@ class Document:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))
         finally:
             _lib.ofd_buffer_free(output[0])
+
+    def annotation_object_actions(self, page_index: int, annotation_id: str | int, object_id: str | int) -> list[dict]:
+        """Read ordered actions on an annotation appearance graphic."""
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_annotation_object_actions_json(self._handle, page_index,
+               _utf8(str(annotation_id)), _utf8(str(object_id)), output))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def add_annotation_object_action(self, page_index: int, annotation_id: str | int, object_id: str | int, action: dict) -> None:
+        """Append a URI, page, bookmark, or attachment CLICK action."""
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        request = dict(action)
+        request.setdefault("event", "CLICK")
+        payload = json.dumps(request, ensure_ascii=False, allow_nan=False)
+        _check(_lib.ofd_add_annotation_object_action_json(self._handle, page_index,
+               _utf8(str(annotation_id)), _utf8(str(object_id)), _utf8(payload)))
+
+    def remove_annotation_object_action(self, page_index: int, annotation_id: str | int, object_id: str | int, action_index: int) -> None:
+        """Remove an annotation graphic action by zero-based index."""
+        self._require_open()
+        if page_index < 0 or action_index < 0:
+            raise IndexError((page_index, action_index))
+        _check(_lib.ofd_remove_annotation_object_action(self._handle, page_index,
+               _utf8(str(annotation_id)), _utf8(str(object_id)), action_index))
+
+    def set_annotation_object_action_regions(self, page_index: int, annotation_id: str | int, object_id: str | int, action_index: int, rectangles: list[list[float]]) -> None:
+        """Set appearance-coordinate rectangles; an empty list removes Region."""
+        self._require_open()
+        if page_index < 0 or action_index < 0:
+            raise IndexError((page_index, action_index))
+        payload = json.dumps(rectangles, allow_nan=False)
+        _check(_lib.ofd_set_annotation_object_action_regions_json(self._handle, page_index,
+               _utf8(str(annotation_id)), _utf8(str(object_id)), action_index, _utf8(payload)))
 
     def append_annotation_objects(self, page_index: int, annotation_id: str | int,
                                   objects: list[dict]) -> list[str]:

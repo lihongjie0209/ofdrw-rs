@@ -3477,6 +3477,130 @@ pub unsafe extern "C" fn ofd_annotations_json(
 
 /// Read one annotation's direct appearance objects in painting order as JSON.
 ///
+/// Read ordered actions on one annotation appearance graphic as a JSON array.
+///
+/// # Safety
+/// The handle must be live, string pointers NUL-terminated, and any output writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_annotation_object_actions_json(
+    handle: *const OfdDocument,
+    page_index: usize,
+    annotation_id: *const c_char,
+    object_id: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        let actions = document_ref(handle)?
+            .annotation_object_actions(
+                page_index,
+                input_string(annotation_id)?,
+                input_string(object_id)?,
+            )
+            .map_err(|e| e.to_string())?;
+        let values: Vec<_> = actions.iter().map(page_object_action_json).collect();
+        output_buffer(
+            serde_json::to_vec(&values).map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
+/// Append a CLICK URI, page, bookmark, or attachment action from JSON.
+///
+/// # Safety
+/// The handle must be live, string pointers NUL-terminated, and any output writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_annotation_object_action_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    annotation_id: *const c_char,
+    object_id: *const c_char,
+    action_json: *const c_char,
+) -> i32 {
+    run(|| {
+        let input: DocumentActionInput =
+            serde_json::from_str(input_string(action_json)?).map_err(|e| e.to_string())?;
+        let (event, target) = match input {
+            DocumentActionInput::Uri { event, uri } => (event, DocumentActionTarget::Uri(uri)),
+            DocumentActionInput::Page { event, destination } => (
+                event,
+                DocumentActionTarget::Page(parse_destination_value(&destination)?),
+            ),
+            DocumentActionInput::Bookmark { event, name } => {
+                (event, DocumentActionTarget::Bookmark(name))
+            }
+            DocumentActionInput::Attachment {
+                event,
+                id,
+                new_window,
+            } => (event, DocumentActionTarget::Attachment { id, new_window }),
+        };
+        if event != "CLICK" {
+            return Err("annotation graphic action Event must be CLICK".into());
+        }
+        document_mut(handle)?
+            .add_annotation_object_action(
+                page_index,
+                input_string(annotation_id)?,
+                input_string(object_id)?,
+                target,
+            )
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Remove an annotation graphic action by its zero-based index.
+///
+/// # Safety
+/// The handle must be live, string pointers NUL-terminated, and any output writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_remove_annotation_object_action(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    annotation_id: *const c_char,
+    object_id: *const c_char,
+    action_index: usize,
+) -> i32 {
+    run(|| {
+        document_mut(handle)?
+            .remove_annotation_object_action(
+                page_index,
+                input_string(annotation_id)?,
+                input_string(object_id)?,
+                action_index,
+            )
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Set appearance-coordinate action rectangles from JSON; [] removes Region.
+///
+/// # Safety
+/// The handle must be live, string pointers NUL-terminated, and any output writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_set_annotation_object_action_regions_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    annotation_id: *const c_char,
+    object_id: *const c_char,
+    action_index: usize,
+    rectangles_json: *const c_char,
+) -> i32 {
+    run(|| {
+        let rectangles: Vec<[f64; 4]> =
+            serde_json::from_str(input_string(rectangles_json)?).map_err(|e| e.to_string())?;
+        document_mut(handle)?
+            .set_annotation_object_action_regions(
+                page_index,
+                input_string(annotation_id)?,
+                input_string(object_id)?,
+                action_index,
+                &rectangles,
+            )
+            .map_err(|e| e.to_string())
+    })
+}
+
 /// # Safety
 /// `handle` must be live, `annotation_id` NUL-terminated, and `output` writable.
 #[no_mangle]
@@ -19489,6 +19613,187 @@ mod tests {
         assert!(pdf
             .windows(b"/QuadPoints".len())
             .any(|window| window == b"/QuadPoints"));
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_annotation_object_action_editing_and_invalid_inputs_are_atomic() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        let doc = unsafe { document_mut(handle).unwrap() };
+        doc.add_blank_page(30., 20.).unwrap();
+        let annotation = doc
+            .add_uri_link_annotation(0, "https://example.org/first", [2., 3., 10., 5.])
+            .unwrap();
+        let object = doc.annotation_objects(0, &annotation).unwrap()[0]
+            .id
+            .clone()
+            .unwrap();
+        let annotation = CString::new(annotation).unwrap();
+        let object = CString::new(object).unwrap();
+        let action =
+            CString::new(r#"{"kind":"uri","event":"CLICK","uri":"https://example.org/second"}"#)
+                .unwrap();
+        assert_eq!(
+            unsafe {
+                ofd_add_annotation_object_action_json(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    action.as_ptr(),
+                )
+            },
+            0
+        );
+        let rectangles = CString::new("[[1,2,3,4]]").unwrap();
+        assert_eq!(
+            unsafe {
+                ofd_set_annotation_object_action_regions_json(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    1,
+                    rectangles.as_ptr(),
+                )
+            },
+            0
+        );
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                ofd_annotation_object_actions_json(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    &mut output,
+                )
+            },
+            0
+        );
+        let values: serde_json::Value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(output.data, output.len) })
+                .unwrap();
+        assert_eq!(values.as_array().unwrap().len(), 2);
+        assert_eq!(
+            values[1]["region"]["areas"][0]["start"],
+            serde_json::json!([1., 2.])
+        );
+        unsafe { ofd_buffer_free(output) };
+        let before = unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap();
+        for request in [
+            r#"{"kind":"uri","event":"PO","uri":"x"}"#,
+            r#"{"kind":"uri","event":"CLICK","uri":""}"#,
+            "{}",
+            "not json",
+        ] {
+            let request = CString::new(request).unwrap();
+            assert_ne!(
+                unsafe {
+                    ofd_add_annotation_object_action_json(
+                        handle,
+                        0,
+                        annotation.as_ptr(),
+                        object.as_ptr(),
+                        request.as_ptr(),
+                    )
+                },
+                0
+            );
+        }
+        for request in ["[[0,0,-1,2]]", "[[0,1,2]]", "null", "not json"] {
+            let request = CString::new(request).unwrap();
+            assert_ne!(
+                unsafe {
+                    ofd_set_annotation_object_action_regions_json(
+                        handle,
+                        0,
+                        annotation.as_ptr(),
+                        object.as_ptr(),
+                        0,
+                        request.as_ptr(),
+                    )
+                },
+                0
+            );
+        }
+        assert_ne!(
+            unsafe {
+                ofd_annotation_object_actions_json(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_ne!(
+            unsafe {
+                ofd_add_annotation_object_action_json(
+                    handle,
+                    0,
+                    ptr::null(),
+                    object.as_ptr(),
+                    action.as_ptr(),
+                )
+            },
+            0
+        );
+        assert_ne!(
+            unsafe {
+                ofd_remove_annotation_object_action(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    99,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        let empty = CString::new("[]").unwrap();
+        assert_eq!(
+            unsafe {
+                ofd_set_annotation_object_action_regions_json(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    1,
+                    empty.as_ptr(),
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                ofd_remove_annotation_object_action(
+                    handle,
+                    0,
+                    annotation.as_ptr(),
+                    object.as_ptr(),
+                    0,
+                )
+            },
+            0
+        );
+        let actions = unsafe { document_ref(handle).unwrap() }
+            .annotation_object_actions(0, annotation.to_str().unwrap(), object.to_str().unwrap())
+            .unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].attributes["URI"], "https://example.org/second");
+        assert!(actions[0].region.is_none());
         unsafe { ofd_close(handle) };
     }
 

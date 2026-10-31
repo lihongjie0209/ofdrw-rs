@@ -39,6 +39,18 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
     {kind: 'Path', boundary: [0, 0, 10, 10], commands: 'M 0 0 L 10 10'},
     {kind: 'Text', boundary: [0, 0, 10, 10], font_id: '2', size: 5, text: 'A', x: 0, y: 5},
   ]]);
+  const annotationActions: ActionInfo[] = document.annotationObjectActions(0, '2', '3');
+  void annotationActions;
+  document.addAnnotationObjectAction(0, '2', '3', {kind: 'uri', uri: 'https://example.org'});
+  document.addAnnotationObjectAction(0, '2', '3', {kind: 'page', event: 'CLICK', destination: {page_id: '1', kind: 'Fit'}});
+  document.addAnnotationObjectAction(0, '2', '3', {kind: 'bookmark', name: 'chapter'});
+  document.addAnnotationObjectAction(0, '2', '3', {kind: 'attachment', id: '4', new_window: false});
+  document.setAnnotationObjectActionRegions(0, '2', '3', 0, [[0, 0, 5, 4]]);
+  document.removeAnnotationObjectAction(0, '2', '3', 0);
+  // @ts-expect-error annotation graphics require CLICK
+  document.addAnnotationObjectAction(0, '2', '3', {kind: 'uri', event: 'PO', uri: 'x'});
+  // @ts-expect-error URI actions require a URI
+  document.addAnnotationObjectAction(0, '2', '3', {kind: 'uri'});
   document.setAnnotationCreator(0, '2', 'author');
   document.setAnnotationSubtype(0, '2', 'review');
   document.setAnnotationLastModDate(0, '2', '2024-02-29');

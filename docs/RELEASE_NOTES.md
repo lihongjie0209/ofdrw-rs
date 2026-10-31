@@ -1,5 +1,10 @@
 # Unreleased
 
+- Add annotation graphic action reading, appending, removal and rectangular
+  trigger-region editing in Rust, C, Python, Go and Node.js. Supports ordered
+  CLICK URI, page, bookmark and attachment targets, with same-document checks
+  and atomic rejection of invalid edits.
+
 - Preserve native Link annotation action sequences and overlapping rectangular
   click regions. Default regions use each owning graphic's boundary within the
   appearance. Split PDF links paint the original artwork once, retaining

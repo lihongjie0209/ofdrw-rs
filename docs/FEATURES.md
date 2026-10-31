@@ -243,6 +243,26 @@ write the same appearance in a `Stamp` annotation; C JSON accepts
 or composite graphics to an existing appearance and return their new object IDs.
 The edit is atomic; missing resources and invalid geometry leave the document
 unchanged.
+Unreleased main provides `annotation_object_actions()`,
+`add_annotation_object_action()`, `remove_annotation_object_action()` and
+`set_annotation_object_action_regions()` in Rust/Python. Go exposes
+`AnnotationObjectActions`, `AddAnnotationObjectAction`,
+`RemoveAnnotationObjectAction` and `SetAnnotationObjectActionRegions`; Node.js
+uses the corresponding camelCase methods. C exposes
+`ofd_annotation_object_actions_json`, `ofd_add_annotation_object_action_json`,
+`ofd_remove_annotation_object_action` and
+`ofd_set_annotation_object_action_regions_json`.
+
+These APIs address a graphic ID returned by `annotation_objects()` within a
+specific page and annotation. Reads preserve action order. Appends accept URI,
+page, bookmark or attachment targets and use `CLICK` (the language wrappers
+supply this default). Page, bookmark and attachment targets must belong to the
+same document body. Rectangles use `[x, y, width, height]` in appearance
+coordinates; an empty list restores the owning graphic's default trigger area.
+Indices are zero-based. Invalid edits and edits to signed content are rejected
+without changing the package. Nested PageBlocks and existing namespace prefixes
+are preserved. Published 0.2.0 packages do not yet include these APIs.
+
 `annotation_objects(page_index, annotation_id)` (Rust/Python),
 `AnnotationObjects()` (Go), `annotationObjects()` (Node.js), and
 `ofd_annotation_objects_json()` (C) read direct PathObject, TextObject,

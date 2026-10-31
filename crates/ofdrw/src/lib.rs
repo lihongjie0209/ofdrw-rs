@@ -7413,6 +7413,137 @@ impl OfdDocument {
         Ok(ids)
     }
 
+    /// Read ordered actions on one graphic object in an annotation appearance.
+    pub fn annotation_object_actions(
+        &self,
+        page_index: usize,
+        annotation_id: &str,
+        object_id: &str,
+    ) -> Result<Vec<PageObjectActionInfo>, OfdError> {
+        if object_id.trim().is_empty() || annotation_id.trim().is_empty() {
+            return Err(OfdError::Invalid(
+                "annotation and object IDs must be nonempty".into(),
+            ));
+        }
+        let pages = self.pages()?;
+        let page = pages.get(page_index).ok_or(OfdError::PageIndex {
+            index: page_index,
+            count: pages.len(),
+        })?;
+        let annotation = self.annotation_for_page(page, annotation_id)?;
+        let parsed = parse_xml(
+            &annotation.source_path,
+            self.required_entry(&annotation.source_path)?,
+        )?;
+        let item = parsed
+            .root_element()
+            .children()
+            .find(|node| {
+                is_ofd_element(*node, "Annot")
+                    && resource_id_matches(node.attribute("ID"), annotation_id)
+            })
+            .ok_or_else(|| OfdError::Invalid("annotation disappeared".into()))?;
+        let appearance = item
+            .children()
+            .find(|node| is_ofd_element(*node, "Appearance"))
+            .ok_or_else(|| OfdError::Invalid("annotation has no Appearance".into()))?;
+        let mut objects = page_block_graphic_objects(appearance)
+            .filter(|node| resource_id_matches(node.attribute("ID"), object_id));
+        let object = objects.next().ok_or_else(|| {
+            OfdError::Invalid(format!("annotation object {object_id} was not found"))
+        })?;
+        if objects.next().is_some() {
+            return Err(OfdError::Invalid(format!(
+                "annotation object {object_id} is ambiguous"
+            )));
+        }
+        read_object_actions(object, object_id)
+    }
+
+    /// Append a CLICK action to an annotation graphic. Targets must belong to the same document body.
+    pub fn add_annotation_object_action(
+        &mut self,
+        page_index: usize,
+        annotation_id: &str,
+        object_id: &str,
+        target: DocumentActionTarget,
+    ) -> Result<(), OfdError> {
+        match &target {
+            DocumentActionTarget::Uri(uri) if uri.trim().is_empty() => {
+                return Err(OfdError::Invalid("action URI is empty".into()))
+            }
+            DocumentActionTarget::Page(destination) => {
+                self.validate_page_destination(page_index, destination)?
+            }
+            DocumentActionTarget::Bookmark(name) => {
+                let pages = self.pages()?;
+                let page = pages.get(page_index).ok_or(OfdError::PageIndex {
+                    index: page_index,
+                    count: pages.len(),
+                })?;
+                if name.trim().is_empty()
+                    || !self.bookmarks()?.iter().any(|bookmark| {
+                        bookmark.document_index == page.document_index && bookmark.name == *name
+                    })
+                {
+                    return Err(OfdError::Invalid(format!(
+                        "bookmark {name} was not found in the same document"
+                    )));
+                }
+            }
+            DocumentActionTarget::Attachment { id, .. } => {
+                self.validate_attachment_target(page_index, id)?
+            }
+            _ => {}
+        }
+        self.edit_annotation_object_xml(page_index, annotation_id, object_id, |source, object| {
+            append_click_action_xml(source, object, |prefix| match &target {
+                DocumentActionTarget::Uri(uri) => {
+                    format!("<{prefix}URI URI=\"{}\"/>", escape_xml(uri))
+                }
+                DocumentActionTarget::Page(destination) => format!(
+                    "<{prefix}Goto>{}</{prefix}Goto>",
+                    destination_xml(destination, prefix)
+                ),
+                DocumentActionTarget::Bookmark(name) => format!(
+                    "<{prefix}Goto><{prefix}Bookmark Name=\"{}\"/></{prefix}Goto>",
+                    escape_xml(name)
+                ),
+                DocumentActionTarget::Attachment { id, new_window } => {
+                    goto_attachment_xml(prefix, id, *new_window)
+                }
+            })
+        })
+    }
+
+    /// Remove an annotation graphic action by its zero-based index.
+    pub fn remove_annotation_object_action(
+        &mut self,
+        page_index: usize,
+        annotation_id: &str,
+        object_id: &str,
+        action_index: usize,
+    ) -> Result<(), OfdError> {
+        self.edit_annotation_object_xml(page_index, annotation_id, object_id, |source, object| {
+            remove_object_action_xml(source, object, action_index)
+        })
+    }
+
+    /// Set rectangular trigger areas in appearance coordinates. An empty slice removes the explicit Region.
+    pub fn set_annotation_object_action_regions(
+        &mut self,
+        page_index: usize,
+        annotation_id: &str,
+        object_id: &str,
+        action_index: usize,
+        rectangles: &[[f64; 4]],
+    ) -> Result<(), OfdError> {
+        validate_action_rectangles(rectangles)?;
+        self.edit_annotation_object_xml(page_index, annotation_id, object_id, |source, object| {
+            set_object_action_regions_xml(source, object, action_index, rectangles)
+        })
+    }
+
     fn edit_annotation_object_xml(
         &mut self,
         page_index: usize,
@@ -15907,22 +16038,7 @@ impl OfdDocument {
                 "page object {object_id} is ambiguous"
             )));
         }
-        let mut lists = object
-            .children()
-            .filter(|node| is_ofd_element(*node, "Actions"));
-        let Some(actions) = lists.next() else {
-            return Ok(Vec::new());
-        };
-        if lists.next().is_some() {
-            return Err(OfdError::Invalid(
-                "page object Actions are ambiguous".into(),
-            ));
-        }
-        actions
-            .children()
-            .filter(|node| is_ofd_element(*node, "Action"))
-            .map(|node| parse_graphic_action(node, object_id))
-            .collect()
+        read_object_actions(object, object_id)
     }
 
     /// Return TextCode values from templates and the page in painting order.
@@ -25131,17 +25247,7 @@ impl OfdDocument {
         if object_id.trim().is_empty() {
             return Err(OfdError::Invalid("page object ID is empty".into()));
         }
-        if rectangles.iter().any(|rect| {
-            rect.iter().any(|value| !value.is_finite())
-                || rect[2] <= 0.0
-                || rect[3] <= 0.0
-                || !(rect[0] + rect[2]).is_finite()
-                || !(rect[1] + rect[3]).is_finite()
-        }) {
-            return Err(OfdError::Invalid(
-                "Action Region rectangle is invalid".into(),
-            ));
-        }
+        validate_action_rectangles(rectangles)?;
         let pages = self.pages()?;
         let page = pages.get(page_index).ok_or(OfdError::PageIndex {
             index: page_index,
@@ -25161,68 +25267,11 @@ impl OfdDocument {
             )));
         }
         drop(objects);
-        let mut lists = object
-            .children()
-            .filter(|node| is_ofd_element(*node, "Actions"));
-        let actions = lists
-            .next()
-            .ok_or_else(|| OfdError::Invalid(format!("page object {object_id} has no Actions")))?;
-        if lists.next().is_some() {
-            return Err(OfdError::Invalid(
-                "page object Actions are ambiguous".into(),
-            ));
-        }
-        drop(lists);
-        let action = actions
-            .children()
-            .filter(|node| is_ofd_element(*node, "Action"))
-            .nth(action_index)
-            .ok_or_else(|| {
-                OfdError::Invalid(format!("action index {action_index} is out of bounds"))
-            })?;
-        let mut regions = action
-            .children()
-            .filter(|node| is_ofd_element(*node, "Region"));
-        let old_region = regions.next();
-        if regions.next().is_some() {
-            return Err(OfdError::Invalid("Action has multiple Regions".into()));
-        }
-        drop(regions);
         let source = std::str::from_utf8(bytes).map_err(|error| OfdError::Xml {
             path: page.path.clone(),
             message: error.to_string(),
         })?;
-        let tag = qualified_tag(source, action)?;
-        let prefix = tag
-            .rsplit_once(':')
-            .map_or(String::new(), |(prefix, _)| format!("{prefix}:"));
-        let mut region_xml = format!("<{prefix}Region>");
-        for &[x, y, width, height] in rectangles {
-            region_xml.push_str(&format!("<{prefix}Area Start=\"{x} {y}\"><{prefix}Line Point1=\"{} {y}\"/><{prefix}Line Point1=\"{} {}\"/><{prefix}Line Point1=\"{x} {}\"/><{prefix}Close/></{prefix}Area>", x + width, x + width, y + height, y + height));
-        }
-        region_xml.push_str(&format!("</{prefix}Region>"));
-        let updated = if let Some(region) = old_region {
-            let mut updated = source.to_owned();
-            updated.replace_range(
-                region.range(),
-                if rectangles.is_empty() {
-                    ""
-                } else {
-                    &region_xml
-                },
-            );
-            updated
-        } else if rectangles.is_empty() {
-            source.to_owned()
-        } else {
-            let kind = action
-                .children()
-                .find(|node| has_ofd_namespace(*node))
-                .ok_or_else(|| OfdError::Invalid("Action has no kind".into()))?;
-            let mut updated = source.to_owned();
-            updated.insert_str(kind.range().start, &region_xml);
-            updated
-        };
+        let updated = set_object_action_regions_xml(source, object, action_index, rectangles)?;
         self.set_structured_entry(&page.path, updated.into_bytes())
     }
 
@@ -25255,39 +25304,11 @@ impl OfdDocument {
             )));
         }
         drop(objects);
-        let mut lists = object
-            .children()
-            .filter(|node| is_ofd_element(*node, "Actions"));
-        let actions = lists
-            .next()
-            .ok_or_else(|| OfdError::Invalid(format!("page object {object_id} has no Actions")))?;
-        if lists.next().is_some() {
-            return Err(OfdError::Invalid(
-                "page object Actions are ambiguous".into(),
-            ));
-        }
-        let mut items = actions
-            .children()
-            .filter(|node| is_ofd_element(*node, "Action"));
-        let action = items.nth(action_index).ok_or_else(|| {
-            OfdError::Invalid(format!("action index {action_index} is out of bounds"))
-        })?;
-        let only_action = actions.children().all(|child| {
-            child == action || child.is_text() && child.text().unwrap_or("").trim().is_empty()
-        });
         let source = std::str::from_utf8(bytes).map_err(|error| OfdError::Xml {
             path: page.path.clone(),
             message: error.to_string(),
         })?;
-        let mut updated = source.to_owned();
-        updated.replace_range(
-            if only_action {
-                actions.range()
-            } else {
-                action.range()
-            },
-            "",
-        );
+        let updated = remove_object_action_xml(source, object, action_index)?;
         self.set_structured_entry(&page.path, updated.into_bytes())
     }
 
@@ -25320,38 +25341,7 @@ impl OfdDocument {
             path: page.path.clone(),
             message: error.to_string(),
         })?;
-        let mut lists = object
-            .children()
-            .filter(|node| is_ofd_element(*node, "Actions"));
-        let updated = if let Some(actions) = lists.next() {
-            if lists.next().is_some() {
-                return Err(OfdError::Invalid(
-                    "page object Actions are ambiguous".into(),
-                ));
-            }
-            let tag = qualified_tag(source, actions)?;
-            let prefix = tag.rsplit_once(':').map_or("", |(prefix, _)| prefix);
-            let prefix = if prefix.is_empty() {
-                String::new()
-            } else {
-                format!("{prefix}:")
-            };
-            let action = format!(
-                "<{prefix}Action Event=\"CLICK\">{}</{prefix}Action>",
-                action_body(&prefix)
-            );
-            insert_xml_child(source, actions, &action)?
-        } else {
-            let tag = qualified_tag(source, object)?;
-            let prefix = tag.rsplit_once(':').map_or("", |(prefix, _)| prefix);
-            let prefix = if prefix.is_empty() {
-                String::new()
-            } else {
-                format!("{prefix}:")
-            };
-            let actions = format!("<{prefix}Actions><{prefix}Action Event=\"CLICK\">{}</{prefix}Action></{prefix}Actions>", action_body(&prefix));
-            insert_xml_child(source, object, &actions)?
-        };
+        let updated = append_click_action_xml(source, object, action_body)?;
         self.set_structured_entry(&page.path, updated.into_bytes())
     }
 
@@ -30929,6 +30919,183 @@ fn check_bookmark_actions(
             });
         }
     }
+}
+
+fn append_click_action_xml(
+    source: &str,
+    object: Node<'_, '_>,
+    action_body: impl Fn(&str) -> String,
+) -> Result<String, OfdError> {
+    let mut lists = object
+        .children()
+        .filter(|node| is_ofd_element(*node, "Actions"));
+    let updated = if let Some(actions) = lists.next() {
+        if lists.next().is_some() {
+            return Err(OfdError::Invalid(
+                "graphic object Actions are ambiguous".into(),
+            ));
+        }
+        let tag = qualified_tag(source, actions)?;
+        let prefix = tag.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+        let prefix = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}:")
+        };
+        let action = format!(
+            "<{prefix}Action Event=\"CLICK\">{}</{prefix}Action>",
+            action_body(&prefix)
+        );
+        insert_xml_child(source, actions, &action)?
+    } else {
+        let tag = qualified_tag(source, object)?;
+        let prefix = tag.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+        let prefix = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}:")
+        };
+        let actions = format!("<{prefix}Actions><{prefix}Action Event=\"CLICK\">{}</{prefix}Action></{prefix}Actions>", action_body(&prefix));
+        insert_xml_child(source, object, &actions)?
+    };
+    Ok(updated)
+}
+fn remove_object_action_xml(
+    source: &str,
+    object: Node<'_, '_>,
+    action_index: usize,
+) -> Result<String, OfdError> {
+    let mut lists = object
+        .children()
+        .filter(|node| is_ofd_element(*node, "Actions"));
+    let actions = lists
+        .next()
+        .ok_or_else(|| OfdError::Invalid("graphic object has no Actions".into()))?;
+    if lists.next().is_some() {
+        return Err(OfdError::Invalid(
+            "graphic object Actions are ambiguous".into(),
+        ));
+    }
+    let mut items = actions
+        .children()
+        .filter(|node| is_ofd_element(*node, "Action"));
+    let action = items.nth(action_index).ok_or_else(|| {
+        OfdError::Invalid(format!("action index {action_index} is out of bounds"))
+    })?;
+    let only_action = actions.children().all(|child| {
+        child == action || child.is_text() && child.text().unwrap_or("").trim().is_empty()
+    });
+    let mut updated = source.to_owned();
+    updated.replace_range(
+        if only_action {
+            actions.range()
+        } else {
+            action.range()
+        },
+        "",
+    );
+    Ok(updated)
+}
+fn validate_action_rectangles(rectangles: &[[f64; 4]]) -> Result<(), OfdError> {
+    if rectangles.iter().any(|rect| {
+        rect.iter().any(|value| !value.is_finite())
+            || rect[2] <= 0.0
+            || rect[3] <= 0.0
+            || !(rect[0] + rect[2]).is_finite()
+            || !(rect[1] + rect[3]).is_finite()
+    }) {
+        return Err(OfdError::Invalid(
+            "Action Region rectangle is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+fn set_object_action_regions_xml(
+    source: &str,
+    object: Node<'_, '_>,
+    action_index: usize,
+    rectangles: &[[f64; 4]],
+) -> Result<String, OfdError> {
+    let mut lists = object
+        .children()
+        .filter(|node| is_ofd_element(*node, "Actions"));
+    let actions = lists
+        .next()
+        .ok_or_else(|| OfdError::Invalid("graphic object has no Actions".into()))?;
+    if lists.next().is_some() {
+        return Err(OfdError::Invalid(
+            "graphic object Actions are ambiguous".into(),
+        ));
+    }
+    drop(lists);
+    let action = actions
+        .children()
+        .filter(|node| is_ofd_element(*node, "Action"))
+        .nth(action_index)
+        .ok_or_else(|| {
+            OfdError::Invalid(format!("action index {action_index} is out of bounds"))
+        })?;
+    let mut regions = action
+        .children()
+        .filter(|node| is_ofd_element(*node, "Region"));
+    let old_region = regions.next();
+    if regions.next().is_some() {
+        return Err(OfdError::Invalid("Action has multiple Regions".into()));
+    }
+    drop(regions);
+    let tag = qualified_tag(source, action)?;
+    let prefix = tag
+        .rsplit_once(':')
+        .map_or(String::new(), |(prefix, _)| format!("{prefix}:"));
+    let mut region_xml = format!("<{prefix}Region>");
+    for &[x, y, width, height] in rectangles {
+        region_xml.push_str(&format!("<{prefix}Area Start=\"{x} {y}\"><{prefix}Line Point1=\"{} {y}\"/><{prefix}Line Point1=\"{} {}\"/><{prefix}Line Point1=\"{x} {}\"/><{prefix}Close/></{prefix}Area>", x + width, x + width, y + height, y + height));
+    }
+    region_xml.push_str(&format!("</{prefix}Region>"));
+    let updated = if let Some(region) = old_region {
+        let mut updated = source.to_owned();
+        updated.replace_range(
+            region.range(),
+            if rectangles.is_empty() {
+                ""
+            } else {
+                &region_xml
+            },
+        );
+        updated
+    } else if rectangles.is_empty() {
+        source.to_owned()
+    } else {
+        let kind = action
+            .children()
+            .find(|node| has_ofd_namespace(*node))
+            .ok_or_else(|| OfdError::Invalid("Action has no kind".into()))?;
+        let mut updated = source.to_owned();
+        updated.insert_str(kind.range().start, &region_xml);
+        updated
+    };
+    Ok(updated)
+}
+fn read_object_actions(
+    object: Node<'_, '_>,
+    object_id: &str,
+) -> Result<Vec<PageObjectActionInfo>, OfdError> {
+    let mut lists = object
+        .children()
+        .filter(|node| is_ofd_element(*node, "Actions"));
+    let Some(actions) = lists.next() else {
+        return Ok(Vec::new());
+    };
+    if lists.next().is_some() {
+        return Err(OfdError::Invalid(
+            "graphic object Actions are ambiguous".into(),
+        ));
+    }
+    actions
+        .children()
+        .filter(|node| is_ofd_element(*node, "Action"))
+        .map(|node| parse_graphic_action(node, object_id))
+        .collect()
 }
 
 fn parse_graphic_action(

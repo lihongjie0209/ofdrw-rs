@@ -17,7 +17,7 @@
   "scripts": {
     "prepack": "node scripts/native-package.js verify",
     "typecheck": "tsc --project tsconfig.json",
-    "test": "npm run typecheck && node --test --experimental-test-coverage --test-coverage-lines=90 test/document.test.js test/native-package.test.js"
+    "test": "npm run typecheck && node --test --experimental-test-coverage --test-coverage-lines=90 test/annotation-action-sequences.test.js test/document.test.js test/link-action-tree.test.js test/native-action-sequences.test.js test/native-package.test.js test/uri-base.test.js"
   },
   "dependencies": {
     "koffi": "^3.3.4"

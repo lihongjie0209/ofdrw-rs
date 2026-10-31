@@ -151,6 +151,10 @@ type nativeAPI struct {
 	updateExtension                 func(uintptr, uintptr, *byte) int32
 	removeExtension                 func(uintptr, uintptr) int32
 	annotations                     func(uintptr, *nativeBuffer) int32
+	annotationObjectActions         func(uintptr, uintptr, *byte, *byte, *nativeBuffer) int32
+	addAnnotationObjectAction       func(uintptr, uintptr, *byte, *byte, *byte) int32
+	removeAnnotAction               func(uintptr, uintptr, *byte, *byte, uintptr) int32
+	setAnnotActionRegions           func(uintptr, uintptr, *byte, *byte, uintptr, *byte) int32
 	annotationObjects               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendAnnotationObjects         func(uintptr, uintptr, *byte, *byte, *nativeBuffer) int32
 	updateAnnotationObject          func(uintptr, uintptr, *byte, *byte, *byte) int32
@@ -517,6 +521,10 @@ func loadAPI() error {
 			{"ofd_update_extension_json", &api.updateExtension},
 			{"ofd_remove_extension", &api.removeExtension},
 			{"ofd_annotations_json", &api.annotations},
+			{"ofd_annotation_object_actions_json", &api.annotationObjectActions},
+			{"ofd_add_annotation_object_action_json", &api.addAnnotationObjectAction},
+			{"ofd_remove_annotation_object_action", &api.removeAnnotAction},
+			{"ofd_set_annotation_object_action_regions_json", &api.setAnnotActionRegions},
 			{"ofd_annotation_objects_json", &api.annotationObjects},
 			{"ofd_append_annotation_objects_json", &api.appendAnnotationObjects},
 			{"ofd_update_annotation_object_json", &api.updateAnnotationObject},
@@ -5222,6 +5230,178 @@ func (doc *Document) AnnotationObjects(pageIndex int, annotationID string) ([]An
 		return nil, fmt.Errorf("decode annotation objects: %w", err)
 	}
 	return objects, nil
+}
+
+// AnnotationObjectActions returns ordered actions on an annotation appearance graphic.
+func (doc *Document) AnnotationObjectActions(pageIndex int, annotationID, objectID string) ([]PageObjectActionInfo, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return nil, err
+	}
+	if pageIndex < 0 {
+		return nil, errors.New("negative page index")
+	}
+	annotation, err := cString(annotationID)
+	if err != nil {
+		return nil, err
+	}
+	object, err := cString(objectID)
+	if err != nil {
+		return nil, err
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	status := api.annotationObjectActions(
+		doc.handle,
+		uintptr(pageIndex),
+		&annotation[0],
+		&object[0],
+		&buffer,
+	)
+	if err := nativeError(status); err != nil {
+		return nil, fmt.Errorf("annotation object action: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return nil, err
+	}
+	actions := []PageObjectActionInfo{}
+	if err := json.Unmarshal(data, &actions); err != nil {
+		return nil, fmt.Errorf("decode annotation actions: %w", err)
+	}
+	return actions, nil
+}
+
+// AddAnnotationObjectAction appends a URI, page, bookmark, or attachment CLICK action. An empty Event defaults to CLICK.
+func (doc *Document) AddAnnotationObjectAction(pageIndex int, annotationID, objectID string, action DocumentActionSpec) error {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return err
+	}
+	if pageIndex < 0 {
+		return errors.New("negative page index")
+	}
+	annotation, err := cString(annotationID)
+	if err != nil {
+		return err
+	}
+	object, err := cString(objectID)
+	if err != nil {
+		return err
+	}
+	if action.Event == "" {
+		action.Event = "CLICK"
+	}
+	data, err := json.Marshal(action)
+	if err != nil {
+		return fmt.Errorf("encode annotation action: %w", err)
+	}
+	request, err := cString(string(data))
+	if err != nil {
+		return err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	status := api.addAnnotationObjectAction(
+		doc.handle,
+		uintptr(pageIndex),
+		&annotation[0],
+		&object[0],
+		&request[0],
+	)
+	if err := nativeError(status); err != nil {
+		return fmt.Errorf("annotation object action: %w", err)
+	}
+	return nil
+}
+
+// RemoveAnnotationObjectAction removes an annotation graphic action by zero-based index.
+func (doc *Document) RemoveAnnotationObjectAction(pageIndex int, annotationID, objectID string, actionIndex int) error {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return err
+	}
+	if pageIndex < 0 {
+		return errors.New("negative page index")
+	}
+	annotation, err := cString(annotationID)
+	if err != nil {
+		return err
+	}
+	object, err := cString(objectID)
+	if err != nil {
+		return err
+	}
+	if actionIndex < 0 {
+		return errors.New("negative action index")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	status := api.removeAnnotAction(
+		doc.handle,
+		uintptr(pageIndex),
+		&annotation[0],
+		&object[0],
+		uintptr(actionIndex),
+	)
+	if err := nativeError(status); err != nil {
+		return fmt.Errorf("annotation object action: %w", err)
+	}
+	return nil
+}
+
+// SetAnnotationObjectActionRegions sets rectangles in appearance coordinates. An empty slice removes the explicit Region.
+func (doc *Document) SetAnnotationObjectActionRegions(pageIndex int, annotationID, objectID string, actionIndex int, rectangles [][4]float64) error {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return err
+	}
+	if pageIndex < 0 {
+		return errors.New("negative page index")
+	}
+	annotation, err := cString(annotationID)
+	if err != nil {
+		return err
+	}
+	object, err := cString(objectID)
+	if err != nil {
+		return err
+	}
+	if actionIndex < 0 {
+		return errors.New("negative action index")
+	}
+	if rectangles == nil {
+		rectangles = [][4]float64{}
+	}
+	data, err := json.Marshal(rectangles)
+	if err != nil {
+		return fmt.Errorf("encode action regions: %w", err)
+	}
+	request, err := cString(string(data))
+	if err != nil {
+		return err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	status := api.setAnnotActionRegions(
+		doc.handle,
+		uintptr(pageIndex),
+		&annotation[0],
+		&object[0],
+		uintptr(actionIndex),
+		&request[0],
+	)
+	if err := nativeError(status); err != nil {
+		return fmt.Errorf("annotation object action: %w", err)
+	}
+	return nil
 }
 
 // AppendAnnotationObjects adds ordered path, text, image, or composite objects to an existing appearance.

@@ -551,6 +551,12 @@ export interface Destination {
   zoom?: number;
 }
 
+/** CLICK is the default event for annotation appearance graphics. */
+export type AnnotationActionRequest =
+  | { kind: 'uri'; event?: 'CLICK'; uri: string }
+  | { kind: 'page'; event?: 'CLICK'; destination: Destination }
+  | { kind: 'bookmark'; event?: 'CLICK'; name: string }
+  | { kind: 'attachment'; event?: 'CLICK'; id: string; new_window?: boolean };
 export type ActionRequest<Event extends string = 'DO' | 'PO' | 'CLICK'> =
   | {kind: 'uri'; event: Event; uri: string}
   | {kind: 'page'; event: Event; destination: Destination}
@@ -900,6 +906,11 @@ export class Document {
   extractVersionSnapshot(versionIndex: number): Document;
   annotations(): Record<string, unknown>[];
   annotationObjects(page: number, annotationId: string | number): AnnotationObject[];
+  annotationObjectActions(page: number, annotationId: string | number, objectId: string | number): ActionInfo[];
+  addAnnotationObjectAction(page: number, annotationId: string | number, objectId: string | number, action: AnnotationActionRequest): void;
+  removeAnnotationObjectAction(page: number, annotationId: string | number, objectId: string | number, actionIndex: number): void;
+  setAnnotationObjectActionRegions(page: number, annotationId: string | number, objectId: string | number, actionIndex: number, rectangles: Array<[number, number, number, number]>): void;
+
   appendAnnotationObjects(page: number, annotationId: string | number, objects: AnnotationGraphic[]): string[];
   updateAnnotationObject(page: number, annotationId: string | number, objectId: string | number, update: {boundary?: [number, number, number, number]; ctm?: [number, number, number, number, number, number] | null; visible?: boolean; alpha?: number}): void;
   setAnnotationObjectName(page: number, annotationId: string | number, objectId: string | number, name?: string | null): void;

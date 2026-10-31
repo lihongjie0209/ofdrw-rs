@@ -11,6 +11,8 @@
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
 版本变更见 [v0.2.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
+主分支另含批注图形动作的读取、追加、删除和触发区域编辑接口，支持 Rust、C、Python、Go 和 Node.js；
+这些尚未发布的接口见[批注与图章](docs/FEATURES.md#批注与图章)。
 
 ## 安装渠道
 
