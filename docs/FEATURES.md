@@ -970,10 +970,21 @@ more rectangular trigger areas for an existing action; an empty list removes
 its explicit `Region`. The C entry point is
 `ofd_set_page_object_action_regions_json()`, taking an array of `[x,y,width,height]`
 rectangles in page millimeters. Action readers return each Area path and its
-commands. PDF export turns the first supported `CLICK` action on a visible
-page or template graphic object into Link annotations. Each explicit rectangular
-Area creates its own link; convex four-sided Areas use PDF `QuadPoints` for
-their precise hit region. Without `Region`, the object's `Boundary` is used.
+commands. **Unreleased main:** PDF export preserves ordered supported `CLICK`
+actions on visible page and template graphic objects. Actions sharing a trigger
+region use a PDF `Next` sequence. Different rectangular regions are partitioned
+into click areas: an overlap executes every active action once in native order,
+while disjoint areas retain their own targets. Overlapping Areas within one
+action do not execute that action twice. Convex four-sided Areas remain supported
+for a single/shared region through PDF `QuadPoints`. Without `Region`, the
+object's `Boundary` is used.
+
+Native object conversion allows up to 256 supported actions and 1,000,000 target
+bytes per sequence. Different-region partitioning is limited to 1,000 rectangles,
+10,000 grid cells, 10,000 output actions and 1,000,000 output target bytes.
+Different nonrectangular regions return an error. File-attachment activation may
+use a disjoint region; overlapping it with another target returns an error
+because it cannot be written as an ordinary PDF action chain.
 
 URI, direct page destinations, and named bookmarks are supported. PDF export
 reports an error for curves and other Region paths that cannot be represented

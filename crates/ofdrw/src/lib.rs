@@ -17406,36 +17406,27 @@ impl OfdDocument {
                         continue;
                     };
                     let id = object.attribute("ID").unwrap_or("");
-                    for node in actions
+                    let actions = actions
                         .children()
                         .filter(|node| is_ofd_element(*node, "Action"))
-                    {
-                        let action = parse_graphic_action(node, id)?;
-                        let Some(target) = pdf_link_target(
-                            &action,
-                            page.document_index,
-                            &pages,
-                            &bookmarks,
-                            &attachment_targets,
-                        ) else {
-                            continue;
-                        };
-                        for region in pdf_link_output_regions(
-                            &action,
-                            boundary,
-                            physical_box,
-                            !matches!(target, PdfLinkTarget::Attachment(_)),
-                        )? {
-                            links.push((
-                                allocator.bump(),
-                                region.rect,
-                                region.quads,
-                                target.clone(),
-                                AnnotationFlags::PRINT,
-                                None,
-                            ));
-                        }
-                        break;
+                        .map(|node| parse_graphic_action(node, id))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (region, target) in pdf_link_action::object_links(
+                        &actions,
+                        page.document_index,
+                        &pages,
+                        &bookmarks,
+                        &attachment_targets,
+                        (boundary, physical_box),
+                    )? {
+                        links.push((
+                            allocator.bump(),
+                            region.rect,
+                            region.quads,
+                            target,
+                            AnnotationFlags::PRINT,
+                            None,
+                        ));
                     }
                 }
             }

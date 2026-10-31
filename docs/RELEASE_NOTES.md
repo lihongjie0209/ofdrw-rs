@@ -1,5 +1,12 @@
 # Unreleased
 
+- Preserve native page/template URI, GoTo and bookmark click sequences when
+  exporting PDF. Shared trigger regions use Next actions; different rectangular
+  regions are partitioned so overlaps execute all active actions in order.
+  Multiple Areas of one action form a union. Disjoint attachment activation
+  remains independent. Explicit work/payload limits and unsupported mixed
+  geometry errors replace silently dropping later supported actions.
+
 - Preserve PDF Link `Next` action trees containing URI and local GoTo actions.
   Native CLICK actions retain depth-first execution order, repeated shared
   actions and trigger regions. OFD/PDF round trips preserve the full sequence;
