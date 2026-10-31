@@ -14,6 +14,11 @@ permissions:
   contents: read
   actions: read
 
+# Packaging needs the installed compiler, without implicitly adding the local
+# development components declared in rust-toolchain.toml.
+env:
+  RUSTUP_TOOLCHAIN: '1.96.0'
+
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
@@ -145,7 +150,16 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/npm-package-smoke"
           cd "$RUNNER_TEMP/npm-package-smoke"
-          npm install "ofdrw-rs@${RELEASE_TAG#v}"
+          installed=false
+          for attempt in {1..12}; do
+            if npm install --prefer-online --registry=https://registry.npmjs.org/ \
+              --cache "$RUNNER_TEMP/npm-smoke-cache-$attempt" "ofdrw-rs@${RELEASE_TAG#v}"; then
+              installed=true
+              break
+            fi
+            if [ "$attempt" -lt 12 ]; then sleep 10; fi
+          done
+          test "$installed" = true
           node -e "const {Document}=require('ofdrw-rs'); const d=Document.create(); d.addTextPage('npm registry'); if(d.pageText(0)[0]!=='npm registry') throw new Error('Package smoke failed'); d.close()"
       - name: Install Python library from PyPI
         run: |
