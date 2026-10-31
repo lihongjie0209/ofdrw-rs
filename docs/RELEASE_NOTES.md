@@ -1,5 +1,13 @@
 # Unreleased
 
+- Preserve PDF Link `Next` action trees containing URI and local GoTo actions.
+  Native CLICK actions retain depth-first execution order, repeated shared
+  actions and trigger regions. OFD/PDF round trips preserve the full sequence;
+  the PDF writer emits a flat Next array. Cycles, unsupported children, mouse
+  mapping and incompatible sequence edits return errors. Limits cover nesting,
+  expanded action count and total URI payload. Tests exercise mixed trees,
+  shared actions, precise quadrilaterals and Python/Go/Node round trips.
+
 - Resolve PDF relative URI links against catalog `URI/Base`, retaining their
   absolute target through OFD and PDF round trips. Includes indirect entries,
   Unicode/UTF-16 strings, path merging, queries, fragments, authority-relative

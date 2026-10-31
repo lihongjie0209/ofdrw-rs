@@ -1695,6 +1695,23 @@ the OFD annotation's generated date unchanged.
 
 PDF `Link` annotations with URI or direct page `GoTo` actions import as OFD
 links, including page rotation, `UserUnit`, print, and visibility flags.
+**Unreleased main:** Link action dictionaries also import `Next` trees of URI
+and local `GoTo` actions, including dictionary/array references and shared
+actions. The tree is expanded in depth-first execution order; a shared action
+is retained at every occurrence. Each native CLICK action keeps the original
+trigger region. OFD saving retains the sequence, and PDF export writes a flat
+`Next` array with the same execution order and page destinations. This path is
+bounded to 32 levels, 256 expanded actions, and 1,000,000 total URI bytes.
+Cycles, malformed children and unsupported action types fail the complete import.
+URI `IsMap=true` also returns an error because OFD URI actions cannot append the
+mouse position; false and indirect false values are accepted.
+
+Imported action sequences carry `PDFActionSequence=true` in annotation
+parameters. After editing such a sequence, all actions must remain supported
+CLICK targets with the same region for PDF export; incompatible edits return
+errors instead of discarding later actions. SVG/PNG previews render appearance
+content; action execution is delegated to OFD/PDF viewers.
+
 Supported PDF annotation types map the `NoZoom`, `NoRotate`, and `Locked`
 flags to OFD's matching display and editing metadata. PDF `ReadOnly`
 restricts interaction rather than editing, so its raw flags integer is kept
@@ -1708,8 +1725,10 @@ malformed names return an error. Link `QuadPoints` import as OFD action Regions,
 including multiple quadrilaterals and page rotation. Points outside the link
 `Rect` are ignored as required by PDF; malformed arrays return an error.
 
-Appearance streams and other PDF annotation subtypes still return an error.
-Link border artwork is not represented in OFD.
+Other annotation subtypes require a supported normal appearance or a supported
+native fallback; otherwise import returns an error. Link border artwork is
+retained through supported normal appearances, but is not synthesized from
+border metadata when an appearance is absent.
 Raw and Flate images accept 1, 2, 4, 8, or 16 bits per RGB/gray component,
 including per-row byte padding and component `Decode` arrays. Sixteen-bit
 samples are read in big-endian order and converted to 8-bit PNG output after

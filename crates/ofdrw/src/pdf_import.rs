@@ -9,6 +9,7 @@ mod device_n;
 mod font_style;
 mod isolated_group;
 mod jpx_color;
+mod link_action;
 mod mesh_shading;
 mod multi_function;
 mod pattern;
@@ -10654,54 +10655,15 @@ fn import_page_links(
         } else if kind != "Link" {
             import_pdf_text_markup(output, page_index, pdf, annotation, boundary, &quads, kind)?
         } else if let Ok(action) = annotation.get(b"A") {
-            let (_, action) = pdf
-                .dereference(action)
-                .map_err(|error| OfdError::Invalid(format!("invalid PDF Link action: {error}")))?;
-            let action = action
-                .as_dict()
-                .map_err(|_| OfdError::Invalid("PDF Link action is not a dictionary".into()))?;
-            let action_type = action.get(b"S").ok().map(|value| pdf.dereference(value));
-            let action_type = action_type
-                .transpose()
-                .map_err(|error| {
-                    OfdError::Invalid(format!("invalid PDF Link action type: {error}"))
-                })?
-                .and_then(|(_, value)| value.as_name().ok());
-            match action_type {
-                Some(b"URI") => {
-                    let uri = action
-                        .get(b"URI")
-                        .map_err(|_| OfdError::Invalid("PDF URI Link has no URI".into()))?;
-                    let (_, uri) = pdf.dereference(uri).map_err(|error| {
-                        OfdError::Invalid(format!("invalid PDF URI Link URI: {error}"))
-                    })?;
-                    let raw = uri.as_str().map_err(|_| {
-                        OfdError::Invalid("PDF URI Link URI is not a string".into())
-                    })?;
-                    let decoded = decode_pdf_link_uri(raw)?;
-                    let decoded = uri_action::resolve(pdf, &decoded)?;
-                    output.add_uri_link_annotation_with_quads(
-                        page_index, &decoded, boundary, &quads,
-                    )?
-                }
-                Some(b"GoTo") => {
-                    let value = action.get(b"D").map_err(|_| {
-                        OfdError::Invalid("PDF GoTo Link has no destination".into())
-                    })?;
-                    let destination = pdf_link_destination(pdf, value, pages, output_page_ids)?;
-                    output.add_goto_link_annotation_with_quads(
-                        page_index,
-                        destination,
-                        boundary,
-                        &quads,
-                    )?
-                }
-                _ => {
-                    return Err(OfdError::Invalid(
-                        "PDF Link action type is not supported".into(),
-                    ))
-                }
-            }
+            link_action::import(
+                output,
+                page_index,
+                pdf,
+                action,
+                pages,
+                output_page_ids,
+                (boundary, &quads),
+            )?
         } else if let Ok(value) = annotation.get(b"Dest") {
             let destination = pdf_link_destination(pdf, value, pages, output_page_ids)?;
             output.add_goto_link_annotation_with_quads(page_index, destination, boundary, &quads)?

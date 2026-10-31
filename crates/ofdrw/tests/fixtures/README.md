@@ -348,3 +348,10 @@ an indirect catalog URI dictionary and an indirect UTF-16LE base string.
 Targets cover a UTF-16BE Unicode relative path, query, fragment, authority,
 an absolute mailto URI and an empty reference. Tests compare the expected
 resolved targets across native OFD and PDF round trips; no network is used.
+
+`link-action-tree.pdf` is authored by
+`scripts/generate_link_action_tree_fixture.py` under Apache-2.0. It contains
+two blank pages and one nonrectangular Link region. A URI root branches into
+GoTo and URI actions, with a shared URI leaf reached twice. Expected execution
+order and exported PDF Next/QuadPoints dictionaries are checked independently
+of reimport. It contains no fonts, external payloads or network requests.

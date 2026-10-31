@@ -11,6 +11,7 @@ mod pdf_annotation_appearance;
 mod pdf_calculator;
 mod pdf_export;
 mod pdf_import;
+mod pdf_link_action;
 mod rtl_semantics;
 
 pub use encryption::{
@@ -569,6 +570,7 @@ enum PdfLinkTarget {
     Uri(String),
     Goto(DestinationInfo),
     Attachment(Ref),
+    Sequence(Vec<PdfLinkTarget>),
 }
 
 fn pdf_link_target(
@@ -17347,6 +17349,14 @@ impl OfdDocument {
                 }) else {
                     continue;
                 };
+                let target = pdf_link_action::sequence(
+                    annotation,
+                    target,
+                    page.document_index,
+                    &pages,
+                    &bookmarks,
+                    &attachment_targets,
+                )?;
                 for mut region in pdf_link_output_regions(
                     action,
                     boundary,
@@ -17620,27 +17630,13 @@ impl OfdDocument {
                 if let Some(quad) = quad {
                     output_annotation.quad_points(quad);
                 }
-                match target {
-                    PdfLinkTarget::Uri(uri) => {
-                        output_annotation
-                            .action()
-                            .action_type(ActionType::Uri)
-                            .uri(Str(uri.as_bytes()));
-                    }
-                    PdfLinkTarget::Goto(destination) => {
-                        let target_index =
-                            resolve_page_id(&pages, page.document_index, &destination.page_id)?;
-                        let mut output_action = output_annotation.action();
-                        output_action.action_type(ActionType::GoTo);
-                        write_pdf_destination(
-                            output_action.destination(),
-                            &destination,
-                            &pages[target_index],
-                            page_refs[target_index],
-                        )?;
-                    }
-                    PdfLinkTarget::Attachment(_) => unreachable!(),
-                }
+                pdf_link_action::write(
+                    output_annotation.action(),
+                    &target,
+                    page.document_index,
+                    &pages,
+                    &page_refs,
+                )?;
             }
             for (reference, annotation, kind, rect, quads, color, opacity, flags) in markups {
                 let mut output_annotation = pdf.annotation(reference);
