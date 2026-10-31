@@ -1,3 +1,14 @@
+# Unreleased
+
+- Import shorter nonempty PDF ActualText across consecutive compatible text
+  runs. Native coalescing retains all original glyphs and positions, including
+  affine/reflected text, TrueType, CFF and CID CFF font matrices. Outline bounds
+  protect existing clipping, repeated bounds are cached, and glyph/outline work
+  is limited. Independent original-PDF rasters, native/PDF round trips,
+  external text extraction and Python/Go/Node integration tests cover the path.
+  Empty replacements, mixed paint styles, explicit text clips and interleaved
+  paints remain outside this coalescing path.
+
 # v0.2.0
 
 ## Upgrade notes

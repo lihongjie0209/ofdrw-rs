@@ -110,3 +110,25 @@ export_case!(
 export_case!(outline_unicode, "outline-tounicode", "中文");
 export_case!(metadata_unicode, "metadata-tounicode", "中文");
 export_case!(rotated_unicode, "rotated-tounicode", "中文");
+export_case!(
+    actual_text_short_truetype,
+    "actual-text-short-truetype",
+    "X"
+);
+export_case!(actual_text_short_affine, "actual-text-short-affine", "X");
+export_case!(
+    actual_text_short_reflected,
+    "actual-text-short-reflected",
+    "X"
+);
+export_case!(actual_text_short_cff, "actual-text-short-cff", "X");
+export_case!(
+    actual_text_short_cff_matrix,
+    "actual-text-short-cff-matrix",
+    "X"
+);
+export_case!(
+    actual_text_short_cid_cff_matrix,
+    "actual-text-short-cid-cff-matrix",
+    "X"
+);

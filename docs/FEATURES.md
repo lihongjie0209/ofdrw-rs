@@ -2050,8 +2050,18 @@ positions are approximate because ActualText supplies no such positions.
 Graphic-only scopes add nonpainting semantic text. Nested replacements use the
 outer scope. The [replacement-text rule](https://pdf-issues.pdfa.org/32000-2-2020/clause14.html)
 applies to the marked sequence rather than independently to each glyph.
-Empty/shorter-than-run replacements of painted text, changed text without a
-usable embedded glyph program, scopes crossing composite objects and
+**Unreleased main:** Shorter nonempty replacements also accept consecutive
+native runs with the same font, text style, linear transform and solid paint,
+normal blending and full object opacity, with no explicit object clips.
+They coalesce into one native TextObject while retaining all original glyph IDs
+and positions. TrueType, raw/OpenType CFF and per-glyph CID CFF font matrices
+are supported. Outline bounds must fit each original Boundary; at most 10,000
+glyphs and 500,000 unique-outline points are processed. Repeated glyph bounds
+are cached. Antialiasing at former object boundaries can differ after coalescing;
+independent original-PDF rasters verify the paint.
+
+Empty replacements, shorter replacements across incompatible or interleaved
+runs, changed text without a usable embedded glyph program, scopes crossing composite objects and
 structure-tree ActualText remain unsupported. Those marked-content replacement
 cases return errors rather than silently importing the original text.
 

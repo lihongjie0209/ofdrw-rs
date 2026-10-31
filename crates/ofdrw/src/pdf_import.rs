@@ -15284,12 +15284,47 @@ mod tests {
     }
 
     #[test]
+    fn imports_short_actual_text_across_consecutive_mapped_runs() {
+        let plain = mapped_actual_text_pdf(b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET");
+        let reference = OfdDocument::from_pdf_bytes(&plain)
+            .unwrap()
+            .page_png(0, 144.)
+            .unwrap();
+        let source = mapped_actual_text_pdf(
+            b"/Span << /ActualText (X) >> BDC BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET EMC",
+        );
+        let imported = OfdDocument::from_pdf_bytes(&source).unwrap();
+        assert_eq!(imported.page_text(0).unwrap(), ["X"]);
+        assert_eq!(imported.page_png(0, 144.).unwrap(), reference);
+        let reopened = OfdDocument::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["X"]);
+        let exported = OfdDocument::from_pdf_bytes(&reopened.to_pdf().unwrap()).unwrap();
+        assert_eq!(exported.page_text(0).unwrap().concat(), "X");
+        assert!(exported.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn short_actual_text_keeps_the_following_text_cursor() {
+        let plain = mapped_actual_text_pdf(b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj (A) Tj ET");
+        let reference = OfdDocument::from_pdf_bytes(&plain)
+            .unwrap()
+            .page_png(0, 144.)
+            .unwrap();
+        let source = mapped_actual_text_pdf(
+            b"BT /F1 12 Tf 10 20 Td /Span << /ActualText (X) >> BDC (A) Tj (B) Tj EMC (A) Tj ET",
+        );
+        let imported = OfdDocument::from_pdf_bytes(&source).unwrap();
+        assert_eq!(imported.page_text(0).unwrap(), ["X", "A"]);
+        assert_eq!(imported.page_png(0, 144.).unwrap(), reference);
+        assert!(imported.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
     fn actual_text_malformed_and_unsupported_sequences_return_explicit_errors() {
         for content in [
             b"/Span << /ActualText 123 >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC".as_slice(),
             b"/Span << /ActualText <FEFF00> >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
             b"/Span << /ActualText () >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
-            b"/Span << /ActualText (X) >> BDC BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj ET EMC",
         ] {
             assert!(
                 matches!(OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(content)), Err(OfdError::Invalid(message)) if message.contains("ActualText"))

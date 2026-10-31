@@ -1,6 +1,14 @@
 //! Keep replacement text separate from the glyphs that paint a marked sequence.
 use super::*;
 
+mod coalesce;
+
+type NativeRun<'a, 'input> = (
+    roxmltree::Node<'a, 'input>,
+    roxmltree::Node<'a, 'input>,
+    String,
+);
+
 pub(super) struct Replacement {
     text: String,
     first_id: usize,
@@ -133,9 +141,13 @@ impl Replacement {
             .collect::<Vec<_>>();
         let count = boundaries.len() - 1;
         if count < runs.len() {
-            return Err(invalid(
-                "replacement has fewer graphemes than native text runs",
-            ));
+            let merged = coalesce::merge(output, &page, &runs, &self.text)?;
+            let mut result = source.to_owned();
+            for (object, _, _) in runs.iter().skip(1).rev() {
+                result.replace_range(object.range(), "");
+            }
+            result.replace_range(runs[0].0.range(), &merged);
+            return output.set_entry(&page.path, result.into_bytes());
         }
         // ActualText supplies no individual caret positions. Share its intact
         // graphemes across the original runs while retaining all painted glyph
@@ -148,22 +160,7 @@ impl Replacement {
             if current == replacement_text {
                 continue;
             }
-            let mut mappings = crate::parse_cg_transforms(object)?;
-            mappings.sort_by_key(|mapping| mapping.code_position);
-            let mut covered = 0;
-            let mut glyphs = Vec::new();
-            for mapping in mappings {
-                if mapping.code_position != covered {
-                    return Err(invalid("requires complete source glyph mappings"));
-                }
-                covered += mapping.code_count;
-                glyphs.extend(mapping.glyphs);
-            }
-            if glyphs.is_empty() || covered != current.encode_utf16().count() {
-                return Err(invalid(
-                    "replacement requires complete source glyph mappings",
-                ));
-            }
+            let glyphs = mapped_glyphs(object, &current)?;
             let transforms = object
                 .children()
                 .filter(|n| is_ofd_element(*n, "CGTransform"))
@@ -208,6 +205,26 @@ impl Replacement {
         }
         output.set_entry(&page.path, result.into_bytes())
     }
+}
+
+fn mapped_glyphs(object: roxmltree::Node<'_, '_>, text: &str) -> Result<Vec<u32>, OfdError> {
+    let mut mappings = crate::parse_cg_transforms(object)?;
+    mappings.sort_by_key(|mapping| mapping.code_position);
+    let mut covered = 0;
+    let mut glyphs = Vec::new();
+    for mapping in mappings {
+        if mapping.code_position != covered {
+            return Err(invalid("requires complete source glyph mappings"));
+        }
+        covered += mapping.code_count;
+        glyphs.extend(mapping.glyphs);
+    }
+    if glyphs.is_empty() || covered != text.encode_utf16().count() {
+        return Err(invalid(
+            "replacement requires complete source glyph mappings",
+        ));
+    }
+    Ok(glyphs)
 }
 
 fn invalid(message: &str) -> OfdError {
@@ -355,6 +372,244 @@ mod tests {
     }
 
     #[test]
+    fn short_replacement_preserves_all_original_glyphs_and_pixels() {
+        let (mut doc, ids) = shaped(&["AB", "C", "DE"]);
+        let original = doc.page_text_objects(0).unwrap();
+        let glyphs = original
+            .iter()
+            .flat_map(|object| {
+                object
+                    .cg_transforms
+                    .iter()
+                    .flat_map(|mapping| mapping.glyphs.iter().copied())
+            })
+            .collect::<Vec<_>>();
+        let before = [72., 144.].map(|dpi| doc.page_png(0, dpi).unwrap());
+        Replacement {
+            text: "X".into(),
+            first_id: ids[0].parse().unwrap(),
+        }
+        .apply(&mut doc, 0)
+        .unwrap();
+        let objects = doc.page_text_objects(0).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].cg_transforms[0].code_count, 1);
+        assert_eq!(objects[0].cg_transforms[0].glyphs, glyphs);
+        assert_eq!(doc.page_text(0).unwrap(), ["X"]);
+        let reopened = OfdDocument::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["X"]);
+        for (index, dpi) in [72., 144.].into_iter().enumerate() {
+            assert_eq!(reopened.page_png(0, dpi).unwrap(), before[index]);
+        }
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn short_replacement_keeps_combining_and_supplementary_graphemes_intact() {
+        for text in ["a\u{301}", "\u{31350}"] {
+            let (mut doc, ids) = shaped(&["A", "B", "C"]);
+            let before = doc.page_png(0, 144.).unwrap();
+            Replacement {
+                text: text.into(),
+                first_id: ids[0].parse().unwrap(),
+            }
+            .apply(&mut doc, 0)
+            .unwrap();
+            assert_eq!(doc.page_text(0).unwrap(), [text]);
+            assert_eq!(
+                doc.page_text_objects(0).unwrap()[0].cg_transforms[0].code_count,
+                2
+            );
+            assert_eq!(doc.page_png(0, 144.).unwrap(), before);
+            assert!(doc.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn short_replacement_preserves_cff_glyph_outlines() {
+        let mut doc =
+            OfdDocument::from_pdf_bytes(include_bytes!("../../tests/fixtures/actual-text-cff.pdf"))
+                .unwrap();
+        let objects = doc.page_text_objects(0).unwrap();
+        assert_eq!(objects.len(), 2);
+        let before = image::load_from_memory(&doc.page_png(0, 144.).unwrap())
+            .unwrap()
+            .to_rgba8();
+        Replacement {
+            text: "X".into(),
+            first_id: 0,
+        }
+        .apply(&mut doc, 0)
+        .unwrap();
+        assert_eq!(doc.page_text(0).unwrap(), ["X"]);
+        let after = image::load_from_memory(&doc.page_png(0, 144.).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(after.dimensions(), before.dimensions());
+        // Sharing a Boundary can change mask antialiasing at former text-box
+        // edges. Interior pixels stay exact; integration tests compare the
+        // merged paint with an independently rasterized original PDF.
+        for (x, y, pixel) in before.enumerate_pixels() {
+            if *pixel != *after.get_pixel(x, y) {
+                assert!(
+                    objects.iter().filter_map(|object| object.boundary).any(
+                        |[left, top, width, height]| {
+                            let [left, top, right, bottom] =
+                                [left, top, left + width, top + height]
+                                    .map(|value| value * 144. / 25.4);
+                            let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                            px >= left - 1.
+                                && px <= right + 1.
+                                && py >= top - 1.
+                                && py <= bottom + 1.
+                                && [
+                                    (px - left).abs(),
+                                    (px - right).abs(),
+                                    (py - top).abs(),
+                                    (py - bottom).abs(),
+                                ]
+                                .into_iter()
+                                .any(|distance| distance <= 1.)
+                        }
+                    ),
+                    "changed CFF interior pixel ({x}, {y})"
+                );
+            }
+        }
+        assert!(doc.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn short_replacement_preserves_local_namespace_bindings() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        let path = doc.pages().unwrap()[0].path.clone();
+        let mut source = String::from_utf8(doc.required_entry(&path).unwrap().to_vec()).unwrap();
+        for (name, prefix) in [("TextCode", "t"), ("CGTransform", "c"), ("Glyphs", "g")] {
+            source = source
+                .replace(
+                    &format!("<ofd:{name}"),
+                    &format!("<{prefix}:{name} xmlns:{prefix}=\"{}\"", crate::OFD_NS),
+                )
+                .replace(&format!("</ofd:{name}>"), &format!("</{prefix}:{name}>"));
+        }
+        doc.set_entry(&path, source.into_bytes()).unwrap();
+        let before = doc.page_png(0, 144.).unwrap();
+        Replacement {
+            text: "X".into(),
+            first_id: ids[0].parse().unwrap(),
+        }
+        .apply(&mut doc, 0)
+        .unwrap();
+        assert_eq!(doc.page_text(0).unwrap(), ["X"]);
+        assert_eq!(doc.page_png(0, 144.).unwrap(), before);
+        assert!(doc.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn short_replacement_preserves_affine_and_reflected_glyph_positions() {
+        for linear in [[0.8, 0.3, -0.2, 1.1], [-1.0, 0.2, 0.1, 1.0]] {
+            let (mut doc, ids) = shaped(&["A", "B"]);
+            for (index, id) in ids.iter().enumerate() {
+                doc.set_page_object_ctm(
+                    0,
+                    id,
+                    Some([
+                        linear[0],
+                        linear[1],
+                        linear[2],
+                        linear[3],
+                        8. - index as f64,
+                        2.,
+                    ]),
+                )
+                .unwrap();
+            }
+            let before = doc.page_png(0, 144.).unwrap();
+            Replacement {
+                text: "X".into(),
+                first_id: ids[0].parse().unwrap(),
+            }
+            .apply(&mut doc, 0)
+            .unwrap();
+            assert_eq!(doc.page_text(0).unwrap(), ["X"]);
+            assert_eq!(doc.page_png(0, 144.).unwrap(), before);
+            assert!(doc.validate_references().unwrap().is_empty());
+        }
+    }
+
+    fn rejects_short_replacement_without_mutation(
+        mut doc: OfdDocument,
+        first_id: &str,
+        message: &str,
+    ) {
+        let before = doc.to_bytes().unwrap();
+        assert!(
+            matches!(Replacement { text: "X".into(), first_id: first_id.parse().unwrap() }.apply(&mut doc, 0), Err(OfdError::Invalid(value)) if value.contains(message))
+        );
+        assert_eq!(doc.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn short_replacement_rejects_different_styles_atomically() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        doc.set_page_text_paint_flags(0, &ids[1], Some(false), None)
+            .unwrap();
+        rejects_short_replacement_without_mutation(doc, &ids[0], "matching text styles");
+    }
+
+    #[test]
+    fn short_replacement_retains_intervening_graphic_paint_order() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        let path = doc
+            .add_path_object(0, "M 0 0 L 10 10", [1., 2., 10., 10.], PathStyle::default())
+            .unwrap();
+        doc.move_page_object(0, &path, Some(&ids[1])).unwrap();
+        rejects_short_replacement_without_mutation(doc, &ids[0], "consecutive");
+    }
+
+    #[test]
+    fn short_replacement_rejects_boundary_clipping_changes_atomically() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        doc.set_page_object_ctm(0, &ids[0], Some([1., 0., 0., 1., -2., 0.]))
+            .unwrap();
+        rejects_short_replacement_without_mutation(doc, &ids[0], "boundary clipping");
+    }
+
+    #[test]
+    fn short_replacement_rejects_group_opacity_changes_atomically() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        for id in &ids {
+            doc.set_page_object_alpha(0, id, 128).unwrap();
+        }
+        rejects_short_replacement_without_mutation(doc, &ids[0], "opaque");
+    }
+
+    #[test]
+    fn short_replacement_rejects_singular_text_matrices_atomically() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        for id in &ids {
+            doc.set_page_object_ctm(0, id, Some([1., 2., 2., 4., 0., 0.]))
+                .unwrap();
+        }
+        rejects_short_replacement_without_mutation(doc, &ids[0], "singular");
+    }
+
+    #[test]
+    fn short_replacement_bounds_the_combined_glyph_count() {
+        let text = "A".repeat(5_001);
+        let (mut doc, ids) = shaped(&[&text, &text]);
+        for id in &ids {
+            doc.set_page_object_boundary(0, id, [5., 5., 50_000., 15.])
+                .unwrap();
+        }
+        let before = doc.to_bytes().unwrap();
+        assert!(
+            matches!(Replacement { text: "X".into(), first_id: ids[0].parse().unwrap() }.apply(&mut doc, 0), Err(OfdError::Limit(value)) if value.contains("10000 merged glyphs"))
+        );
+        assert_eq!(doc.to_bytes().unwrap(), before);
+    }
+
+    #[test]
     fn scope_does_not_rewrite_earlier_objects_and_failed_replacements_are_atomic() {
         let (mut doc, ids) = shaped(&["A", "B"]);
         Replacement {
@@ -365,15 +620,13 @@ mod tests {
         .unwrap();
         assert_eq!(doc.page_text(0).unwrap(), ["A", "中"]);
         let before = doc.to_bytes().unwrap();
-        for text in ["", "X"] {
-            assert!(Replacement {
-                text: text.into(),
-                first_id: ids[0].parse().unwrap()
-            }
-            .apply(&mut doc, 0)
-            .is_err());
-            assert_eq!(doc.to_bytes().unwrap(), before);
+        assert!(Replacement {
+            text: String::new(),
+            first_id: ids[0].parse().unwrap()
         }
+        .apply(&mut doc, 0)
+        .is_err());
+        assert_eq!(doc.to_bytes().unwrap(), before);
     }
 
     #[test]
