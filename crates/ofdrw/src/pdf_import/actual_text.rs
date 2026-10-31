@@ -86,15 +86,15 @@ impl Replacement {
             .copied()
             .filter(|node| is_ofd_element(*node, "TextObject"))
             .collect::<Vec<_>>();
+        if objects
+            .iter()
+            .any(|node| is_ofd_element(*node, "CompositeObject"))
+        {
+            return Err(invalid("across a composite object is not yet supported"));
+        }
         if texts.is_empty() {
             if self.text.is_empty() || objects.is_empty() {
                 return Ok(());
-            }
-            if objects
-                .iter()
-                .any(|node| is_ofd_element(*node, "CompositeObject"))
-            {
-                return Err(invalid("across a composite object is not yet supported"));
             }
             let boundary = objects
                 .iter()
@@ -104,12 +104,6 @@ impl Replacement {
             let id = output.add_text_object(page_index, &self.text, boundary, size, None)?;
             output.set_page_text_paint_flags(page_index, &id, Some(false), Some(false))?;
             return Ok(());
-        }
-        if objects
-            .iter()
-            .any(|node| is_ofd_element(*node, "CompositeObject"))
-        {
-            return Err(invalid("across a composite object is not yet supported"));
         }
         let source = parsed.input_text();
         if self.text.is_empty() {
@@ -646,6 +640,24 @@ mod tests {
         .apply(&mut doc, 0)
         .is_err());
         assert_eq!(doc.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn composite_only_scopes_reject_replacement_before_any_page_edit() {
+        for replacement in ["", "replacement"] {
+            let mut doc = OfdDocument::new();
+            doc.add_blank_page(40., 30.).unwrap();
+            let first_id = doc.next_id;
+            doc.add_composite_text_object(0, "nested", [1., 1., 30., 10.], 5., None)
+                .unwrap();
+            assert_eq!(doc.page_text(0).unwrap(), ["nested"]);
+            let before = doc.to_bytes().unwrap();
+            assert!(matches!(
+                Replacement { text: replacement.into(), first_id }.apply(&mut doc, 0),
+                Err(OfdError::Invalid(message)) if message.contains("composite object")
+            ));
+            assert_eq!(doc.to_bytes().unwrap(), before);
+        }
     }
 
     #[test]

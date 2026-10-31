@@ -1,5 +1,9 @@
 # Unreleased
 
+- Reject unsupported PDF `ActualText` scopes containing only composite objects
+  before handling empty replacement text. Previously an empty replacement could
+  return success while leaving the composite's original text intact.
+
 - Import empty PDF `ActualText` over nonpainting native text without retaining
   the suppressed text in extraction. Preserve intervening graphics and the
   following PDF text cursor; painted-text empty replacements still return an error.

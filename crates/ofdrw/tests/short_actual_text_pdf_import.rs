@@ -92,3 +92,42 @@ fn empty_actual_text_discards_hidden_semantics_and_keeps_visible_paths() {
         assert!(exported.validate_references().unwrap().is_empty());
     }
 }
+
+#[test]
+fn actual_text_around_isolated_composite_does_not_succeed_without_replacing_it() {
+    use lopdf::{content::Operation, dictionary, Object};
+    let source = include_bytes!("fixtures/isolated-group-child-alpha.pdf");
+    let baseline = OfdDocument::from_pdf_bytes(source).unwrap();
+    assert!(!baseline.page_composite_objects(0).unwrap().is_empty());
+    for replacement in ["", "replacement"] {
+        let mut pdf = lopdf::Document::load_mem(source).unwrap();
+        let page = pdf.get_pages()[&1];
+        let content = pdf.get_page_content(page);
+        let mut content = lopdf::content::Content::decode(&content).unwrap();
+        content.operations.insert(
+            0,
+            Operation::new(
+                "BDC",
+                vec![
+                    Object::Name(b"Span".to_vec()),
+                    Object::Dictionary(dictionary! {
+                        "ActualText" => Object::string_literal(replacement),
+                    }),
+                ],
+            ),
+        );
+        content.operations.push(Operation::new("EMC", vec![]));
+        let stream = pdf.get_page_contents(page)[0];
+        pdf.get_object_mut(stream)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(content.encode().unwrap());
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        assert!(matches!(
+            OfdDocument::from_pdf_bytes(&bytes),
+            Err(ofdrw::OfdError::Invalid(message)) if message.contains("ActualText") && message.contains("composite object")
+        ));
+    }
+}
