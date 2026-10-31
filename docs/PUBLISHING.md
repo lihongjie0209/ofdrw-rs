@@ -82,6 +82,11 @@ Linux wheel 经过 auditwheel 修复，CI 会安装修复后的 manylinux wheel�
 若 GitHub Release 已存在，也可单独运行 `Publish existing Python release`
 工作流（`publish-python.yml`），输入原有版本标签。它验证该源提交已有成功 CI，
 检查 Release 中六个平台 wheel 的版本及 `SHA256SUMS`，再仅补传 PyPI 缺失文件。
+
+后续版本的原生 ZIP 和 Go 源码 ZIP 使用固定条目时间、权限及稳定文件顺序，
+避免工作区文件时间或权限变化造成摘要漂移。同一打包环境、相同输入文件可复现
+这两类 ZIP 的字节；这不代表跨编译器生成的动态库或不同压缩库版本产物完全一致。
+发布脚本测试会改变输入文件时间和权限，重新运行打包与摘要生成并比较全部结果。
 此流程不依赖其他语言仓库的发布状态，完成后会在六个平台从公开 PyPI 安装并验证库。
 
 Rust 可通过 `Publish existing Rust release` 工作流（`publish-rust.yml`）单独重试。

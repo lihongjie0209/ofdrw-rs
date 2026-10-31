@@ -5,6 +5,8 @@ import sys
 import tomllib
 import zipfile
 
+from release_zip import write_entry
+
 root = Path(__file__).resolve().parents[1]
 platform, library, output = sys.argv[1:]
 libraries = {
@@ -26,13 +28,13 @@ if not static.is_file():
 files.append(static)
 with zipfile.ZipFile(output / f"{name}.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
     for file in files:
-        archive.write(file, f"{name}/{file.name}")
-    archive.write(root / "include/ofdrw.h", f"{name}/include/ofdrw.h")
-    archive.writestr(f"{name}/README.txt", (
+        write_entry(archive, f"{name}/{file.name}", file)
+    write_entry(archive, f"{name}/include/ofdrw.h", root / "include/ofdrw.h")
+    write_entry(archive, f"{name}/README.txt", (
         f"ofdrw-rs {version} for {platform}\n"
         f"Set OFDRW_LIB_PATH to the absolute path of {library.name}.\n"
         "Python and Node.js release packages already bundle native libraries.\n"
         "Go: go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v" + version + "\n"
         "Documentation: https://github.com/lihongjie0209/ofdrw-rs\n"
-    ))
+    ).encode("utf-8"))
 print(output / f"{name}.zip")

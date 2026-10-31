@@ -6,6 +6,8 @@ import subprocess
 import sys
 import zipfile
 
+from release_zip import write_entry
+
 root = Path(__file__).resolve().parents[1]
 tag, output = sys.argv[1:]
 subprocess.run([sys.executable, str(root / "scripts/check_release_version.py"), tag], check=True)
@@ -23,10 +25,10 @@ for name in [f"ofdrw-rs-{version}.tgz", f"ofdrw-{version}.crate"]:
         raise SystemExit(f"Missing distribution: {name}")
 with zipfile.ZipFile(output / f"ofdrw-go-{tag}.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
     paths = subprocess.check_output(["git", "ls-files", "-z", "bindings/go"], cwd=root).split(b"\0")
-    for value in paths:
+    for value in sorted(paths):
         if value:
             relative = Path(value.decode())
-            archive.write(root / relative, f"ofdrw-go-{tag}/{relative.relative_to('bindings/go')}")
+            write_entry(archive, f"ofdrw-go-{tag}/{relative.relative_to('bindings/go').as_posix()}", root / relative)
 checksums = []
 for path in sorted(output.iterdir()):
     if path.is_file() and path.name != "SHA256SUMS":
