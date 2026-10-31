@@ -979,9 +979,9 @@ action do not execute that action twice. Convex four-sided Areas remain supporte
 for a single/shared region through PDF `QuadPoints`. Without `Region`, the
 object's `Boundary` is used.
 
-Native object conversion allows up to 256 supported actions and 1,000,000 target
-bytes per sequence. Different-region partitioning is limited to 1,000 rectangles,
-10,000 grid cells, 10,000 output actions and 1,000,000 output target bytes.
+Native object and Link annotation conversion allows up to 256 supported actions
+and 1,000,000 target bytes per sequence. Different-region partitioning is limited
+to 1,000 rectangles, 10,000 grid cells, 10,000 output actions and 1,000,000 output target bytes.
 Different nonrectangular regions return an error. File-attachment activation may
 use a disjoint region; overlapping it with another target returns an error
 because it cannot be written as an ordinary PDF action chain.
@@ -991,6 +991,18 @@ reports an error for curves and other Region paths that cannot be represented
 accurately by a PDF link quadrilateral. Link annotation actions also use
 explicit Regions when present. Template actions produce links on each page
 that references the template, in the same layer order as rendering.
+
+**Unreleased main:** Native Link annotations preserve all supported click
+actions using the same sequence and rectangular partitioning rules. An action
+without `Region` uses its owning graphic's `Boundary`, translated from appearance
+coordinates to page coordinates. Different graphics in one appearance therefore
+retain their own default click areas.
+
+When one appearance produces several PDF Link regions, its artwork is painted
+once; the other regions receive transparent appearances. Appearance frames and
+click regions remain separate, with rectangle `QuadPoints` retained when the
+artwork needs a larger frame. Transparent paint, annotation order and repeated
+OFD/PDF round trips are covered by regression tests.
 
 Pages without navigation or annotation dependencies can be removed from document
 order. The dependency check covers document, page, template, and annotation
@@ -1719,8 +1731,9 @@ mouse position; false and indirect false values are accepted.
 
 Imported action sequences carry `PDFActionSequence=true` in annotation
 parameters. After editing such a sequence, all actions must remain supported
-CLICK targets with the same region for PDF export; incompatible edits return
-errors instead of discarding later actions. SVG/PNG previews render appearance
+CLICK URI/GoTo targets for PDF export. Rectangular region edits are partitioned;
+incompatible geometry or unsupported children return errors instead of
+discarding later actions. SVG/PNG previews render appearance
 content; action execution is delegated to OFD/PDF viewers.
 
 Supported PDF annotation types map the `NoZoom`, `NoRotate`, and `Locked`

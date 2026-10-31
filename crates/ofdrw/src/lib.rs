@@ -17328,6 +17328,7 @@ impl OfdDocument {
             }
             let resource_name = Name(b"OfdPage");
             let mut links = Vec::new();
+            let mut annotation_sources = HashMap::new();
             for annotation in annotations.iter().filter(|annotation| {
                 annotation.document_index == page.document_index
                     && same_page_id(&annotation.page_id, &page.id)
@@ -17337,40 +17338,45 @@ impl OfdDocument {
                 let Some(boundary) = annotation.appearance_box else {
                     continue;
                 };
-                let Some((action, target)) = annotation.actions.iter().find_map(|action| {
-                    pdf_link_target(
-                        action,
-                        page.document_index,
-                        &pages,
-                        &bookmarks,
-                        &attachment_targets,
-                    )
-                    .map(|target| (action, target))
-                }) else {
-                    continue;
+                let source = match annotation_sources.entry(annotation.source_path.as_str()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => entry.insert(parse_xml(
+                        &annotation.source_path,
+                        self.required_entry(&annotation.source_path)?,
+                    )?),
                 };
-                let target = pdf_link_action::sequence(
+                let actions = pdf_link_action::annotation_actions(source, annotation)?;
+                let mut appearance_owner = false;
+                for (mut region, target) in pdf_link_action::annotation_links(
                     annotation,
-                    target,
+                    &actions,
                     page.document_index,
                     &pages,
                     &bookmarks,
                     &attachment_targets,
-                )?;
-                for mut region in pdf_link_output_regions(
-                    action,
-                    boundary,
-                    physical_box,
-                    !matches!(target, PdfLinkTarget::Attachment(_)),
+                    (boundary, physical_box),
                 )? {
-                    if separate_appearances && !matches!(target, PdfLinkTarget::Attachment(_)) {
-                        region.rect = pdf_link_rect(boundary, physical_box)?;
+                    if separate_appearances
+                        && !matches!(target, PdfLinkTarget::Attachment(_))
+                        && !appearance_owner
+                    {
+                        let frame = pdf_link_rect(boundary, physical_box)?;
+                        if region.quads.is_none() && region.rect != frame {
+                            let [x0, y0, x1, y1] = region.rect;
+                            region.quads = Some(
+                                [x0, y0, x1, y0, x1, y1, x0, y1]
+                                    .map(|value| value as f32)
+                                    .to_vec(),
+                            );
+                        }
+                        region.rect = frame;
+                        appearance_owner = true;
                     }
                     links.push((
                         allocator.bump(),
                         region.rect,
                         region.quads,
-                        target.clone(),
+                        target,
                         AnnotationFlags::from_bits_retain(flags.bits()),
                         Some(annotation),
                     ));

@@ -1,6 +1,84 @@
 //! Preserve imported and native CLICK sequences as PDF Next actions.
 use super::*;
 
+pub(super) fn annotation_actions(
+    source: &XmlDocument<'_>,
+    annotation: &AnnotationInfo,
+) -> Result<Vec<PageObjectActionInfo>, OfdError> {
+    let node = source
+        .root_element()
+        .children()
+        .find(|node| {
+            is_ofd_element(*node, "Annot") && node.attribute("ID") == Some(annotation.id.as_str())
+        })
+        .ok_or_else(|| OfdError::Invalid("Link annotation is missing from its source".into()))?;
+    let frame = annotation
+        .appearance_box
+        .ok_or_else(|| OfdError::Invalid("Link annotation has no appearance boundary".into()))?;
+    node.descendants()
+        .filter(|node| is_ofd_element(*node, "Action"))
+        .map(|node| {
+            let owner = node.ancestors().find(|node| {
+                ["TextObject", "PathObject", "ImageObject", "CompositeObject"]
+                    .iter()
+                    .any(|name| is_ofd_element(*node, name))
+            });
+            let mut action = parse_graphic_action(
+                node,
+                owner
+                    .and_then(|node| node.attribute("ID"))
+                    .unwrap_or(&annotation.id),
+            )?;
+            if action.region.is_none()
+                && action.event == "CLICK"
+                && matches!(action.kind.as_str(), "URI" | "Goto" | "GotoA")
+            {
+                let [x, y, width, height] = match owner.and_then(|node| node.attribute("Boundary"))
+                {
+                    Some(value) => parse_box(value).ok_or_else(|| {
+                        OfdError::Invalid("Link action owner has an invalid boundary".into())
+                    })?,
+                    None => [0., 0., frame[2], frame[3]],
+                };
+                let [x, y] = [frame[0] + x, frame[1] + y];
+                let x1 = x + width;
+                let y1 = y + height;
+                if [x, y, x1, y1, width, height]
+                    .iter()
+                    .any(|value| !value.is_finite())
+                    || width <= 0.
+                    || height <= 0.
+                {
+                    return Err(OfdError::Invalid(
+                        "Link action owner has an invalid boundary".into(),
+                    ));
+                }
+                let mut commands = [[x1, y], [x1, y1], [x, y1]]
+                    .into_iter()
+                    .map(|point| ActionRegionCommandInfo {
+                        kind: "Line".into(),
+                        attributes: BTreeMap::from([(
+                            "Point1".into(),
+                            format!("{} {}", point[0], point[1]),
+                        )]),
+                    })
+                    .collect::<Vec<_>>();
+                commands.push(ActionRegionCommandInfo {
+                    kind: "Close".into(),
+                    attributes: BTreeMap::new(),
+                });
+                action.region = Some(ActionRegionInfo {
+                    areas: vec![ActionRegionAreaInfo {
+                        start: [x, y],
+                        commands,
+                    }],
+                });
+            }
+            Ok(action)
+        })
+        .collect()
+}
+
 pub(super) fn object_links(
     actions: &[PageObjectActionInfo],
     document_index: usize,
@@ -166,42 +244,47 @@ fn target_bytes(target: &PdfLinkTarget) -> usize {
     }
 }
 
-pub(super) fn sequence(
+pub(super) fn annotation_links(
     annotation: &AnnotationInfo,
-    fallback: PdfLinkTarget,
+    actions: &[PageObjectActionInfo],
     document_index: usize,
     pages: &[PageInfo],
     bookmarks: &[BookmarkInfo],
     attachments: &HashMap<(usize, String), Ref>,
-) -> Result<PdfLinkTarget, OfdError> {
+    geometry: ([f64; 4], [f64; 4]),
+) -> Result<Vec<(PdfLinkOutputRegion, PdfLinkTarget)>, OfdError> {
     if annotation
         .parameters
         .get("PDFActionSequence")
         .map(String::as_str)
-        != Some("true")
+        == Some("true")
     {
-        return Ok(fallback);
-    }
-    if annotation.actions.len() > 256 {
-        return Err(OfdError::Limit(
-            "PDF Link sequence exceeds 256 actions".into(),
-        ));
-    }
-    let mut targets = Vec::new();
-    for action in &annotation.actions {
-        if action.region != annotation.actions[0].region {
-            return Err(OfdError::Invalid(
-                "PDF Link sequence actions have different trigger regions".into(),
+        if actions.len() > 256 {
+            return Err(OfdError::Limit(
+                "PDF Link sequence exceeds 256 actions".into(),
             ));
         }
-        let target = pdf_link_target(action, document_index, pages, bookmarks, attachments)
-            .filter(|target| !matches!(target, PdfLinkTarget::Attachment(_)))
-            .ok_or_else(|| {
-                OfdError::Invalid("PDF Link sequence has an unsupported action".into())
-            })?;
-        targets.push(target);
+        // Imported sequences must not lose children after an edit. Native
+        // annotations retain the existing supported-action selection policy.
+        for action in actions {
+            if !matches!(
+                pdf_link_target(action, document_index, pages, bookmarks, attachments),
+                Some(PdfLinkTarget::Uri(_) | PdfLinkTarget::Goto(_))
+            ) {
+                return Err(OfdError::Invalid(
+                    "PDF Link sequence has an unsupported action".into(),
+                ));
+            }
+        }
     }
-    Ok(PdfLinkTarget::Sequence(targets))
+    object_links(
+        actions,
+        document_index,
+        pages,
+        bookmarks,
+        attachments,
+        geometry,
+    )
 }
 
 pub(super) fn write(
@@ -276,13 +359,17 @@ mod tests {
                     .actions
                     .resize(257, annotation.actions[0].clone()),
             }
-            assert!(sequence(
+            assert!(annotation_links(
                 &annotation,
-                PdfLinkTarget::Uri("https://example.org/".into()),
+                &annotation.actions,
                 0,
                 &pages,
                 &[],
-                &HashMap::new()
+                &HashMap::new(),
+                (
+                    annotation.appearance_box.unwrap(),
+                    pages[0].physical_box.unwrap()
+                )
             )
             .is_err());
         }

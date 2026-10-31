@@ -1,5 +1,12 @@
 # Unreleased
 
+- Preserve native Link annotation action sequences and overlapping rectangular
+  click regions. Default regions use each owning graphic's boundary within the
+  appearance. Split PDF links paint the original artwork once, retaining
+  transparency and annotation order; rectangular hit areas stay precise when
+  the appearance frame is larger. Includes edited imported sequences, native
+  OFD/PDF round trips and Python/Go/Node integration tests.
+
 - Preserve native page/template URI, GoTo and bookmark click sequences when
   exporting PDF. Shared trigger regions use Next actions; different rectangular
   regions are partitioned so overlaps execute all active actions in order.

@@ -242,12 +242,32 @@ pub(super) fn write(
                 .collect::<Vec<_>>();
             ordered.extend(generated.into_iter().map(Object::Reference));
             if !link_refs.is_empty() {
-                for id in link_refs {
+                // Several Link hit regions can share one native appearance.
+                // Paint it once; explicit empty appearances prevent viewers
+                // from synthesizing extra artwork for the remaining regions.
+                let empty = if link_refs.len() > 1 {
+                    Some(pdf.add_object(lopdf::Stream::new(
+                        dictionary! {
+                            "Type" => "XObject", "Subtype" => "Form",
+                            "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                            "Resources" => dictionary! {},
+                        },
+                        Vec::new(),
+                    )))
+                } else {
+                    None
+                };
+                for (index, id) in link_refs.into_iter().enumerate() {
                     let dict = pdf
                         .get_object_mut(id)
                         .and_then(Object::as_dict_mut)
                         .map_err(invalid)?;
-                    dict.set("AP", dictionary! {"N"=>Object::Reference(root)});
+                    let appearance = if index == 0 {
+                        root
+                    } else {
+                        empty.unwrap_or(root)
+                    };
+                    dict.set("AP", dictionary! {"N"=>Object::Reference(appearance)});
                     dict.set("F", output_flags);
                 }
                 continue;
