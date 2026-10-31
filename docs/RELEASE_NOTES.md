@@ -40,7 +40,7 @@ same release version.
   preserves shared media, rejects signed pages and leaves failed edits intact.
   Integration tests exercise all language surfaces, null/closed handles,
   invalid arguments, round trips and TypeScript types. README examples are
-  explicitly marked as unreleased main APIs.
+  identify 0.2.0 as the minimum release for these APIs.
 
 - Explicit native image Interpolate flags now control SVG/PNG and PDF sampling
   per placement, including shared media and matching alpha-image flags. PDF

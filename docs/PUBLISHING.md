@@ -95,5 +95,15 @@ npm 的版本元数据和安装索引可能先后可见；安装验证强制在�
 发布工作流显式设置 `RUSTUP_TOOLCHAIN=1.96.0`，避免打包时自动安装开发用的
 rustfmt/clippy 组件；它仍从原标签打包，并核验已上传文件的摘要。
 
+若内置 `GITHUB_TOKEN` 创建 Go 标签时返回 403，发布者可使用已有 Git 授权，
+将缺失的轻量标签补建到原发布提交，然后重跑原版本。先核对版本标签解析的提交，
+保留已存在的标签：
+
+```sh
+git rev-parse 'vX.Y.Z^{}'
+git -c tag.gpgSign=false tag bindings/go/vX.Y.Z "$(git rev-parse 'vX.Y.Z^{}')"
+git push origin refs/tags/bindings/go/vX.Y.Z
+```
+
 macOS wheel 的架构标记取自内含 Rust 动态库的 Mach-O 头；
 每个平台单独构建的动态库不得标为 `universal2`。发布工具也会校验或修复历史产物的标记。
