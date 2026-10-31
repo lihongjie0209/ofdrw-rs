@@ -15320,6 +15320,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_actual_text_suppresses_hidden_runs_without_moving_following_text() {
+        let plain = mapped_actual_text_pdf(
+            b"BT /F1 12 Tf 10 20 Td 3 Tr (A) Tj (B) Tj 0 Tr (A) Tj ET 1 0 0 rg 0 0 10 10 re f",
+        );
+        let reference = OfdDocument::from_pdf_bytes(&plain)
+            .unwrap()
+            .page_png(0, 144.)
+            .unwrap();
+        let source = mapped_actual_text_pdf(
+            b"BT /F1 12 Tf 10 20 Td /Span << /ActualText () >> BDC 3 Tr (A) Tj (B) Tj EMC 0 Tr (A) Tj ET 1 0 0 rg 0 0 10 10 re f",
+        );
+        let imported = OfdDocument::from_pdf_bytes(&source).unwrap();
+        assert_eq!(imported.page_text(0).unwrap(), ["A"]);
+        assert_eq!(imported.page_png(0, 144.).unwrap(), reference);
+        let reopened = OfdDocument::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["A"]);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
     fn actual_text_malformed_and_unsupported_sequences_return_explicit_errors() {
         for content in [
             b"/Span << /ActualText 123 >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC".as_slice(),

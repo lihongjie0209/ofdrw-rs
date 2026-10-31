@@ -2060,7 +2060,12 @@ glyphs and 500,000 unique-outline points are processed. Repeated glyph bounds
 are cached. Antialiasing at former object boundaries can differ after coalescing;
 independent original-PDF rasters verify the paint.
 
-Empty replacements, shorter replacements across incompatible or interleaved
+Empty replacements now remove nonpainting native text runs (`Fill="false"`
+and no stroke), preserving interleaved graphics and the original PDF text
+advance. This includes invisible `3 Tr` text. A scope containing painted text
+still rejects an empty replacement before editing the OFD page.
+
+Empty replacements of painted text, shorter replacements across incompatible or interleaved
 runs, changed text without a usable embedded glyph program, scopes crossing composite objects and
 structure-tree ActualText remain unsupported. Those marked-content replacement
 cases return errors rather than silently importing the original text.

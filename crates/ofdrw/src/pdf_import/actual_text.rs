@@ -112,6 +112,25 @@ impl Replacement {
             return Err(invalid("across a composite object is not yet supported"));
         }
         let source = parsed.input_text();
+        if self.text.is_empty() {
+            // These objects contribute semantics only. Removing their native
+            // text does not change graphics or the already advanced PDF cursor.
+            if texts.iter().any(|object| {
+                object.attribute("Fill") != Some("false")
+                    || object
+                        .attribute("Stroke")
+                        .is_some_and(|value| value != "false")
+            }) {
+                return Err(invalid(
+                    "empty replacement of painted text is not yet supported",
+                ));
+            }
+            let mut result = source.to_owned();
+            for object in texts.iter().rev() {
+                result.replace_range(object.range(), "");
+            }
+            return output.set_entry(&page.path, result.into_bytes());
+        }
         let mut runs = Vec::new();
         for object in texts {
             let codes = object
@@ -627,6 +646,69 @@ mod tests {
         .apply(&mut doc, 0)
         .is_err());
         assert_eq!(doc.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn empty_replacement_removes_only_nonpainting_text_and_retains_graphics() {
+        let (mut doc, ids) = shaped(&["A", "B", "C"]);
+        for id in &ids[1..] {
+            doc.set_page_text_paint_flags(0, id, Some(false), Some(false))
+                .unwrap();
+        }
+        let path = doc
+            .add_path_object(0, "M 0 0 L 10 10", [1., 2., 10., 10.], PathStyle::default())
+            .unwrap();
+        doc.move_page_object(0, &path, Some(&ids[2])).unwrap();
+        let reference = doc.page_png(0, 144.).unwrap();
+        Replacement {
+            text: String::new(),
+            first_id: ids[1].parse().unwrap(),
+        }
+        .apply(&mut doc, 0)
+        .unwrap();
+        assert_eq!(doc.page_text(0).unwrap(), ["A"]);
+        assert_eq!(doc.page_png(0, 144.).unwrap(), reference);
+        let reopened = OfdDocument::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["A"]);
+        assert!(reopened.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_replacement_rejects_mixed_visible_and_hidden_text_atomically() {
+        for (fill, stroke) in [(true, false), (false, true)] {
+            let (mut doc, ids) = shaped(&["A", "B"]);
+            doc.set_page_text_paint_flags(0, &ids[0], Some(false), Some(false))
+                .unwrap();
+            doc.set_page_text_paint_flags(0, &ids[1], Some(fill), Some(stroke))
+                .unwrap();
+            let before = doc.to_bytes().unwrap();
+            assert!(Replacement {
+                text: String::new(),
+                first_id: ids[0].parse().unwrap(),
+            }
+            .apply(&mut doc, 0)
+            .is_err());
+            assert_eq!(doc.to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn empty_replacement_does_not_require_glyph_programs_for_hidden_text() {
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(30., 20.).unwrap();
+        let id = doc
+            .add_text_object(0, "hidden", [0., 0., 20., 10.], 5., None)
+            .unwrap();
+        doc.set_page_text_paint_flags(0, &id, Some(false), Some(false))
+            .unwrap();
+        Replacement {
+            text: String::new(),
+            first_id: id.parse().unwrap(),
+        }
+        .apply(&mut doc, 0)
+        .unwrap();
+        assert!(doc.page_text(0).unwrap().is_empty());
+        assert!(doc.validate_references().unwrap().is_empty());
     }
 
     #[test]

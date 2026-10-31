@@ -1,5 +1,9 @@
 # Unreleased
 
+- Import empty PDF `ActualText` over nonpainting native text without retaining
+  the suppressed text in extraction. Preserve intervening graphics and the
+  following PDF text cursor; painted-text empty replacements still return an error.
+
 - Import shorter nonempty PDF ActualText across consecutive compatible text
   runs. Native coalescing retains all original glyphs and positions, including
   affine/reflected text, TrueType, CFF and CID CFF font matrices. Outline bounds
