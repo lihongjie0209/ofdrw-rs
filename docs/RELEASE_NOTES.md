@@ -1,5 +1,12 @@
 # Unreleased
 
+- Resolve PDF relative URI links against catalog `URI/Base`, retaining their
+  absolute target through OFD and PDF round trips. Includes indirect entries,
+  Unicode/UTF-16 strings, path merging, queries, fragments, authority-relative
+  paths and empty references. Absolute links and links without a base retain
+  their existing behavior. Invalid bases and bounded-resolution failures are
+  reported explicitly. Covered by Rust and Python/Go/Node integration tests.
+
 - Reject unsupported PDF `ActualText` scopes containing only composite objects
   before handling empty replacement text. Previously an empty replacement could
   return success while leaving the composite's original text intact.

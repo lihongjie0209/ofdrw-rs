@@ -24,6 +24,7 @@ mod soft_mask;
 mod standard_font_data;
 mod standard_fonts;
 mod tiling_pattern;
+mod uri_action;
 mod vertical_metrics;
 
 use std::{
@@ -10678,6 +10679,7 @@ fn import_page_links(
                         OfdError::Invalid("PDF URI Link URI is not a string".into())
                     })?;
                     let decoded = decode_pdf_link_uri(raw)?;
+                    let decoded = uri_action::resolve(pdf, &decoded)?;
                     output.add_uri_link_annotation_with_quads(
                         page_index, &decoded, boundary, &quads,
                     )?

@@ -49,6 +49,7 @@ cbc = { version = "0.2.1", features = ["alloc"] }
 getrandom = "0.3.4"
 hayro-ccitt = "0.4.0"
 hayro-jbig2 = { version = "0.3.0", default-features = false }
+oxiri = { version = "0.3.1", default-features = false }
 
 [dev-dependencies]
 fax = "0.2.7"

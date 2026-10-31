@@ -1409,6 +1409,16 @@ an optional byte-order mark, or UTF-16BE/UTF-16LE strings with a byte-order
 mark, including non-ASCII paths. Malformed encodings and characters invalid
 in XML fail import.
 
+**Unreleased main:** Relative URI actions resolve against the catalog's
+`URI/Base`, including indirect dictionaries and base strings, using
+[RFC 3986 reference resolution](https://www.rfc-editor.org/rfc/rfc3986#section-5.2).
+Unicode paths, query-only and fragment-only targets, authority-relative paths,
+and empty references retain their resolved meaning through OFD and PDF saves.
+Absolute targets remain unchanged. Without a declared base, relative targets
+remain relative because byte imports have no retrieval URL. Invalid declared
+bases or relative references return errors; resolution input is limited to
+1,000,000 bytes. Python, Go, and Node.js use the same native import behavior.
+
 PDF `CCITTFaxDecode` imports one-bit Group 3 one-dimensional and mixed
 one/two-dimensional data, and Group 4 data, including ASCIIHex filter chains.
 `K`, `Columns`, `Rows`, `EndOfLine`, `EncodedByteAlign`, `EndOfBlock`, and

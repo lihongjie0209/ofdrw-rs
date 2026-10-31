@@ -1,0 +1,61 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /URI 11 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 144 144] /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R] >>
+endobj
+4 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+5 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 10 100 20] /F 4 /Border [0 0 0] /A << /S /URI /URI <feff002e002e002f8d446599002f9875002e00680074006d006c003f5b57003d503c00236bb5> >> >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 30 100 40] /F 4 /Border [0 0 0] /A << /S /URI /URI (?view=full) >> >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 50 100 60] /F 4 /Border [0 0 0] /A << /S /URI /URI (#section) >> >>
+endobj
+8 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 70 100 80] /F 4 /Border [0 0 0] /A << /S /URI /URI (//other.example/a) >> >>
+endobj
+9 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 90 100 100] /F 4 /Border [0 0 0] /A << /S /URI /URI (mailto:user@example.org) >> >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 110 100 120] /F 4 /Border [0 0 0] /A << /S /URI /URI () >> >>
+endobj
+11 0 obj
+<< /Base 12 0 R >>
+endobj
+12 0 obj
+<fffe680074007400700073003a002f002f006500780061006d0070006c0065002e006f00720067002f0064006f00630073002f006d0061006e00750061006c002e007000640066003f006c0061006e0067003d0065006e00>
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000015 00000 n 
+0000000076 00000 n 
+0000000133 00000 n 
+0000000267 00000 n 
+0000000316 00000 n 
+0000000508 00000 n 
+0000000634 00000 n 
+0000000758 00000 n 
+0000000891 00000 n 
+0000001031 00000 n 
+0000001150 00000 n 
+0000001185 00000 n 
+trailer
+<< /Size 13 /Root 1 0 R >>
+startxref
+1380
+%%EOF

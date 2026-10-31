@@ -341,3 +341,10 @@ fixture with all name records retained. CFF/CID CFF outlines are authored by
 replaces two painted runs containing three glyphs. Cases include affine and
 reflected text and top-level/per-FD CFF font matrices. Ghostscript renders the
 original PDFs directly at 144 dpi; references never use Rust conversion.
+
+`uri-base-links.pdf` is authored by `scripts/generate_uri_base_fixture.py`
+under Apache-2.0. It contains no fonts or artwork: six invisible links share
+an indirect catalog URI dictionary and an indirect UTF-16LE base string.
+Targets cover a UTF-16BE Unicode relative path, query, fragment, authority,
+an absolute mailto URI and an empty reference. Tests compare the expected
+resolved targets across native OFD and PDF round trips; no network is used.

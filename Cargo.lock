@@ -934,6 +934,7 @@ dependencies = [
  "lopdf",
  "moxcms",
  "ofdrw-svg2pdf",
+ "oxiri",
  "pdf-writer",
  "png 0.18.1",
  "read-fonts 0.39.2",
@@ -994,6 +995,15 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oxiri"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6bd0ef560f078e41ce2ebf370cce217e7fb2c3695ffa87541151c9de94e83a"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "pdf-writer"
