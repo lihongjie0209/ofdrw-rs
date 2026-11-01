@@ -1164,6 +1164,8 @@ type FlowTextMetrics struct {
 // Float is left, right, or center; Clear is none, left, right, or both.
 // Empty Float/Clear use left/both. Offset affects drawing without moving occupied space.
 type LayoutBox struct {
+	// Layer is background, body or foreground; empty inherits the enclosing layer.
+	Layer string `json:"layer,omitempty"`
 	// BorderDash uses Java dash arguments: one length, pairs, or offset then pairs.
 	BorderDash      []float64  `json:"border_dash,omitempty"`
 	Size            [2]float64 `json:"size"`

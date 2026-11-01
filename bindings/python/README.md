@@ -207,3 +207,26 @@ at each emitted path; allocation, text wrapping and continuation are unchanged.
 ```json
 {"size": [40, 10], "border": [0.5, 0.5, 0.5, 0.5], "border_dash": [1, 3, 2]}
 ```
+
+
+### Box painting layers (unreleased source API)
+
+Set `layout.layer` (`Layout.Layer` in Go) to `background`, `body` or
+`foreground`. Measured box items accept the same `layer` field directly.
+Decoration, ordinary/shaped text, underline paths, images and table children
+use the selected layer across page fragments. A nested container without a
+layer inherits its parent; an explicit layer overrides it for that subtree.
+Roots default to Body. Painting follows OFD Background → Body → Foreground
+order independently of the order in which boxes were submitted.
+
+Existing direct page layers of the chosen type are reused; another layer is
+created when needed. Existing empty Body layers on blank pages are retained.
+Layer selection does not change measured dimensions, pagination or returned
+placements. Later ordinary drawing calls continue to use Body. Invalid layer
+values fail atomically. The same rules apply to static and advanced container
+pagination and to existing pages with nonzero canvas origins.
+
+```python
+document.add_box_layout(0, [{"type": "box", "size": [40, 10],
+    "background_color": [240, 240, 240], "layer": "background"}])
+```

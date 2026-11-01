@@ -260,3 +260,116 @@ func TestFlowContainerControlsPreserveBlankPages(t *testing.T) {
 		})
 	}
 }
+
+func TestFlowContainerLayerOverridesAndDefaultRestoration(t *testing.T) {
+	fixtures := filepath.Join(
+		"..",
+		"..",
+		"..",
+		"crates",
+		"ofdrw",
+		"tests",
+		"fixtures",
+	)
+	for _, mode := range []struct {
+		name  string
+		shape bool
+	}{{name: "plain", shape: false}, {name: "shaped", shape: true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(fixtures, "flow-containers.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fixture struct {
+				Request struct {
+					Containers []FlowContainer `json:"containers"`
+					BoxLayoutStyle
+				} `json:"request"`
+				Expected BoxLayoutResult `json:"expected"`
+			}
+			if err := json.Unmarshal(data, &fixture); err != nil {
+				t.Fatal(err)
+			}
+			doc, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			font, err := os.ReadFile(filepath.Join(fixtures, "dejavu-sans.ttf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := doc.AddEmbeddedFont("DejaVu Sans", font)
+			if err != nil {
+				t.Fatal(err)
+			}
+			containerTypography(&fixture.Request.Containers[0], strconv.Itoa(id), mode.shape)
+			fixture.Request.Containers[0].Layout.Layer = "foreground"
+			fixture.Request.Containers[0].Children[1].Container.Layout.Layer = "background"
+			result, err := doc.AddFlowContainers(0, fixture.Request.Containers, fixture.Request.BoxLayoutStyle)
+			if err != nil || !reflect.DeepEqual(result, fixture.Expected) {
+				t.Fatalf("geometry: %+v, %v", result, err)
+			}
+			for page := 0; page < 3; page++ {
+				objects, err := doc.PageObjects(page)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, object := range objects {
+					if object.LayerType == "Body" {
+						t.Fatalf("body object leaked: %+v", object)
+					}
+					if object.Kind == "ImageObject" && object.LayerType != "Foreground" {
+						t.Fatal("image layer")
+					}
+				}
+			}
+			encoded, err := doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.Request.Containers[0].Layout.Layer = "overlay"
+			if _, err := doc.AddFlowContainers(0, fixture.Request.Containers, fixture.Request.BoxLayoutStyle); err == nil {
+				t.Fatal("invalid layer accepted")
+			}
+			after, err := doc.ToBytes()
+			if err != nil || !bytes.Equal(after, encoded) {
+				t.Fatalf("mutation: %v", err)
+			}
+			reopened, err := FromBytes(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			expected, err := doc.PageObjects(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, err := reopened.PageObjects(0)
+			if err != nil || !reflect.DeepEqual(actual, expected) {
+				t.Fatalf("roundtrip: %v", err)
+			}
+			if _, err := doc.AddTextObject(
+				0,
+				"Body",
+				[4]float64{2, 2, 6, 3},
+				2,
+				"",
+			); err != nil {
+				t.Fatal(err)
+			}
+			objects, err := doc.PageObjects(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := false
+			for _, object := range objects {
+				body = body || object.LayerType == "Body"
+			}
+			if !body {
+				t.Fatal("default body layer was not restored")
+			}
+
+		})
+	}
+}

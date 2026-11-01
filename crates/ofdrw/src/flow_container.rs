@@ -485,6 +485,17 @@ impl OfdDocument {
         p: &BoxPlacement,
         drawn: &mut HashSet<(usize, usize)>,
     ) -> Result<(), OfdError> {
+        self.with_layout_layer(b.layout.layer, |document| {
+            document.draw_container_children_in_layer(b, p, drawn)
+        })
+    }
+
+    fn draw_container_children_in_layer(
+        &mut self,
+        b: &PreparedContainer<'_>,
+        p: &BoxPlacement,
+        drawn: &mut HashSet<(usize, usize)>,
+    ) -> Result<(), OfdError> {
         if b.layout.placeholder || p.content_box[3] == 0. {
             return Ok(());
         }

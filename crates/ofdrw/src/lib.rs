@@ -8,7 +8,7 @@ mod archive;
 mod bilevel;
 mod box_layout;
 pub use box_layout::{
-    BoxClear, BoxContentRanges, BoxFloat, BoxLayoutItem, BoxLayoutResult, BoxLayoutStyle,
+    BoxClear, BoxContentRanges, BoxFloat, BoxLayer, BoxLayoutItem, BoxLayoutResult, BoxLayoutStyle,
     BoxPlacement, LayoutBox,
 };
 mod encryption;
@@ -4011,6 +4011,8 @@ enum AppendedPageContent<'a> {
 pub struct OfdDocument {
     entries: BTreeMap<String, Vec<u8>>,
     xml_views: BTreeMap<String, Vec<u8>>,
+    // Set only while painting a staged layout transaction; restored before commit.
+    layout_layer: Option<BoxLayer>,
     newly_created: bool,
     created_pages: Vec<CreatedPage>,
     created_attachments: Vec<AttachmentInfo>,
@@ -4133,6 +4135,7 @@ impl OfdDocument {
         let document = Self {
             entries,
             xml_views,
+            layout_layer: None,
             newly_created: false,
             created_pages: Vec::new(),
             created_attachments: Vec::new(),
@@ -4170,6 +4173,7 @@ impl OfdDocument {
         Self {
             entries,
             xml_views: BTreeMap::new(),
+            layout_layer: None,
             newly_created: true,
             created_pages: Vec::new(),
             created_attachments: Vec::new(),
@@ -5687,6 +5691,7 @@ impl OfdDocument {
         let extracted = Self {
             xml_views: xml_views_for_entries(&entries)?,
             entries,
+            layout_layer: None,
             newly_created: false,
             created_pages: Vec::new(),
             created_attachments: Vec::new(),
@@ -25676,10 +25681,12 @@ impl OfdDocument {
         let content = page_root
             .children()
             .find(|node| is_ofd_element(*node, "Content"));
+        let target_type = self.layout_layer.unwrap_or_default().ofd_type();
         let layer = content.and_then(|content| {
             content.children().find(|node| {
                 is_ofd_element(*node, "Layer")
-                    && layer_type_order(node.attribute("Type")).is_ok_and(|(_, order)| order == 1)
+                    && layer_type_order(node.attribute("Type"))
+                        .is_ok_and(|(kind, _)| kind == target_type)
             })
         });
         let object_id = first_id
@@ -25704,7 +25711,11 @@ impl OfdDocument {
         let child = if layer.is_some() {
             item
         } else {
-            let markup = format!("<{prefix}Layer ID=\"{first_id}\">{item}</{prefix}Layer>");
+            let layer_type = self.layout_layer.map_or_else(String::new, |layer| {
+                format!(" Type=\"{}\"", layer.ofd_type())
+            });
+            let markup =
+                format!("<{prefix}Layer ID=\"{first_id}\"{layer_type}>{item}</{prefix}Layer>");
             if content.is_some() {
                 markup
             } else {

@@ -440,6 +440,9 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
   document.addBoxLayout(0, [{type: 'box', size: [10, 5], border_dash: [1, 3, 2]}]);
   // @ts-expect-error border dash lengths must be numeric
   document.addBoxLayout(0, [{type: 'box', size: [10, 5], border_dash: ['3']}]);
+  document.addTextBoxes(0, [{layout: {size: [20, 0], layer: 'foreground'}, spans: [{text: 'A'}]}]);
+  // @ts-expect-error only OFD background/body/foreground layers are supported
+  document.addBoxLayout(0, [{type: 'box', size: [10, 5], layer: 'overlay'}]);
   // @ts-expect-error password recipients need a password
   document.encryptWithPasswords([{ username: 'alice' }]);
   // @ts-expect-error certificate recipients need DER bytes

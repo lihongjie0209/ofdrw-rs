@@ -19,6 +19,25 @@ pub enum BoxClear {
     Both,
 }
 
+/// Painting layer for box decoration and content, ordered by the OFD page model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxLayer {
+    Background,
+    #[default]
+    Body,
+    Foreground,
+}
+
+impl BoxLayer {
+    pub(super) fn ofd_type(self) -> &'static str {
+        match self {
+            Self::Background => "Background",
+            Self::Body => "Body",
+            Self::Foreground => "Foreground",
+        }
+    }
+}
+
 /// A measured box. Dimensions and top/right/bottom/left edges are millimeters.
 ///
 /// `size` describes the content. Width is reduced to fit the full content area,
@@ -43,6 +62,8 @@ pub struct LayoutBox {
     pub integrity: bool,
     pub offset: [f64; 2],
     pub placeholder: bool,
+    /// Painting layer. None inherits the enclosing container, or Body at the root.
+    pub layer: Option<BoxLayer>,
 }
 
 /// Measured boxes and explicit row/page boundaries.
@@ -594,7 +615,29 @@ impl OfdDocument {
         Ok(())
     }
 
+    pub(super) fn with_layout_layer<T>(
+        &mut self,
+        layer: Option<BoxLayer>,
+        draw: impl FnOnce(&mut Self) -> Result<T, OfdError>,
+    ) -> Result<T, OfdError> {
+        let previous = self.layout_layer;
+        self.layout_layer = layer.or(previous);
+        let result = draw(self);
+        self.layout_layer = previous;
+        result
+    }
+
     pub(super) fn draw_box_fragment(
+        &mut self,
+        b: &LayoutBox,
+        p: &BoxPlacement,
+    ) -> Result<(), OfdError> {
+        self.with_layout_layer(b.layer, |document| {
+            document.draw_box_fragment_in_layer(b, p)
+        })
+    }
+
+    fn draw_box_fragment_in_layer(
         &mut self,
         b: &LayoutBox,
         p: &BoxPlacement,
