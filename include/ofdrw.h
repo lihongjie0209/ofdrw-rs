@@ -426,6 +426,8 @@ int32_t ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, cons
 int32_t ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 /* Read-only logical paragraph metrics; requires spans and content_width in millimeters. */
+/* Span placeholder_width reserves inline millimeters; requires empty text,
+   font_size gives height, and zero width is retained. No object is painted. */
 int32_t ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);
 int32_t ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
 int32_t ofd_append_path_page(OfdDocument *handle, size_t document_index, const char *commands, double x, double y, double width, double height, double page_width, double page_height, int32_t fill, int32_t stroke);

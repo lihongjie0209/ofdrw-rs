@@ -1,6 +1,6 @@
 # Unreleased
 
-- Add Rust inline placeholder spans with explicit or character-count widths,
+- Add inline placeholder spans in Rust, C, Python, Go and Node.js with explicit or character-count widths,
   shared measurement/wrapping/line-height handling and no painted objects or
   font resources. Preserve grapheme boundaries, leading-indent replacement,
   zero-width reservations and atomic errors. Allow shaped natural zero advances

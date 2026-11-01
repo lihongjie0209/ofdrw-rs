@@ -857,7 +857,7 @@ all language bindings.
 
 ## 行内占位符
 
-**未发布，Rust 接口：** `FlowSpan::placeholder(width, height)` reserves an
+**未发布：** `FlowSpan::placeholder(width, height)` reserves an
 indivisible inline rectangle, and `placeholder_characters(count, font_size,
 letter_spacing)` reserves `count * (font_size + letter_spacing)` millimeters.
 `placeholder_width: Some(width)` requires empty text. Zero width is allowed;
@@ -883,8 +883,13 @@ bold and italic, while tracking that cancels a positive advance remains invalid.
 Seven independent Java line-metric fixtures cover wrapping, mixed heights,
 zero widths, character counts and leading-indent replacement. Core tests also
 cover blank-page pagination, independent pixel comparison, grapheme boundaries,
-tracking errors, rollback and the shared box/container writers. This new input
-is currently Rust-only; C/Python/Go/Node.js span fields follow separately.
+tracking errors, rollback and the shared box/container writers. C/Python/Go/Node.js span inputs accept `placeholder_width`, require `text: ""`,
+and use `font_size` as height. Go exposes `PlaceholderWidth *float64` and
+`NewPlaceholderSpan(width, height)` so a zero width survives JSON serialization.
+Node.js declares the field in `FlowSpan`. Existing generic Python and Node.js
+serializers preserve the field. All language suites use the same Java fixtures
+and verify mixed-writer geometry and atomic errors. Use development bindings
+with a matching native library; this input follows 0.3.0.
 
 ## 图片自动尺寸
 

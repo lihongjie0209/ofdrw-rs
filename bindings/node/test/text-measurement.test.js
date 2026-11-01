@@ -86,3 +86,62 @@ test('natural zero glyph advances remain zero through measurement JSON and flow'
     assert.ok(doc.pagePng(0, 30).length);
   } finally { doc.close(); }
 });
+
+
+test('inline placeholder metrics match Java without embedded fonts or painted objects', () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(fixtures, 'inline-placeholders-java.json')));
+  for (const shape of [false, true]) for (const entry of fixture.cases) {
+    const doc = Document.create();
+    try {
+      const before = doc.toBytes();
+      const options = {...entry.style, shape};
+      const metrics = doc.measureFlowedSpans(0, entry.spans, entry.content_width, options);
+      assert.equal(metrics.lines.length, entry.lines.length, entry.name);
+      metrics.lines.forEach((line, index) => {
+        const expected = entry.lines[index];
+        assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, line[key]])), expected, entry.name);
+      });
+      assert.equal(metrics.width, Math.max(...entry.lines.map(line => line.width)));
+      assert.equal(metrics.height, entry.lines.reduce((sum, line) => sum+line.height, 0));
+      assert.deepEqual(doc.toBytes(), before);
+      doc.addFlowedSpans(0, entry.spans, {...options, page_size: [entry.content_width+4, 50], margins: [2,2,2,2]});
+      assert.equal(doc.pageCount, 1);
+      assert.deepEqual(doc.pageText(0), []);
+      assert.deepEqual(doc.pageObjects(0), []);
+      const reopened = Document.fromBytes(doc.toBytes());
+      try {assert.deepEqual(reopened.pageText(0), []); assert.ok(reopened.pagePng(0, 30).length);}
+      finally {reopened.close();}
+    } finally {doc.close();}
+  }
+});
+
+test('inline placeholders reach mixed writers and reject invalid geometry atomically', () => {
+  for (const shape of [false, true]) {
+    const doc = Document.create();
+    try {
+      const spans = [{text: '', placeholder_width: 3, font_size: 5}, {text: '', placeholder_width: 2, font_size: 2}];
+      const style = {font_size: 2, line_height: 3, shape};
+      const options = {page_size: [30,20], margins: [2,2,2,2]};
+      const root = {layout: {size: [10,0]}, children: [{type: 'paragraph', spans, style}]};
+      doc.addBlankPage(30,20);
+      const fixed = doc.addFixedContainers(0, [{position: [2,2], container: root}]);
+      const boxes = doc.addTextBoxes(0, [{layout: root.layout, spans, style}], options);
+      const flowed = doc.addFlowContainers(0, [root], options);
+      for (const placed of [fixed[0], boxes.placements[0], flowed.placements[0]]) {
+        assert.deepEqual(placed.content_box, [2,2,10,6]);
+      }
+      doc.addFlowBlocks(0, [{type: 'paragraph', spans}], {...style, ...options});
+      assert.equal(doc.pageCount, 4);
+      for (let page=0; page<4; page++) assert.deepEqual(doc.pageObjects(page), []);
+      const before = doc.toBytes();
+      for (const width of [-1, 27, null, true, 'wide', NaN, Infinity]) {
+        const bad = {text: '', placeholder_width: width, font_size: 2};
+        assert.throws(() => doc.measureFlowedSpans(0, [bad], 26, style));
+        assert.throws(() => doc.addFlowedSpans(0, [...spans, bad], {...style, ...options}));
+        assert.deepEqual(doc.toBytes(), before);
+      }
+      assert.throws(() => doc.addFlowedSpans(0, [{text: 'hidden', placeholder_width: 1}], {...style, ...options}));
+      assert.deepEqual(doc.toBytes(), before);
+    } finally {doc.close();}
+  }
+});

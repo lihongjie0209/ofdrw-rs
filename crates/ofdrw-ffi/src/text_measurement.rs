@@ -48,6 +48,127 @@ mod tests {
     use super::super::*;
 
     #[test]
+    fn ffi_placeholder_metrics_match_java_and_blank_flow_allocates_no_objects() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/inline-placeholders-java.json"
+        ))
+        .unwrap();
+        for shape in [false, true] {
+            for case in fixture["cases"].as_array().unwrap() {
+                let mut handle = ptr::null_mut();
+                assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+                let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+                let mut request = case["style"].clone();
+                request["spans"] = case["spans"].clone();
+                request["content_width"] = case["content_width"].clone();
+                request["shape"] = shape.into();
+                let input = CString::new(request.to_string()).unwrap();
+                let mut output = OfdBuffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
+                assert_eq!(
+                    unsafe {
+                        ofd_measure_flowed_spans_json(handle, 0, input.as_ptr(), &mut output)
+                    },
+                    0
+                );
+                let measured: serde_json::Value = serde_json::from_slice(unsafe {
+                    std::slice::from_raw_parts(output.data, output.len)
+                })
+                .unwrap();
+                unsafe { ofd_buffer_free(output) };
+                let expected = case["lines"].as_array().unwrap();
+                assert_eq!(measured["lines"].as_array().unwrap().len(), expected.len());
+                for (line, reference) in measured["lines"].as_array().unwrap().iter().zip(expected)
+                {
+                    for (key, value) in reference.as_object().unwrap() {
+                        if let Some(expected) = value.as_f64() {
+                            assert!(
+                                (line[key].as_f64().unwrap() - expected).abs() < 1e-10,
+                                "{}: {key}",
+                                case["name"]
+                            );
+                        } else {
+                            assert_eq!(&line[key], value, "{}: {key}", case["name"]);
+                        }
+                    }
+                }
+                assert_eq!(
+                    unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                    before
+                );
+                request.as_object_mut().unwrap().remove("content_width");
+                request["page_size"] =
+                    serde_json::json!([case["content_width"].as_f64().unwrap() + 4., 50.]);
+                request["margins"] = serde_json::json!([2, 2, 2, 2]);
+                let input = CString::new(request.to_string()).unwrap();
+                let mut output = OfdBuffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
+                assert_eq!(
+                    unsafe { ofd_add_flowed_spans_json(handle, 0, input.as_ptr(), &mut output) },
+                    0
+                );
+                unsafe { ofd_buffer_free(output) };
+                let doc = unsafe { document_ref(handle).unwrap() };
+                assert_eq!(doc.pages().unwrap().len(), 1);
+                assert!(doc.page_objects(0).unwrap().is_empty());
+                assert!(doc.page_text(0).unwrap().is_empty());
+                unsafe { ofd_close(handle) };
+            }
+        }
+    }
+
+    #[test]
+    fn ffi_placeholder_rejects_bad_types_nonempty_text_and_later_invalid_geometry_atomically() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+        for width in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("wide"),
+            serde_json::json!(-1),
+            serde_json::json!(27),
+        ] {
+            let request = serde_json::json!({"font_size":2,"line_height":3,"page_size":[30,20],"margins":[2,2,2,2],"spans":[
+                {"text":"","placeholder_width":1,"font_size":2},
+                {"text":"","placeholder_width":width,"font_size":2}]});
+            let input = CString::new(request.to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_ne!(
+                unsafe { ofd_add_flowed_spans_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            assert!(output.data.is_null());
+            assert_eq!(
+                unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                before
+            );
+        }
+        let span = serde_json::json!({"spans":[{"text":"hidden","placeholder_width":1}],"content_width":20});
+        let input = CString::new(span.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_ne!(
+            unsafe { ofd_measure_flowed_spans_json(handle, 0, input.as_ptr(), &mut output) },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+            before
+        );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
     fn ffi_preserves_natural_zero_advance_metrics_and_writes_the_mark() {
         let mut handle = ptr::null_mut();
         assert_eq!(unsafe { ofd_new(&mut handle) }, 0);

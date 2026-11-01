@@ -86,3 +86,55 @@ def test_natural_zero_advance_survives_measurement_and_flow_without_mutating_sou
         assert doc.add_flowed_spans(0, spans, **options) == [0]
         assert doc.page_text(0) == ["\u0301"]
         assert doc.page_png(0, 30)
+
+
+@pytest.mark.parametrize("shape", [False, True])
+@pytest.mark.parametrize("case", json.loads((FIXTURES / "inline-placeholders-java.json").read_text())["cases"], ids=lambda c: c["name"])
+def test_inline_placeholders_match_java_without_allocating_fonts_or_objects(case, shape):
+    with Document.new() as doc:
+        before = doc.to_bytes()
+        options = {**case["style"], "shape": shape}
+        metrics = doc.measure_flowed_spans(0, case["spans"], case["content_width"], **options)
+        assert len(metrics["lines"]) == len(case["lines"])
+        for line, expected in zip(metrics["lines"], case["lines"]):
+            assert {key: line[key] for key in expected} == expected
+        assert metrics["width"] == max(line["width"] for line in case["lines"])
+        assert metrics["height"] == sum(line["height"] for line in case["lines"])
+        assert doc.to_bytes() == before
+        doc.add_flowed_spans(0, case["spans"], **options,
+            page_size=[case["content_width"] + 4, 50], margins=[2] * 4)
+        assert doc.page_count == 1
+        assert doc.page_text(0) == []
+        assert doc.page_objects(0) == []
+        with Document.from_bytes(doc.to_bytes()) as reopened:
+            assert reopened.page_text(0) == []
+            assert reopened.page_png(0, 30)
+
+
+@pytest.mark.parametrize("shape", [False, True])
+def test_placeholder_spans_reach_every_container_writer_and_invalid_input_rolls_back(shape):
+    spans = [{"text": "", "placeholder_width": 3, "font_size": 5},
+             {"text": "", "placeholder_width": 2, "font_size": 2}]
+    style = {"font_size": 2, "line_height": 3, "shape": shape}
+    root = {"layout": {"size": [10, 0]}, "children": [{"type": "paragraph", "spans": spans, "style": style}]}
+    options = {"page_size": [30, 20], "margins": [2] * 4}
+    with Document.new() as doc:
+        doc.add_blank_page(30, 20)
+        fixed = doc.add_fixed_containers(0, [{"position": [2, 2], "container": root}])
+        boxes = doc.add_text_boxes(0, [{"layout": root["layout"], "spans": spans, "style": style}], **options)
+        flowed = doc.add_flow_containers(0, [root], **options)
+        assert fixed[0]["content_box"] == boxes["placements"][0]["content_box"] == flowed["placements"][0]["content_box"] == [2, 2, 10, 6]
+        doc.add_flow_blocks(0, [{"type": "paragraph", "spans": spans}], **style, **options)
+        assert doc.page_count == 4
+        assert all(doc.page_objects(page) == [] for page in range(4))
+        before = doc.to_bytes()
+        for width in [-1, 27, None, True, "wide", float("nan"), float("inf")]:
+            bad = {"text": "", "placeholder_width": width, "font_size": 2}
+            with pytest.raises((OfdError, ValueError)):
+                doc.measure_flowed_spans(0, [bad], 26, **style)
+            with pytest.raises((OfdError, ValueError)):
+                doc.add_flowed_spans(0, [*spans, bad], **style, **options)
+            assert doc.to_bytes() == before
+        with pytest.raises(OfdError):
+            doc.add_flowed_spans(0, [{"text": "hidden", "placeholder_width": 1}], **style, **options)
+        assert doc.to_bytes() == before

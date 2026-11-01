@@ -613,3 +613,23 @@ positive heights control allocation and decoration while children may overflow.
 The call never adds pages. Nested text/images/tables, offsets, layers and placeholders
 follow flow-container rules. Page-area fillers are ignored; invalid later content
 rolls back the entire call. Images use `data_base64` strings.
+
+### Inline placeholders (development)
+
+`FlowSpan` accepts `placeholder_width` in millimeters with empty `text` and
+`font_size` as height. This reserves an indivisible inline rectangle without
+painting objects or font resources; width zero is allowed.
+
+```js
+const metrics = doc.measureFlowedSpans(0, [
+  {text: 'Label:'},
+  {text: '', placeholder_width: 8, font_size: 4},
+  {text: 'value'},
+], 50);
+```
+
+The same spans work in styled flow, text boxes, flow blocks and fixed/flow
+containers. Geometry participates in wrapping and line height while text omits
+the placeholders. A leading placeholder absorbs a configured first-line indent
+once. Character-count reservations use `count * (font_size + letter_spacing)`.
+Use development bindings and their matching native library for this input.
