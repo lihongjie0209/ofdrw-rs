@@ -169,6 +169,10 @@ impl OfdDocument {
         } = draw;
         for group in line.glyphs.chunk_by(|a, b| a.span_index == b.span_index) {
             let span = &prepared[group[0].span_index];
+            if let Some(width) = span.placeholder_width {
+                x += width;
+                continue;
+            }
             let text: String = group.iter().map(|glyph| glyph.ch).collect();
             let width: f64 = group.iter().map(|glyph| glyph.width).sum();
             self.add_flow_span_object(
@@ -222,6 +226,10 @@ impl OfdDocument {
             .zip(widths)
         {
             let span = &prepared[group[0].span_index];
+            if span.placeholder_width.is_some() {
+                x += *width;
+                continue;
+            }
             let text = group
                 .iter()
                 .map(|unit| unit.text.as_str())

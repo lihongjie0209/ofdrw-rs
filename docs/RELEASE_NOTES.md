@@ -1,5 +1,11 @@
 # Unreleased
 
+- Add Rust inline placeholder spans with explicit or character-count widths,
+  shared measurement/wrapping/line-height handling and no painted objects or
+  font resources. Preserve grapheme boundaries, leading-indent replacement,
+  zero-width reservations and atomic errors. Allow shaped natural zero advances
+  and retain their glyph ink bounds without changing layout pen positions.
+
 - Retain natural zero font advances in plain styled text, including combining
   marks and cross-span graphemes. Keep invalid tracking rejection and verify
   zero-width measurement/flow through Rust, C, Python, Go and Node.js.

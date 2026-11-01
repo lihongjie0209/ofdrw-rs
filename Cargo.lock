@@ -941,6 +941,7 @@ dependencies = [
  "read-fonts 0.39.2",
  "roxmltree 0.20.0",
  "rustybuzz",
+ "serde_json",
  "sha2",
  "sm2",
  "sm3",

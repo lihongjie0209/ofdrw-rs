@@ -29,6 +29,17 @@ pub(super) struct PreparedSpans {
     pub(super) spans: Vec<PreparedFlowSpan>,
     fonts: Vec<FontInfo>,
     pub(super) first_line_indent: f64,
+    leading_placeholder: bool,
+}
+
+impl PreparedSpans {
+    pub(super) fn indents(&self, style: &FlowTextStyle) -> FlowIndents {
+        FlowIndents {
+            first: self.first_line_indent,
+            rest: style.rest_line_indent,
+            initial: self.leading_placeholder.then_some(0.),
+        }
+    }
 }
 
 pub(super) struct ShapedLines {
@@ -106,7 +117,7 @@ impl OfdDocument {
             PreparedFlowLines::Plain(wrap_styled_flow_lines(
                 &paragraphs,
                 content_width,
-                FlowIndents::new(preparation.first_line_indent, style.rest_line_indent),
+                preparation.indents(style),
                 prepared,
                 style.indent_each_paragraph,
             )?)
@@ -125,7 +136,12 @@ impl OfdDocument {
                             .fold(0., f64::max)
                     };
                     FlowLineMetrics {
-                        text: line.units.iter().map(|u| u.text.as_str()).collect(),
+                        text: line
+                            .units
+                            .iter()
+                            .filter(|u| prepared[u.span_index].placeholder_width.is_none())
+                            .map(|u| u.text.as_str())
+                            .collect(),
                         x: line.indent,
                         y: 0.,
                         width: line.width,
@@ -147,7 +163,12 @@ impl OfdDocument {
                             .fold(0., f64::max)
                     };
                     FlowLineMetrics {
-                        text: line.glyphs.iter().map(|g| g.ch).collect(),
+                        text: line
+                            .glyphs
+                            .iter()
+                            .filter(|g| prepared[g.span_index].placeholder_width.is_none())
+                            .map(|g| g.ch)
+                            .collect(),
                         x: line.indent,
                         y: 0.,
                         width: line.width,
@@ -213,7 +234,11 @@ impl OfdDocument {
         style: &FlowTextStyle,
         content_width: f64,
     ) -> Result<PreparedSpans, OfdError> {
-        if spans.is_empty() || spans.iter().all(|span| span.text.is_empty()) {
+        if spans.is_empty()
+            || spans
+                .iter()
+                .all(|span| span.text.is_empty() && span.placeholder_width.is_none())
+        {
             return Err(OfdError::Invalid("flowed spans are empty".into()));
         }
         if !style.shape
@@ -279,16 +304,28 @@ impl OfdDocument {
             {
                 return Err(OfdError::Invalid("flowed span style is invalid".into()));
             }
-            let selected = span.font_id.as_ref().or(style.font_id.as_ref());
-            let font = fonts
-                .iter()
-                .find(|font| {
-                    font.document_index == document_index
-                        && selected
-                            .is_none_or(|id| resource_id_key(&font.id) == resource_id_key(id))
-                })
-                .ok_or_else(|| OfdError::Invalid("flowed span font is not defined".into()))?;
-            let metrics = flow_font_metrics(self, font, &span.text)?;
+            if let Some(width) = span.placeholder_width {
+                if !span.text.is_empty() || !width.is_finite() || width < 0. {
+                    return Err(OfdError::Invalid(
+                        "inline placeholder geometry is invalid".into(),
+                    ));
+                }
+            }
+            let (font_id, metrics) = if span.placeholder_width.is_some() {
+                (String::new(), FlowFontMetrics::default())
+            } else {
+                let selected = span.font_id.as_ref().or(style.font_id.as_ref());
+                let font = fonts
+                    .iter()
+                    .find(|font| {
+                        font.document_index == document_index
+                            && selected
+                                .is_none_or(|id| resource_id_key(&font.id) == resource_id_key(id))
+                    })
+                    .ok_or_else(|| OfdError::Invalid("flowed span font is not defined".into()))?;
+                let metrics = flow_font_metrics(self, font, &span.text)?;
+                (font.id.clone(), metrics)
+            };
             if !style.shape
                 && span
                     .text
@@ -307,7 +344,8 @@ impl OfdDocument {
                 ));
             }
             prepared.push(PreparedFlowSpan {
-                font_id: font.id.clone(),
+                font_id,
+                placeholder_width: span.placeholder_width,
                 font_size,
                 language,
                 fill_color: span.fill_color,
@@ -322,13 +360,13 @@ impl OfdDocument {
                 underline: span.underline,
                 underline_offset: span.underline_offset,
                 underline_width: span.underline_width,
-                keep_together: span.keep_together,
+                keep_together: span.keep_together || span.placeholder_width.is_some(),
                 metrics,
             });
         }
         let first_span_index = spans
             .iter()
-            .position(|span| !span.text.is_empty())
+            .position(|span| !span.text.is_empty() || span.placeholder_width.is_some())
             .expect("nonempty span was checked");
         let first_span = &prepared[first_span_index];
         let first_line_indent = effective_flow_indent(
@@ -337,10 +375,24 @@ impl OfdDocument {
             first_span.letter_spacing,
             content_width,
         )?;
+        let leading_placeholder =
+            prepared[first_span_index].placeholder_width.is_some() && first_line_indent > 0.;
+        if leading_placeholder {
+            prepared[first_span_index].placeholder_width = Some(first_line_indent);
+        }
+        if prepared.iter().any(|span| {
+            span.placeholder_width
+                .is_some_and(|width| width > content_width)
+        }) {
+            return Err(OfdError::Invalid(
+                "inline placeholder exceeds available line width".into(),
+            ));
+        }
         Ok(PreparedSpans {
             spans: prepared,
             fonts,
             first_line_indent,
+            leading_placeholder,
         })
     }
 
@@ -355,12 +407,13 @@ impl OfdDocument {
     ) -> Result<ShapedLines, OfdError> {
         let prepared = &preparation.spans;
         let fonts = &preparation.fonts;
-        let first_line_indent = preparation.first_line_indent;
-        use unicode_segmentation::UnicodeSegmentation;
 
         let faces = prepared
             .iter()
             .map(|span| {
+                if span.placeholder_width.is_some() {
+                    return Ok(None);
+                }
                 let font = fonts
                     .iter()
                     .find(|font| {
@@ -372,18 +425,21 @@ impl OfdDocument {
                     OfdError::Invalid("shaped flow requires an embedded font".into())
                 })?;
                 rustybuzz::Face::from_slice(self.required_entry(path)?, 0)
+                    .map(Some)
                     .ok_or_else(|| OfdError::Invalid("shaped flow font is invalid".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let paragraphs = flow_styled_paragraph_chars(spans)
             .into_iter()
             .map(|characters| {
-                let content = characters.iter().map(|(ch, _)| *ch).collect::<String>();
                 let mut index = 0;
                 let mut units = Vec::new();
                 let mut kept_ranges = HashMap::<usize, (usize, usize)>::new();
-                for grapheme in content.graphemes(true) {
-                    let next = index + grapheme.chars().count();
+                for next in flow_grapheme_ends(
+                    characters
+                        .iter()
+                        .map(|&(ch, span)| (ch, prepared[span].placeholder_width.is_some())),
+                ) {
                     let unit_index = units.len();
                     for &(_, span_index) in &characters[index..next] {
                         if prepared[span_index].keep_together {
@@ -394,7 +450,7 @@ impl OfdDocument {
                         }
                     }
                     units.push(ShapedFlowUnit {
-                        text: grapheme.to_owned(),
+                        text: characters[index..next].iter().map(|(ch, _)| *ch).collect(),
                         span_index: characters[index].1,
                         keep_until: unit_index + 1,
                     });
@@ -406,7 +462,7 @@ impl OfdDocument {
                 units
             })
             .collect::<Vec<_>>();
-        let indents = FlowIndents::new(first_line_indent, style.rest_line_indent);
+        let indents = preparation.indents(style);
         let mut lines = Vec::<ShapedStyledLine>::new();
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
             let paragraph_line_start = lines.len();
@@ -415,7 +471,10 @@ impl OfdDocument {
                     units: Vec::new(),
                     width: 0.0,
                     paragraph_start: paragraph_index > 0,
-                    indent: indents.for_line(paragraph_index == 0 || style.indent_each_paragraph),
+                    indent: indents.for_paragraph_line(
+                        paragraph_index,
+                        paragraph_index == 0 || style.indent_each_paragraph,
+                    ),
                 });
                 continue;
             }
@@ -434,7 +493,7 @@ impl OfdDocument {
             let mut start = 0;
             let mut first_line = paragraph_index == 0 || style.indent_each_paragraph;
             while start < paragraph.len() {
-                let indent = indents.for_line(first_line);
+                let indent = indents.for_paragraph_line(paragraph_index, first_line);
                 let available = content_width - indent;
                 let mut end = start;
                 let mut width = 0.0;
@@ -515,15 +574,21 @@ impl OfdDocument {
                 for group in line.units.chunk_by(|a, b| a.span_index == b.span_index) {
                     let index = group[0].span_index;
                     let span = &prepared[index];
+                    if span.placeholder_width.is_some() {
+                        continue;
+                    }
                     let text = group
                         .iter()
                         .map(|unit| unit.text.as_str())
                         .collect::<String>();
                     prepare_positioned_shaping(
-                        &faces[index],
+                        faces[index].as_ref().ok_or_else(|| {
+                            OfdError::Invalid("shaped flow font is not defined".into())
+                        })?,
                         &text,
                         span.font_size,
                         span.language.as_ref(),
+                        span.letter_spacing,
                     )?;
                 }
             }
@@ -536,14 +601,55 @@ impl OfdDocument {
     }
 }
 
+pub(super) struct PositionedShaping {
+    pub(super) transforms: String,
+    pub(super) x: f64,
+    pub(super) y: f64,
+    pub(super) delta_x: String,
+    pub(super) delta_y: String,
+    pub(super) zero_advance_ink: Option<[f64; 4]>,
+}
+
+pub(super) fn include_zero_advance_ink(
+    face: &rustybuzz::Face<'_>,
+    glyph: u16,
+    position: [f64; 2],
+    scale: f64,
+    ink: &mut Option<[f64; 4]>,
+) -> Result<(), OfdError> {
+    if let Some(bounds) = face.glyph_bounding_box(ttf_parser::GlyphId(glyph)) {
+        let [x, y] = position;
+        let bounds = [
+            x + f64::from(bounds.x_min) * scale,
+            y - f64::from(bounds.y_max) * scale,
+            x + f64::from(bounds.x_max) * scale,
+            y - f64::from(bounds.y_min) * scale,
+        ];
+        if bounds.iter().any(|value| !value.is_finite()) {
+            return Err(OfdError::Invalid("shaped glyph ink bounds overflow".into()));
+        }
+        *ink = Some(match *ink {
+            None => bounds,
+            Some([l, t, r, b]) => [
+                l.min(bounds[0]),
+                t.min(bounds[1]),
+                r.max(bounds[2]),
+                b.max(bounds[3]),
+            ],
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_positioned_shaping(
     face: &rustybuzz::Face<'_>,
     text: &str,
     size: f64,
     language: Option<&rustybuzz::Language>,
-) -> Result<(String, f64, f64, String, String), OfdError> {
+    tracking: f64,
+) -> Result<PositionedShaping, OfdError> {
     Ok(if visual_shape_runs(text)?.len() > 1 {
-        shape_bidirectional_text(face, text, size, language)?
+        shape_bidirectional_text(face, text, size, language, tracking)?
     } else {
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
@@ -631,14 +737,26 @@ pub(super) fn prepare_positioned_shaping(
             }
         }
         let scale = size / f64::from(face.units_per_em());
+        let mut zero_advance_ink = None;
         let mut pen_x = 0_i64;
         let mut pen_y = 0_i64;
         let mut glyph_positions = Vec::with_capacity(positions.len());
-        for position in positions {
+        for (index, position) in positions.iter().enumerate() {
             let x = (pen_x + i64::from(position.x_offset)) as f64 * scale;
             let y = size - (pen_y + i64::from(position.y_offset)) as f64 * scale;
             if !x.is_finite() || !y.is_finite() {
                 return Err(OfdError::Invalid("shaped text position is invalid".into()));
+            }
+            if position.x_advance == 0 {
+                let id = u16::try_from(glyphs[index].glyph_id)
+                    .map_err(|_| OfdError::Invalid("shaped glyph ID is invalid".into()))?;
+                include_zero_advance_ink(
+                    face,
+                    id,
+                    [x + index as f64 * tracking, y],
+                    scale,
+                    &mut zero_advance_ink,
+                )?;
             }
             glyph_positions.push((x, y));
             pen_x += i64::from(position.x_advance);
@@ -654,12 +772,13 @@ pub(super) fn prepare_positioned_shaping(
             .map(|pair| (pair[1].1 - pair[0].1).to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        (
+        PositionedShaping {
             transforms,
-            glyph_positions[0].0,
-            glyph_positions[0].1,
+            x: glyph_positions[0].0,
+            y: glyph_positions[0].1,
             delta_x,
             delta_y,
-        )
+            zero_advance_ink,
+        }
     })
 }

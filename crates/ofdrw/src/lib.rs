@@ -1967,6 +1967,10 @@ impl Default for TableStyle {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowSpan {
     pub text: String,
+    /// Reserve an indivisible inline width without emitting text or decorations.
+    /// Text must be empty. Font size supplies the reserved height. Width must
+    /// be finite, nonnegative and fit a complete line.
+    pub placeholder_width: Option<f64>,
     pub font_id: Option<String>,
     pub font_size: Option<f64>,
     /// BCP 47 language tag overriding the flow style when shaping is enabled.
@@ -1991,6 +1995,7 @@ impl FlowSpan {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            placeholder_width: None,
             font_id: None,
             font_size: None,
             language: None,
@@ -2008,6 +2013,36 @@ impl FlowSpan {
             underline_width: 0.0,
             line_break_after: false,
             keep_together: false,
+        }
+    }
+
+    /// Reserve an inline rectangle, participating in wrapping and line height.
+    /// No font resource, text object, underline or glyph is emitted.
+    ///
+    /// ```
+    /// use ofdrw::{FlowSpan, FlowTextStyle, OfdDocument};
+    /// let document = OfdDocument::new();
+    /// let metrics = document.measure_flowed_spans(0,
+    ///     &[FlowSpan::placeholder(8., 4.)], 20., &FlowTextStyle::default())?;
+    /// assert_eq!(metrics.width, 8.);
+    /// assert!(metrics.lines[0].text.is_empty());
+    /// # Ok::<(), ofdrw::OfdError>(())
+    /// ```
+    pub fn placeholder(width: f64, height: f64) -> Self {
+        Self {
+            placeholder_width: Some(width),
+            font_size: Some(height),
+            ..Self::new("")
+        }
+    }
+
+    /// Reserve `count * (font_size + letter_spacing)` millimeters, like Java
+    /// `PlaceholderSpan` constructed from a character count and styled span.
+    /// Invalid or overflowing dimensions are rejected during layout.
+    pub fn placeholder_characters(count: usize, font_size: f64, letter_spacing: f64) -> Self {
+        Self {
+            letter_spacing,
+            ..Self::placeholder(count as f64 * (font_size + letter_spacing), font_size)
         }
     }
 }
@@ -20343,13 +20378,68 @@ impl OfdDocument {
             .embedded_path
             .as_deref()
             .ok_or_else(|| OfdError::Invalid("shaped text requires an embedded font".into()))?;
-        let (transforms, x, y, delta_x, delta_y) = {
+        let text_measurement::PositionedShaping {
+            transforms,
+            mut x,
+            mut y,
+            delta_x,
+            delta_y,
+            zero_advance_ink,
+        } = {
             let bytes = self.required_entry(path)?;
             let face = rustybuzz::Face::from_slice(bytes, 0)
                 .ok_or_else(|| OfdError::Invalid("shaped text font is invalid".into()))?;
-            text_measurement::prepare_positioned_shaping(&face, text, size, language)?
+            text_measurement::prepare_positioned_shaping(
+                &face,
+                text,
+                size,
+                language,
+                style.map_or(0., |span| span.letter_spacing),
+            )?
         };
-        let [box_x, box_y, width, height] = boundary;
+        let [mut box_x, mut box_y, mut width, mut height] = boundary;
+        if let Some([left, top, right, bottom]) = zero_advance_ink {
+            let pad = style.map_or(0., |span| {
+                let stroke = if span.stroke {
+                    span.stroke_width.unwrap_or(size) / 2.
+                } else {
+                    0.
+                };
+                stroke
+                    + if span.italic
+                        || span.weight.unwrap_or(if span.bold { 800 } else { 400 }) > 400
+                    {
+                        size * 0.25
+                    } else {
+                        0.
+                    }
+            });
+            let left = (left - pad).min(0.);
+            let top = (top + baseline - size - pad).min(0.);
+            let right = (right + pad).max(width);
+            let bottom = (bottom + baseline - size + pad).max(height);
+            box_x += left;
+            box_y += top;
+            width = right - left;
+            height = bottom - top;
+            x -= left;
+            y -= top;
+            if [
+                box_x,
+                box_y,
+                width,
+                height,
+                x,
+                y,
+                box_x + width,
+                box_y + height,
+            ]
+            .iter()
+            .any(|n| !n.is_finite())
+            {
+                return Err(OfdError::Invalid("shaped text ink bounds overflow".into()));
+            }
+        }
         let escaped_text = escape_text_code(text);
         let escaped_font = escape_xml(font_id);
         let y = y + baseline - size;
@@ -26638,7 +26728,11 @@ impl OfdDocument {
         spans: &[FlowSpan],
         style: FlowTextStyle,
     ) -> Result<flow_blocks::FlowPlacement, OfdError> {
-        if spans.is_empty() || spans.iter().all(|span| span.text.is_empty()) {
+        if spans.is_empty()
+            || spans
+                .iter()
+                .all(|span| span.text.is_empty() && span.placeholder_width.is_none())
+        {
             return Err(OfdError::Invalid("flowed spans are empty".into()));
         }
         if !style.shape
@@ -26687,7 +26781,7 @@ impl OfdDocument {
         let lines = wrap_styled_flow_lines(
             &paragraphs,
             page_width - left - right,
-            FlowIndents::new(preparation.first_line_indent, style.rest_line_indent),
+            preparation.indents(&style),
             prepared,
             style.indent_each_paragraph,
         )?;
@@ -31901,9 +31995,11 @@ fn shape_bidirectional_text(
     text: &str,
     size: f64,
     language: Option<&rustybuzz::Language>,
-) -> Result<(String, f64, f64, String, String), OfdError> {
+    tracking: f64,
+) -> Result<text_measurement::PositionedShaping, OfdError> {
     let runs = visual_shape_runs(text)?;
     let scale = size / f64::from(face.units_per_em());
+    let mut zero_advance_ink = None;
     let mut glyphs = Vec::new();
     let mut positions = Vec::new();
     let mut pen_x = 0_i64;
@@ -31936,12 +32032,21 @@ fn shape_bidirectional_text(
                 .ok()
                 .filter(|id| *id != 0)
                 .ok_or_else(|| OfdError::Invalid("shaped text glyph ID is invalid".into()))?;
-            glyphs.push(id);
             let x = (pen_x + i64::from(position.x_offset)) as f64 * scale;
             let y = size - (pen_y + i64::from(position.y_offset)) as f64 * scale;
             if !x.is_finite() || !y.is_finite() {
                 return Err(OfdError::Invalid("shaped text position is invalid".into()));
             }
+            if position.x_advance == 0 {
+                text_measurement::include_zero_advance_ink(
+                    face,
+                    id,
+                    [x + glyphs.len() as f64 * tracking, y],
+                    scale,
+                    &mut zero_advance_ink,
+                )?;
+            }
+            glyphs.push(id);
             positions.push((x, y));
             pen_x += i64::from(position.x_advance);
             pen_y += i64::from(position.y_advance);
@@ -31969,7 +32074,14 @@ fn shape_bidirectional_text(
         .map(|pair| (pair[1].1 - pair[0].1).to_string())
         .collect::<Vec<_>>()
         .join(" ");
-    Ok((transforms, positions[0].0, positions[0].1, delta_x, delta_y))
+    Ok(text_measurement::PositionedShaping {
+        transforms,
+        x: positions[0].0,
+        y: positions[0].1,
+        delta_x,
+        delta_y,
+        zero_advance_ink,
+    })
 }
 
 fn parse_cg_transforms(object: Node<'_, '_>) -> Result<Vec<CgTransformInfo>, OfdError> {
@@ -34140,6 +34252,7 @@ fn svg_path_data(data: &str) -> Result<String, OfdError> {
     Ok(output)
 }
 
+#[derive(Default)]
 struct FlowFontMetrics {
     advances: HashMap<char, f64>,
     kerning: HashMap<(char, char), f64>,
@@ -34347,6 +34460,7 @@ struct ShapingContext<'a> {
 }
 
 struct PreparedFlowSpan {
+    placeholder_width: Option<f64>,
     font_id: String,
     font_size: f64,
     language: Option<rustybuzz::Language>,
@@ -34397,21 +34511,30 @@ struct ShapedStyledLine {
 fn shaped_styled_width(
     units: &[ShapedFlowUnit],
     prepared: &[PreparedFlowSpan],
-    faces: &[rustybuzz::Face<'_>],
+    faces: &[Option<rustybuzz::Face<'_>>],
 ) -> Result<f64, OfdError> {
     let mut width = 0.0;
     for group in units.chunk_by(|a, b| a.span_index == b.span_index) {
         let index = group[0].span_index;
         let span = &prepared[index];
+        if let Some(reserved) = span.placeholder_width {
+            width += reserved;
+            continue;
+        }
+        let face = faces[index]
+            .as_ref()
+            .ok_or_else(|| OfdError::Invalid("shaped flow font is not defined".into()))?;
         let text = group
             .iter()
             .map(|unit| unit.text.as_str())
             .collect::<String>();
-        let glyph_count = shaped_glyph_count(&faces[index], &text, span.language.as_ref())?;
-        let group_width =
-            shaped_text_width(&faces[index], &text, span.font_size, span.language.as_ref())?
-                + glyph_count as f64 * span.letter_spacing;
-        if !group_width.is_finite() || group_width <= 0.0 {
+        let glyph_count = shaped_glyph_count(face, &text, span.language.as_ref())?;
+        let natural_width = shaped_text_width(face, &text, span.font_size, span.language.as_ref())?;
+        let group_width = natural_width + glyph_count as f64 * span.letter_spacing;
+        if !group_width.is_finite()
+            || group_width < 0.0
+            || (group_width == 0.0 && natural_width != 0.)
+        {
             return Err(OfdError::Invalid(
                 "shaped flowed span advance is invalid".into(),
             ));
@@ -34481,9 +34604,18 @@ fn flow_paragraphs(text: &str) -> Vec<&str> {
 
 fn flow_styled_paragraph_chars(spans: &[FlowSpan]) -> Vec<Vec<(char, usize)>> {
     let mut paragraphs = vec![Vec::new()];
-    let last_content_index = spans.iter().rposition(|span| !span.text.is_empty());
+    let last_content_index = spans
+        .iter()
+        .rposition(|span| !span.text.is_empty() || span.placeholder_width.is_some());
     let mut previous_was_cr = false;
     for (span_index, span) in spans.iter().enumerate() {
+        if span.placeholder_width.is_some() {
+            paragraphs
+                .last_mut()
+                .expect("paragraph exists")
+                .push(('\u{fffc}', span_index));
+            previous_was_cr = false;
+        }
         for ch in span.text.chars() {
             if ch == '\n' && previous_was_cr {
                 previous_was_cr = false;
@@ -34513,6 +34645,31 @@ fn flow_styled_paragraph_chars(spans: &[FlowSpan]) -> Vec<Vec<(char, usize)>> {
     paragraphs
 }
 
+fn flow_grapheme_ends(characters: impl Iterator<Item = (char, bool)>) -> Vec<usize> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut ends = Vec::new();
+    let mut text = String::new();
+    let mut count = 0;
+    let flush = |text: &mut String, count: &mut usize, ends: &mut Vec<usize>| {
+        for cluster in text.graphemes(true) {
+            *count += cluster.chars().count();
+            ends.push(*count);
+        }
+        text.clear();
+    };
+    for (ch, placeholder) in characters {
+        if placeholder {
+            flush(&mut text, &mut count, &mut ends);
+            count += 1;
+            ends.push(count);
+        } else {
+            text.push(ch);
+        }
+    }
+    flush(&mut text, &mut count, &mut ends);
+    ends
+}
+
 fn styled_flow_paragraphs(
     spans: &[FlowSpan],
     prepared: &[PreparedFlowSpan],
@@ -34525,9 +34682,10 @@ fn styled_flow_paragraphs(
                 .map(|(ch, span_index)| FlowGlyph {
                     ch,
                     span_index,
-                    width: prepared[span_index].metrics.advance(ch)
-                        * prepared[span_index].font_size
-                        + prepared[span_index].letter_spacing,
+                    width: prepared[span_index].placeholder_width.unwrap_or_else(|| {
+                        prepared[span_index].metrics.advance(ch) * prepared[span_index].font_size
+                            + prepared[span_index].letter_spacing
+                    }),
                 })
                 .collect()
         })
@@ -34541,8 +34699,6 @@ fn wrap_styled_flow_lines(
     prepared: &[PreparedFlowSpan],
     indent_each_paragraph: bool,
 ) -> Result<Vec<StyledFlowLine>, OfdError> {
-    use unicode_segmentation::UnicodeSegmentation;
-
     let indents = indents.into();
     let mut lines = Vec::new();
     for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
@@ -34552,7 +34708,10 @@ fn wrap_styled_flow_lines(
                 glyphs: Vec::new(),
                 width: 0.0,
                 paragraph_start: paragraph_index > 0,
-                indent: indents.for_line(paragraph_index == 0 || indent_each_paragraph),
+                indent: indents.for_paragraph_line(
+                    paragraph_index,
+                    paragraph_index == 0 || indent_each_paragraph,
+                ),
             });
             continue;
         }
@@ -34565,16 +34724,16 @@ fn wrap_styled_flow_lines(
             .map(|(offset, _)| offset)
             .collect::<Vec<_>>();
         char_end_bytes.push(content.len());
-        let mut cluster_ends = Vec::new();
-        let mut characters = 0;
-        for cluster in content.graphemes(true) {
-            characters += cluster.chars().count();
-            cluster_ends.push(characters);
-        }
+        let cluster_ends = flow_grapheme_ends(paragraph.iter().map(|glyph| {
+            (
+                glyph.ch,
+                prepared[glyph.span_index].placeholder_width.is_some(),
+            )
+        }));
         let mut start = 0;
         let mut first_line = paragraph_index == 0 || indent_each_paragraph;
         while start < paragraph.len() {
-            let indent = indents.for_line(first_line);
+            let indent = indents.for_paragraph_line(paragraph_index, first_line);
             let available = max_width - indent;
             let mut end = start;
             let mut width = 0.0;
@@ -34682,11 +34841,24 @@ struct FlowLine {
 struct FlowIndents {
     first: f64,
     rest: f64,
+    initial: Option<f64>,
 }
 
 impl FlowIndents {
     fn new(first: f64, rest: f64) -> Self {
-        Self { first, rest }
+        Self {
+            first,
+            rest,
+            initial: None,
+        }
+    }
+
+    fn for_paragraph_line(self, paragraph: usize, first: bool) -> f64 {
+        if paragraph == 0 && first {
+            self.initial.unwrap_or(self.first)
+        } else {
+            self.for_line(first)
+        }
     }
 
     fn for_line(self, first: bool) -> f64 {
@@ -38260,6 +38432,7 @@ mod tests {
     #[test]
     fn flowed_spans_keep_clusters_across_span_boundaries() {
         let mut prepared = std::array::from_fn::<_, 2, _>(|_| PreparedFlowSpan {
+            placeholder_width: None,
             font_id: "1".into(),
             font_size: 4.0,
             language: None,
@@ -38426,6 +38599,7 @@ mod tests {
     #[test]
     fn flowed_spans_reject_overwide_glyph_and_move_past_first_indent() {
         let span = PreparedFlowSpan {
+            placeholder_width: None,
             font_id: "1".into(),
             font_size: 4.0,
             language: None,
