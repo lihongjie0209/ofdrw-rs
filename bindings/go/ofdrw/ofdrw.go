@@ -9850,7 +9850,8 @@ func (doc *Document) InsertBlankPage(documentIndex, position int, widthMM, heigh
 	return int(index), nil
 }
 
-// AddFlowedText wraps plain text into newly appended pages and returns their indexes.
+// AddFlowedText wraps plain text and returns the indexes of pages used.
+// Start selects an existing first page; otherwise the method appends pages.
 func (doc *Document) AddFlowedText(documentIndex int, text string, style FlowTextStyle) ([]int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -9974,7 +9975,8 @@ func (doc *Document) AddTableCells(documentIndex, rowCount int, cells []TableCel
 	return indexes, nil
 }
 
-// AddFlowedSpans flows styled segments into newly appended pages.
+// AddFlowedSpans flows styled segments and returns the indexes of pages used.
+// Start selects an existing first page; otherwise the method appends pages.
 func (doc *Document) AddFlowedSpans(documentIndex int, spans []FlowSpan, style FlowTextStyle) ([]int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
