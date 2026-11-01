@@ -366,6 +366,105 @@ mod tests {
     }
 
     #[test]
+    fn ffi_layered_containers_route_nested_content_and_restore_default_writes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/flow-containers.json"
+        ))
+        .unwrap();
+        for (shape, dynamic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut handle = ptr::null_mut();
+            assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+            let font = unsafe {
+                document_mut(handle)
+                    .unwrap()
+                    .add_embedded_font(
+                        "DejaVu Sans",
+                        include_bytes!("../../ofdrw/tests/fixtures/dejavu-sans.ttf"),
+                    )
+                    .unwrap()
+            };
+            let mut request = fixture["request"].clone();
+            typography(&mut request, &font.to_string(), shape);
+            request["containers"][0]["layout"]["layer"] = serde_json::json!("foreground");
+            let nested = &mut request["containers"][0]["children"][1]["container"]["layout"];
+            nested["layer"] = serde_json::json!("background");
+            if dynamic {
+                nested["clear"] = serde_json::json!("none");
+            }
+            let input = CString::new(request.to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_eq!(
+                unsafe { ofd_add_flow_containers_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            let result: serde_json::Value = serde_json::from_slice(unsafe {
+                std::slice::from_raw_parts(output.data, output.len)
+            })
+            .unwrap();
+            assert_eq!(result, fixture["expected"]);
+            unsafe { ofd_buffer_free(output) };
+            let document = unsafe { document_ref(handle).unwrap() };
+            for page in 0..3 {
+                let objects = document.page_objects(page).unwrap();
+                assert!(objects.iter().all(|object| object.layer_type != "Body"));
+                for text in document.page_text_objects(page).unwrap() {
+                    let value = text
+                        .codes
+                        .iter()
+                        .map(|code| code.text.as_str())
+                        .collect::<String>();
+                    let object = objects.iter().find(|object| object.id == text.id).unwrap();
+                    assert_eq!(
+                        object.layer_type,
+                        if value == "B" || value == "C" {
+                            "Background"
+                        } else {
+                            "Foreground"
+                        }
+                    );
+                }
+            }
+            let before = document.to_bytes().unwrap();
+            for layer in [
+                serde_json::json!("overlay"),
+                serde_json::json!(false),
+                serde_json::json!(1),
+                serde_json::json!({}),
+            ] {
+                let mut invalid = request.clone();
+                invalid["containers"][0]["layout"]["layer"] = layer;
+                let input = CString::new(invalid.to_string()).unwrap();
+                let mut output = OfdBuffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
+                assert_ne!(
+                    unsafe { ofd_add_flow_containers_json(handle, 0, input.as_ptr(), &mut output) },
+                    0
+                );
+                assert!(output.data.is_null());
+                assert_eq!(
+                    unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                    before
+                );
+            }
+            let document = unsafe { document_mut(handle).unwrap() };
+            document
+                .add_text_object(0, "Body", [2., 2., 6., 3.], 2., None)
+                .unwrap();
+            assert!(document
+                .page_objects(0)
+                .unwrap()
+                .iter()
+                .any(|object| object.layer_type == "Body"));
+            unsafe { ofd_close(handle) };
+        }
+    }
+
+    #[test]
     fn container_parser_bounds_depth_and_fields_before_document_mutation() {
         for bad in [
             serde_json::json!({}),

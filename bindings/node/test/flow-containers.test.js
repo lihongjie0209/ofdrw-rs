@@ -92,3 +92,43 @@ test('container controls preserve explicit blank pages and roundtrip in plain an
     } finally { doc.close(); }
   }
 });
+
+
+test('container layers route mixed children and nested overrides without changing geometry', () => {
+  for (const shape of [false, true]) for (const dynamic of [false, true]) {
+    const fixture = JSON.parse(fs.readFileSync(path.join(fixtures, 'flow-containers.json')));
+    const {containers, ...options} = fixture.request;
+    containers[0].layout.layer = 'foreground';
+    const nested = containers[0].children[1].container.layout;
+    nested.layer = 'background';
+    if (dynamic) nested.clear = 'none';
+    const doc = Document.create();
+    try {
+      const font = doc.addEmbeddedFont('DejaVu Sans', fs.readFileSync(path.join(fixtures, 'dejavu-sans.ttf')));
+      typography(containers[0].children, font, shape);
+      assert.deepEqual(doc.addFlowContainers(0, containers, options), fixture.expected);
+      for (let page = 0; page < 3; page++) {
+        const objects = doc.pageObjects(page);
+        assert.ok(objects.every(p => ['Foreground', 'Background'].includes(p.layer_type)));
+        assert.ok(objects.filter(p => p.kind === 'ImageObject').every(p => p.layer_type === 'Foreground'));
+        for (const text of doc.pageTextObjects(page)) {
+          const value = text.codes.map(code => code.text).join('');
+          const object = objects.find(p => p.id === text.id);
+          assert.equal(object.layer_type, ['B', 'C'].includes(value) ? 'Background' : 'Foreground');
+        }
+      }
+      const reopened = Document.fromBytes(doc.toBytes());
+      try { assert.deepEqual(reopened.pageObjects(0), doc.pageObjects(0)); assert.ok(reopened.pagePng(0, 30).length); }
+      finally { reopened.close(); }
+      const before = doc.toBytes();
+      for (const layer of ['overlay', false, 1, {}]) {
+        const invalid = structuredClone(containers);
+        invalid[0].layout.layer = layer;
+        assert.throws(() => doc.addFlowContainers(0, invalid, options));
+        assert.deepEqual(doc.toBytes(), before);
+      }
+      doc.addTextObject(0, 'Body', [2, 2, 6, 3], {size: 2});
+      assert.ok(doc.pageObjects(0).some(p => p.layer_type === 'Body'));
+    } finally { doc.close(); }
+  }
+});

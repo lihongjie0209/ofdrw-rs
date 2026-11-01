@@ -1,5 +1,7 @@
 use super::*;
-use ofdrw::{BoxClear, BoxFloat, BoxLayoutItem, BoxLayoutResult, BoxPlacement, LayoutBox};
+use ofdrw::{
+    BoxClear, BoxFloat, BoxLayer, BoxLayoutItem, BoxLayoutResult, BoxPlacement, LayoutBox,
+};
 use serde::Serialize;
 
 #[derive(Default, Deserialize)]
@@ -19,6 +21,14 @@ enum ClearRequest {
     Right,
     #[default]
     Both,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LayerRequest {
+    Background,
+    Body,
+    Foreground,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +56,7 @@ struct BoxRequest {
     offset: [f64; 2],
     #[serde(default)]
     placeholder: bool,
+    layer: Option<LayerRequest>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +95,11 @@ pub(super) fn parse_item(value: &serde_json::Value) -> Result<BoxLayoutItem, Str
             integrity: b.integrity,
             offset: b.offset,
             placeholder: b.placeholder,
+            layer: b.layer.map(|layer| match layer {
+                LayerRequest::Background => BoxLayer::Background,
+                LayerRequest::Body => BoxLayer::Body,
+                LayerRequest::Foreground => BoxLayer::Foreground,
+            }),
         }),
     })
 }

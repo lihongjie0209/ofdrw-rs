@@ -1,5 +1,10 @@
 # Unreleased
 
+- Add Background/Body/Foreground painting layers to measured boxes, automatic
+  text boxes and nested mixed containers in all language bindings. Inherit
+  nested layers, restore parent/default selection, reuse existing layers and
+  keep page geometry and transaction rollback unchanged.
+
 - Add Java-style dashed box borders to Rust, C, Python, Go and Node.js, shared
   by measured boxes, automatic text boxes and nested mixed containers. Keep
   border fragment geometry and atomic validation; verify paths against an

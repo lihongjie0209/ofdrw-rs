@@ -423,6 +423,8 @@ export interface LayoutBox {
   integrity?: boolean;
   offset?: [number, number];
   placeholder?: boolean;
+  /** Inherits the enclosing container layer; roots default to body. */
+  layer?: 'background' | 'body' | 'foreground' | null;
 }
 export type BoxLayoutItem = ({type: 'box'} & LayoutBox) | {type: 'line_break'} | {type: 'page_break'};
 export type BoxLayoutOptions = Pick<FlowTextOptions, 'page_size' | 'margins' | 'start'>;

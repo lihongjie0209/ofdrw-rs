@@ -134,17 +134,20 @@ impl OfdDocument {
                     height: line.height,
                     baseline: line.baseline - line.y,
                 };
-                match &p.lines {
-                    text_measurement::PreparedFlowLines::Plain(lines) => staged
-                        .draw_plain_flow_line(&lines[line_index], &p.preparation.spans, draw)?,
-                    text_measurement::PreparedFlowLines::Shaped(shaped) => staged
-                        .draw_shaped_flow_line(
-                            &shaped.lines[line_index],
-                            &shaped.group_widths[line_index],
-                            &p.preparation.spans,
-                            draw,
-                        )?,
-                }
+                staged.with_layout_layer(b.layout.layer, |staged| {
+                    match &p.lines {
+                        text_measurement::PreparedFlowLines::Plain(lines) => staged
+                            .draw_plain_flow_line(&lines[line_index], &p.preparation.spans, draw)?,
+                        text_measurement::PreparedFlowLines::Shaped(shaped) => staged
+                            .draw_shaped_flow_line(
+                                &shaped.lines[line_index],
+                                &shaped.group_widths[line_index],
+                                &p.preparation.spans,
+                                draw,
+                            )?,
+                    }
+                    Ok(())
+                })?;
             }
         }
         *self = staged;

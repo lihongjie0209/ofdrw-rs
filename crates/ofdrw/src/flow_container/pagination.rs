@@ -482,6 +482,17 @@ fn paint_children(
     pages: &[(usize, [f64; 2])],
     inherited: [f64; 2],
 ) -> Result<(), OfdError> {
+    document.with_layout_layer(plan.layout.layer, |document| {
+        paint_children_in_layer(document, plan, pages, inherited)
+    })
+}
+
+fn paint_children_in_layer(
+    document: &mut OfdDocument,
+    plan: &NodePlan<'_>,
+    pages: &[(usize, [f64; 2])],
+    inherited: [f64; 2],
+) -> Result<(), OfdError> {
     if plan.layout.placeholder {
         return Ok(());
     }

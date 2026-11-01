@@ -97,3 +97,40 @@ def test_container_controls_preserve_blank_pages_and_roundtrip(shape):
             with pytest.raises(OfdError):
                 doc.add_flow_containers(0, invalid, **request)
             assert doc.to_bytes() == encoded
+
+
+@pytest.mark.parametrize("shape", [False, True])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_container_layers_route_decorations_and_mixed_content_and_restore_defaults(shape, dynamic):
+    fixture = json.loads((FIXTURES / "flow-containers.json").read_text())
+    request = fixture["request"]
+    containers = request.pop("containers")
+    containers[0]["layout"]["layer"] = "foreground"
+    nested = containers[0]["children"][1]["container"]["layout"]
+    nested["layer"] = "background"
+    if dynamic:
+        nested["clear"] = "none"
+    with Document.new() as doc:
+        font = doc.add_embedded_font("DejaVu Sans", (FIXTURES / "dejavu-sans.ttf").read_bytes())
+        typography(containers[0]["children"], font, shape)
+        assert doc.add_flow_containers(0, containers, **request) == fixture["expected"]
+        for page in range(3):
+            objects = doc.page_objects(page)
+            assert all(p["layer_type"] in ["Foreground", "Background"] for p in objects)
+            assert all(p["layer_type"] == "Foreground" for p in objects if p["kind"] == "ImageObject")
+            for text in doc.page_text_objects(page):
+                value = "".join(code["text"] for code in text["codes"])
+                obj = next(p for p in objects if p["id"] == text["id"])
+                assert obj["layer_type"] == ("Background" if value in ["B", "C"] else "Foreground")
+        with Document.from_bytes(doc.to_bytes()) as reopened:
+            assert reopened.page_objects(0) == doc.page_objects(0)
+            assert reopened.page_png(0, 30)
+        before = doc.to_bytes()
+        for layer in ["overlay", False, 1, {}]:
+            bad = copy.deepcopy(containers)
+            bad[0]["layout"]["layer"] = layer
+            with pytest.raises(OfdError):
+                doc.add_flow_containers(0, bad, **request)
+            assert doc.to_bytes() == before
+        doc.add_text_object(0, "Body", [2, 2, 6, 3], size=2)
+        assert any(p["layer_type"] == "Body" for p in doc.page_objects(0))
