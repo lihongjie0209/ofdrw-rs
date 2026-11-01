@@ -1072,6 +1072,7 @@ export class Document {
   addPathPage(commands: string, boundary: [number, number, number, number], pageWidth?: number, pageHeight?: number, fill?: boolean, stroke?: boolean): void;
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
   measureFlowedSpans(documentIndex: number, spans: FlowSpan[], contentWidth: number, options?: FlowTextOptions): FlowTextMetrics;
+  addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;
   addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
   addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
   addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
@@ -1156,3 +1157,13 @@ export class Document {
 
 /** Automatically measured text children in a decorated box. Height is replaced. */
 export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTextOptions }
+
+/** Vertical children with measured height; nested floating rows remain unsupported. */
+export interface FlowContainer { layout: LayoutBox; children?: FlowContainerChild[]; gap?: number }
+export type FlowContainerChild =
+  | {type: 'paragraph'; spans: FlowSpan[]; style?: FlowTextOptions}
+  | ({type: 'image'; align?: 'left' | 'center' | 'right'} & TableImage)
+  | {type: 'container'; container: FlowContainer}
+  | {type: 'spacer'; height?: number}
+  | {type: 'table'; table: NestedTable; align?: 'left' | 'center' | 'right';
+      table_style?: {font_size?: number; line_height?: number; font_id?: string; repeat_header?: boolean}};

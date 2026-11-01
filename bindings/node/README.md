@@ -488,3 +488,42 @@ continuation come from the shared box options. The result contains all
 fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
 General nested child containers remain separate work. This API is available
 from the development source and is not included in published version 0.3.0.
+
+### Nested mixed containers (unreleased source API)
+
+```javascript
+const fs = require('node:fs');
+const { Document } = require('ofdrw-rs');
+const doc = Document.create();
+try {
+  const result = doc.addFlowContainers(0, [{
+    layout: {size: [40, 0], padding: [1, 1, 1, 1]}, gap: 1,
+    children: [
+      {type: 'paragraph', spans: [{text: 'Heading'}], style: {font_size: 4, line_height: 5}},
+      {type: 'container', container: {
+        layout: {size: [30, 0], border: [0.2, 0.2, 0.2, 0.2]},
+        children: [{type: 'paragraph', spans: [{text: 'Nested text'}],
+                    style: {font_size: 2, line_height: 3}}],
+      }},
+    ],
+  }]);
+  fs.writeFileSync('containers.ofd', doc.toBytes());
+} finally { doc.close(); }
+```
+
+Image children use `data_base64`; font IDs in nested styles are strings.
+TypeScript exports `FlowContainer` and the `FlowContainerChild` union.
+
+Each container has `layout`, optional `gap`, and `children`. Supported child
+types are paragraph, image, container, spacer and table. A table child has a
+`table` grid and optional `table_style` (`font_size`, `line_height`, `font_id`,
+`repeat_header`). Images accept explicit dimensions or intrinsic sizing and
+fit bounds. Spacer height defaults to zero. Returned root fragments and
+`next` / `Next` support continuation with shared `start` / `Start` options.
+
+Root containers support floating rows. Nested children remain vertical;
+nested clear must be `both` or omitted. Internal floating rows and repeated
+table headers remain pending; requesting repeated headers returns an error.
+The whole call rolls back on invalid children. Limits are eight container
+levels and 10,000 container/child entries. This source API is not included in
+published version 0.3.0.

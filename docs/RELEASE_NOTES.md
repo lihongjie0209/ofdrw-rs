@@ -55,6 +55,10 @@
   and draw selected row intervals without rebuilding full-table row positions.
   Repeated headers inside containers remain pending.
 
+- Expose nested mixed flow containers through C, Python, Go and Node.js with
+  shared validation, typed models, recursive image/font normalization,
+  reference geometry, continuation and atomic error tests, and usage examples.
+
 # v0.3.0
 
 ## Upgrade notes

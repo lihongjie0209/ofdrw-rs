@@ -9,6 +9,16 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  document.addFlowContainers(0, [{layout: {size: [20, 0]}, children: [
+    {type: 'paragraph', spans: [{text: 'A'}], style: {font_size: 2}},
+    {type: 'container', container: {layout: {size: [10, 0]}}},
+    {type: 'image', data_base64: '', format: 'PNG', intrinsic_size: true},
+    {type: 'table', table: {row_count: 1, column_widths: [10], cells: [{row: 0, column: 0, text: 'B'}]}, table_style: {font_size: 2, line_height: 3}},
+  ]}]);
+  // @ts-expect-error container children do not accept page break controls
+  document.addFlowContainers(0, [{layout: {size: [20, 0]}, children: [{type: 'page_break'}]}]);
+  // @ts-expect-error nested containers need their own layout
+  document.addFlowContainers(0, [{layout: {size: [20, 0]}, children: [{type: 'container', container: {}}]}]);
   document.addTextBoxes(0, [{layout: {size: [20, 0], padding: [1, 1, 1, 1]}, spans: [{text: 'Hi'}], style: {shape: true}}]);
   // @ts-expect-error text boxes require span children
   document.addTextBoxes(0, [{layout: {size: [20, 0]}}]);

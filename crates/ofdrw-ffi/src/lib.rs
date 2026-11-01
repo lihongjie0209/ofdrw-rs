@@ -2,6 +2,7 @@
 
 mod box_layout;
 mod flow_blocks;
+mod flow_container;
 mod text_box;
 mod text_measurement;
 
@@ -11137,6 +11138,73 @@ pub unsafe extern "C" fn ofd_add_text_boxes_json(
             .collect::<Result<Vec<_>, _>>()?;
         let result = document_mut(handle)?
             .add_text_boxes(document_index, &boxes, style)
+            .map_err(|e| e.to_string())?;
+        output_buffer(
+            serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
+/// Measure, paginate, decorate and draw nested mixed-content containers atomically.
+///
+/// JSON accepts containers plus optional page_size, margins and start.
+/// Containers have layout, optional gap and children: paragraph, image, table,
+/// container, or spacer. Layout heights are measured automatically.
+/// Returns the same fragment geometry and continuation as box layout.
+///
+/// # Safety
+/// `handle` must be live, `layout_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_flow_containers_json(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(input_string(layout_json)?).map_err(|e| e.to_string())?;
+        let object = input
+            .as_object()
+            .ok_or("flow container request must be an object")?;
+        for key in object.keys() {
+            if !matches!(
+                key.as_str(),
+                "containers" | "page_size" | "margins" | "start"
+            ) {
+                return Err(format!("unsupported flow container option: {key}"));
+            }
+        }
+        let mut style = ofdrw::BoxLayoutStyle {
+            start: parse_flow_start(&input)?,
+            ..Default::default()
+        };
+        if let Some(value) = input.get("page_size") {
+            style.page_size = serde_json::from_value(value.clone())
+                .map_err(|_| "page_size must contain two numbers")?;
+        }
+        if let Some(value) = input.get("margins") {
+            style.margins = serde_json::from_value(value.clone())
+                .map_err(|_| "margins must contain four numbers")?;
+        }
+        let values = input
+            .get("containers")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("containers must be an array")?;
+        if values.len() > 10_000 {
+            return Err("too many flow containers".into());
+        }
+        let mut count = 0;
+        let containers = values
+            .iter()
+            .map(|value| flow_container::parse_container(value, 0, &mut count))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = document_mut(handle)?
+            .add_flow_containers(document_index, &containers, style)
             .map_err(|e| e.to_string())?;
         output_buffer(
             serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
