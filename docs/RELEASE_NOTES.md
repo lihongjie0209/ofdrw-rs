@@ -1,99 +1,53 @@
-# Unreleased
+# v0.4.0
 
-- Add inline placeholder spans in Rust, C, Python, Go and Node.js with explicit or character-count widths,
-  shared measurement/wrapping/line-height handling and no painted objects or
-  font resources. Preserve grapheme boundaries, leading-indent replacement,
-  zero-width reservations and atomic errors. Allow shaped natural zero advances
-  and retain their glyph ink bounds without changing layout pen positions.
+## Upgrade notes
 
-- Retain natural zero font advances in plain styled text, including combining
-  marks and cross-span graphemes. Keep invalid tracking rejection and verify
-  zero-width measurement/flow through Rust, C, Python, Go and Node.js.
+Use matching 0.4.0 language bindings and native libraries. C ABI major version
+remains 1, with six additive JSON exports (332 total); older native libraries
+lack the new entry points. Python wheels and the npm tarball bundle matching
+libraries. Go uses `bindings/go/v0.4.0` and the corresponding native release ZIP.
 
-- Add fixed-page mixed containers in Rust, C, Python, Go and Node.js with absolute positions, optional
-  automatic height and retained explicit heights. Draw complete mixed content
-  on existing global pages, including overflow, floating nested rows, shaping,
-  tables, images, layers and root overlap. Preserve atomic rollback and source
-  page count; ignore page fillers as Java fixed-page rendering does. Return a
-  placement array and verify native bindings against independent Java fixtures.
+Rust `FlowSpan` adds `placeholder_width: Option<f64>`. Prefer `FlowSpan::new(text)`
+or `..FlowSpan::new(text)` in struct literals; use `None` for ordinary text.
+The new layout models provide defaults or constructors for their optional fields.
+Measurement widths are logical advances, including reserved placeholder widths,
+not glyph ink bounds. Measurement leaves document bytes and resources unchanged.
 
-- Add Background/Body/Foreground painting layers to measured boxes, automatic
-  text boxes and nested mixed containers in all language bindings. Inherit
-  nested layers, restore parent/default selection, reuse existing layers and
-  keep page geometry and transaction rollback unchanged.
+## Changes since v0.3.0
 
-- Add Java-style dashed box borders to Rust, C, Python, Go and Node.js, shared
-  by measured boxes, automatic text boxes and nested mixed containers. Keep
-  border fragment geometry and atomic validation; verify paths against an
-  independently rendered Java reference.
+- Add read-only span measurement with ordinary/shaped font metrics, grapheme
+  wrapping, per-line positions, baselines and logical total dimensions.
+- Add intrinsic image sizing at Java OFDRW's 5 pixels/mm and shrinking-only
+  aspect-preserving fitting, shared by flow images and table-cell images.
+- Add atomic ordered flow blocks for paragraphs, images, paginated tables,
+  spacers and page breaks, returning global page indexes and a continuation.
+- Add measured box layout with floating rows, clear rules, independent edges,
+  geometry and continuation. Rust content-range policies preserve indivisible
+  measured lines through page cuts; direct range policies remain Rust-only.
+- Add automatic text boxes and nested mixed containers. Share measurement and
+  drawing, protect complete lines/paragraphs and merged table-row groups,
+  paginate floating columns independently, and repeat table headers safely.
+- Add fixed-page mixed containers at absolute positions on existing pages,
+  retaining positive explicit heights and permitting overflow without adding
+  pages. Preserve sequential root painting, inherited layers and atomic rollback.
+- Add Java-compatible row breaks and page-area fillers to mixed containers,
+  dashed box borders, and inherited Background/Body/Foreground painting layers.
+- Add inline placeholder spans with explicit or character-count widths, reserved
+  line heights and no painted objects or font resources. Preserve grapheme
+  boundaries, leading-indent replacement and zero-width reservations. Go exposes
+  `NewPlaceholderSpan`; all JSON span inputs accept `placeholder_width`.
+- Retain natural zero glyph advances in ordinary and shaped styled text. Expand
+  ink bounds while compensating drawing coordinates, preserving pen positions
+  and baselines, including stroke and simulated bold/italic. Invalid tracking
+  and nonfinite geometry still fail atomically.
+- Expose these layout APIs through Rust, C, Python, Go and Node.js, with typed
+  Go/TypeScript models and per-language usage examples. Add independent Java
+  geometry fixtures, font-table and pixel references, round trips and rollback
+  tests across the shared writers and bindings.
 
-- Add Java-compatible `BR` and `PageAreaFiller` controls to mixed containers
-  in Rust, C, Python, Go and Node.js. Preserve explicit blank pages, ignore
-  empty row breaks, reset row gaps after fills, and reject page-splitting
-  complete containers atomically. Independent Java and shared language fixtures
-  cover leading, trailing, consecutive and nested controls.
-
-- Add atomic mixed vertical flow for paragraphs, images, paginated tables,
-  spacers and explicit page breaks. Return used global page indexes and a
-  reusable continuation position; preserve blank lines, canvas origins,
-  merged rows and repeated headers. Paragraph typography overrides inherit
-  shared page geometry. Rust, C, Python, Go and Node.js expose the operation.
-- Add mixed-flow API examples, cross-language fixtures, rollback tests,
-  TypeScript checks and explicit Node.js CI test inclusion.
-- Add the Rust measured-box layout foundation: Java-style floating rows, clear
-  rules, independent margin/border/padding edges, fragment coordinates, complete
-  boxes, placeholders and atomic decoration drawing. Independent Java-generated
-  coordinates and Rust rendering tests cover the implementation. Automatic
-  content measurement and general child containers remain pending.
-- Expose measured-box layout through C, Python, Go and Node.js, including all
-  fragment rectangles, source offsets and continuation positions. Add strict
-  input validation, TypeScript models and shared cross-language fixtures.
-
-- Add read-only flowed-span measurement in Rust, C, Python, Go and Node.js.
-  Share font, wrapping and shaping preparation with drawing, validate shaped
-  glyph mappings, and return per-line positions, baselines and logical total
-  dimensions. Measured height can size decorated text boxes. Independent font
-  table fixtures and rendering comparisons cover ordinary and shaped text.
-
-- Add Rust `TableCellImage::from_intrinsic` using Java OFDRW’s 5 pixels/mm
-  conversion, plus aspect-preserving `fit_within` that never enlarges images.
-  Validate encoded data before sizing; preserve original bytes and support
-  the existing image formats, including JPEG 2000 and JBIG2.
-
-- Expose intrinsic image sizing and aspect-preserving fit bounds through C,
-  Python, Go and Node.js flow and table image requests, with cross-language
-  geometry and rollback tests.
-
-- Add Rust box content ranges for line-aware page cuts. Measured text lines
-  can become indivisible intervals; floating columns retain independent
-  source offsets while decoration bands remain consumed once. Validate
-  ranges and reject unfit lines atomically.
-
-- Add Rust automatic text boxes: measure and clamp widths before wrapping,
-  protect whole lines or paragraphs, decorate fragments and draw styled or
-  shaped spans atomically. Measurement and box drawing share prepared lines;
-  ordinary flow and box text share painting helpers.
-
-- Expose automatic text boxes through C, Python, Go and Node.js, returning
-  complete fragment geometry and continuation. Add shared reference fixtures,
-  shaped/plain rendering tests, rollback checks, TypeScript and usage examples.
-
-- Add Rust vertical mixed flow containers with recursive decorated children,
-  paragraph and image children, safe content page cuts, gap/spacing and
-  atomic validation. Root boxes retain floating rows.
-
-- Add paginated table children inside Rust flow containers, preserving complete
-  merged-row groups and reusing existing cell drawing. Cache cell ordering
-  and draw selected row intervals without rebuilding full-table row positions.
-
-- Expose nested mixed flow containers through C, Python, Go and Node.js with
-  shared validation, typed models, recursive image/font normalization,
-  reference geometry, continuation and atomic error tests, and usage examples.
-
-- Add planned nested floating rows and repeated table headers inside mixed
-  containers. Columns paginate independently, complete containers measure
-  maximum row heights, and headers stay with merged body groups. Preserve
-  start-page origins and stage all planning/drawing atomically.
+The project remains a subset of Java OFDRW. Full layout, PDF conversion,
+certificate trust and OFD-A conversion still have qualified limits; see
+[the feature reference](FEATURES.md) for the supported behavior.
 
 # v0.3.0
 

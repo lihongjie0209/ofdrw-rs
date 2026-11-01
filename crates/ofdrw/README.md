@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 See the [repository](https://github.com/lihongjie0209/ofdrw-rs) for language
 bindings, release assets, supported operations, testing and limitations.
 
-## Mixed flow (unreleased source feature)
+## Mixed flow (since 0.4.0)
 
 ```rust
 use ofdrw::{FlowBlock, FlowDocumentStyle, OfdDocument};
@@ -41,7 +41,7 @@ The same flow supports sized images, paginated grids, and explicit page breaks.
 A failed later block rolls back the complete call. See the repository feature
 reference for supported layout behavior and limits.
 
-### Inline placeholders (development)
+### Inline placeholders (since 0.4.0)
 
 `FlowSpan::placeholder(width, height)` reserves an indivisible inline rectangle
 without painting text, glyphs or decorations. Width zero is allowed. Height
@@ -66,6 +66,6 @@ fn main() -> Result<(), ofdrw::OfdError> {
 }
 ```
 
-This input is new development functionality after 0.3.0. C/Python/Go/Node.js
+This input is available since 0.4.0. C/Python/Go/Node.js
 accept `placeholder_width`, empty `text` and a `font_size` height in span inputs. See the feature reference for validation and
 leading-indent rules.
