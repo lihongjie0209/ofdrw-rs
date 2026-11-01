@@ -422,6 +422,8 @@ int32_t ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, con
 /* Measured box rows return {pages, placements, next}; all distances are millimeters. */
 int32_t ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
+/* Fixed mixed containers on one existing global page; returns a placement array. */
+int32_t ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 /* Read-only logical paragraph metrics; requires spans and content_width in millimeters. */
 int32_t ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);

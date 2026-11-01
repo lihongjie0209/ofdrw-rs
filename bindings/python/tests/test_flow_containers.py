@@ -134,3 +134,56 @@ def test_container_layers_route_decorations_and_mixed_content_and_restore_defaul
             assert doc.to_bytes() == before
         doc.add_text_object(0, "Body", [2, 2, 6, 3], size=2)
         assert any(p["layer_type"] == "Body" for p in doc.page_objects(0))
+
+
+@pytest.mark.parametrize("case", json.loads((FIXTURES / "fixed-containers-java.json").read_text())["cases"], ids=lambda c: c["name"])
+def test_fixed_container_geometry_matches_java(case):
+    with Document.new() as doc:
+        doc.add_blank_page(20, 15)
+        source = copy.deepcopy(case["input"])
+        result = doc.add_fixed_containers(0, [source])
+        assert result[0]["allocation"] == case["allocation"]
+        assert result[0]["page_index"] == 0
+        assert result[0]["first"] and result[0]["last"]
+        assert source == case["input"]
+        with Document.from_bytes(doc.to_bytes()) as reopened:
+            assert reopened.page_png(0, 30)
+
+
+@pytest.mark.parametrize("shape", [False, True])
+def test_fixed_mixed_content_overflows_one_page_and_rolls_back(shape):
+    root = json.loads((FIXTURES / "flow-containers.json").read_text())["request"]["containers"][0]
+    root["layout"]["size"][1] = 2
+    with Document.new() as doc:
+        doc.add_blank_page(20, 15)
+        font = doc.add_embedded_font("DejaVu Sans", (FIXTURES / "dejavu-sans.ttf").read_bytes())
+        typography(root["children"], font, shape)
+        source = [{"position": [-1, 2], "container": root}]
+        before = copy.deepcopy(source)
+        result = doc.add_fixed_containers(0, source)
+        assert result[0]["content_box"] == [-0.25, 2.75, 12, 2]
+        assert source == before
+        assert doc.page_text(0) == ["A", "B", "C", "R1", "R2", "R3", "Z"]
+        assert len(doc.page_images(0)) == 1
+        with Document.from_bytes(doc.to_bytes()) as reopened:
+            assert reopened.page_text(0) == doc.page_text(0)
+            assert reopened.page_png(0, 30)
+        encoded = doc.to_bytes()
+        invalid = {"position": [0, 0], "container": {"layout": {"size": [4, 3]}, "children": [
+            {"type": "image", "data": b"bad", "format": "PNG", "width": 1, "height": 1}]}}
+        for bad in [invalid, {"position": [0], "container": root},
+                    {"position": [0, 0], "container": {"layout": {"size": [4, -1]}}}]:
+            with pytest.raises(OfdError):
+                doc.add_fixed_containers(0, [*source, bad])
+            assert doc.to_bytes() == encoded
+        with pytest.raises(ValueError):
+            doc.add_fixed_containers(0, [{"position": [float("nan"), 0], "container": root}])
+        with pytest.raises(IndexError):
+            doc.add_fixed_containers(-1, source)
+        with pytest.raises(TypeError):
+            doc.add_fixed_containers(0, {})
+        with pytest.raises(OfdError):
+            doc.add_fixed_containers(99, source)
+        assert doc.add_fixed_containers(0, []) == []
+    with pytest.raises(OfdError):
+        doc.add_fixed_containers(0, source)

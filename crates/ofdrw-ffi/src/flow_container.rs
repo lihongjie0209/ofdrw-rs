@@ -13,6 +13,42 @@ fn fields(value: &serde_json::Value, allowed: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn parse_fixed(value: &serde_json::Value) -> Result<Vec<ofdrw::FixedContainer>, String> {
+    fields(value, &["containers"])?;
+    let values = value
+        .get("containers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("containers must be an array")?;
+    if values.len() > 10_000 {
+        return Err("too many fixed containers".into());
+    }
+    let mut count = 0;
+    values
+        .iter()
+        .map(|value| {
+            fields(value, &["position", "container"])?;
+            let position = serde_json::from_value(
+                value
+                    .get("position")
+                    .ok_or("fixed container position is required")?
+                    .clone(),
+            )
+            .map_err(|_| "position must contain two numbers")?;
+            let container = parse_container(
+                value
+                    .get("container")
+                    .ok_or("fixed container content is required")?,
+                0,
+                &mut count,
+            )?;
+            Ok(ofdrw::FixedContainer {
+                position,
+                container,
+            })
+        })
+        .collect()
+}
+
 pub(super) fn parse_container(
     value: &serde_json::Value,
     depth: usize,
@@ -176,6 +212,140 @@ mod tests {
             for value in array {
                 typography(value, font, shape);
             }
+        }
+    }
+
+    #[test]
+    fn fixed_container_parser_rejects_missing_fields_and_enforces_shared_limits() {
+        for request in [
+            serde_json::json!({"containers":[{}]}),
+            serde_json::json!({"containers":[{"position":[0,0]}]}),
+            serde_json::json!({"containers":[{"position":[0,0],"container":false}]}),
+            serde_json::json!({"containers":[{"position":[0,0],"container":{"layout":{"size":[4,3]},"unknown":1}}]}),
+        ] {
+            assert!(parse_fixed(&request).is_err(), "{request}");
+        }
+        let root = serde_json::json!({"position":[0,0],"container":{"layout":{"size":[4,3]}}});
+        assert!(parse_fixed(&serde_json::json!({"containers":vec![root.clone();10_001]})).is_err());
+        assert_eq!(
+            parse_fixed(&serde_json::json!({"containers":vec![root.clone();10_000]}))
+                .unwrap()
+                .len(),
+            10_000
+        );
+        let mut nested = root["container"].clone();
+        for _ in 0..8 {
+            nested = serde_json::json!({"layout":{"size":[4,3]},"children":[{"type":"container","container":nested}]});
+        }
+        assert!(parse_fixed(
+            &serde_json::json!({"containers":[{"position":[0,0],"container":nested}]})
+        )
+        .is_err());
+        let mut with_child = root;
+        with_child["container"]["children"] = serde_json::json!([{"type":"spacer","height":1}]);
+        assert!(parse_fixed(&serde_json::json!({"containers":vec![with_child;5_001]})).is_err());
+    }
+
+    #[test]
+    fn fixed_container_ffi_matches_java_geometry_and_checks_all_guards_atomically() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/fixed-containers-java.json"
+        ))
+        .unwrap();
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        unsafe {
+            document_mut(handle)
+                .unwrap()
+                .add_blank_page(20., 15.)
+                .unwrap();
+        }
+        for case in fixture["cases"].as_array().unwrap() {
+            let request = serde_json::json!({"containers":[case["input"].clone()]});
+            let input = CString::new(request.to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_eq!(
+                unsafe { ofd_add_fixed_containers_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            let result: serde_json::Value = serde_json::from_slice(unsafe {
+                std::slice::from_raw_parts(output.data, output.len)
+            })
+            .unwrap();
+            unsafe {
+                ofd_buffer_free(output);
+            }
+            assert_eq!(
+                result[0]["allocation"], case["allocation"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(result[0]["page_index"], 0);
+            assert_eq!(
+                unsafe { document_ref(handle).unwrap().pages().unwrap().len() },
+                1
+            );
+        }
+        let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+        let valid = serde_json::json!({"position":[1,2],"container":{"layout":{"size":[4,3]}}});
+        let requests = [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"containers":false}),
+            serde_json::json!({"containers":[],"start":null}),
+            serde_json::json!({"containers":[{"position":[1],"container":{"layout":{"size":[4,3]}}}]}),
+            serde_json::json!({"containers":[{"position":[1,2],"container":{"layout":{"size":[4,3]}},"extra":true}]}),
+            serde_json::json!({"containers":[valid.clone(),{"position":[0,0],"container":{"layout":{"size":[4,-1]}}}]}),
+            serde_json::json!({"containers":[valid.clone(),{"position":[0,0],"container":{"layout":{"size":[4,3]},"children":[{"type":"image","data_base64":"AA==","format":"PNG","width":1,"height":1}]}}]}),
+        ];
+        for request in requests {
+            let input = CString::new(request.to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_ne!(
+                unsafe { ofd_add_fixed_containers_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            assert!(output.data.is_null());
+            assert_eq!(
+                unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                before
+            );
+        }
+        let input = CString::new(serde_json::json!({"containers":[valid]}).to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_ne!(
+            unsafe { ofd_add_fixed_containers_json(handle, 0, input.as_ptr(), ptr::null_mut()) },
+            0
+        );
+        assert_ne!(
+            unsafe {
+                ofd_add_fixed_containers_json(ptr::null_mut(), 0, input.as_ptr(), &mut output)
+            },
+            0
+        );
+        assert_ne!(
+            unsafe { ofd_add_fixed_containers_json(handle, 99, input.as_ptr(), &mut output) },
+            0
+        );
+        assert_ne!(
+            unsafe { ofd_add_fixed_containers_json(handle, 0, ptr::null(), &mut output) },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+            before
+        );
+        unsafe {
+            ofd_close(handle);
         }
     }
 

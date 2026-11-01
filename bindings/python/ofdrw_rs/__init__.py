@@ -318,6 +318,7 @@ _ffi.cdef(
     int ofd_add_table_json(OfdDocument *handle, size_t document_index, const char *table_json, OfdBuffer *output);
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
+    int ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
@@ -4362,6 +4363,49 @@ class Document:
         _check(_lib.ofd_add_box_layout_json(
             self._handle, document_index,
             _utf8(json.dumps({**options, "items": items}, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def add_fixed_containers(self, page_index: int, containers: list[dict]) -> list[dict]:
+        """Draw position/container entries on an existing page, returning placements.
+
+        Positions use absolute page coordinates. Positive heights are retained;
+        zero heights measure content. Overflow stays on the same page. Invalid
+        later content rolls back the entire call. Image data accepts bytes.
+        """
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if not isinstance(containers, list):
+            raise TypeError("containers must be a list")
+
+        def serialize(value, depth=0):
+            if depth > 64:
+                raise ValueError("flow content nesting is too deep")
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    if key in ("font_id", "language") and item is None:
+                        continue
+                    if key == "data" and isinstance(item, (bytes, bytearray, memoryview)):
+                        result["data_base64"] = base64.b64encode(item).decode("ascii")
+                    elif key == "font_id" and item is not None:
+                        result[key] = str(item)
+                    else:
+                        result[key] = serialize(item, depth + 1)
+                return result
+            if isinstance(value, (list, tuple)):
+                return [serialize(item, depth + 1) for item in value]
+            return value
+
+        payload = serialize({"containers": containers})
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_add_fixed_containers_json(
+            self._handle, page_index,
+            _utf8(json.dumps(payload, allow_nan=False)), output,
         ))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))

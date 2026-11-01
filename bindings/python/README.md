@@ -230,3 +230,30 @@ pagination and to existing pages with nonzero canvas origins.
 document.add_box_layout(0, [{"type": "box", "size": [40, 10],
     "background_color": [240, 240, 240], "layer": "background"}])
 ```
+
+### Fixed page containers (development)
+
+Use the development bindings with their matching native library; this API follows 0.3.0.
+`add_fixed_containers` draws on an existing global page and returns a placement list:
+
+```python
+from pathlib import Path
+from ofdrw_rs import Document
+
+with Document.new() as doc:
+    doc.add_blank_page(80, 60)
+    placements = doc.add_fixed_containers(0, [{
+        "position": [10, 20],
+        "container": {
+            "layout": {"size": [40, 0]},
+            "children": [{"type": "paragraph", "spans": [{"text": "Hello"}]}],
+        },
+    }])
+    Path("fixed.ofd").write_bytes(doc.to_bytes())
+```
+
+Positions are absolute OFD millimeters. Zero height measures the content; a positive
+height controls allocation and decorations while children may overflow. The call
+never adds pages. It supports the same nested text/image/table content, offsets,
+layers and placeholders as flow containers. Page-area fillers are ignored. Invalid
+later content rolls back the entire call. Images accept bytes in `data`.

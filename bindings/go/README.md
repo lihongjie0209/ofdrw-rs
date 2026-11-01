@@ -262,3 +262,28 @@ _, err = document.AddBoxLayout(0, []ofdrw.BoxLayoutItem{
 }, ofdrw.DefaultBoxLayoutStyle())
 if err != nil { log.Fatal(err) }
 ```
+
+### Fixed page containers (development)
+
+Use development bindings with their matching native library; this API follows 0.3.0.
+
+```go
+if err := doc.AddBlankPage(80, 60); err != nil { return err }
+placements, err := doc.AddFixedContainers(0, []ofdrw.FixedContainer{{
+    Position: [2]float64{10, 20},
+    Container: ofdrw.FlowContainer{
+        Layout: ofdrw.LayoutBox{Size: [2]float64{40, 0}},
+        Children: []ofdrw.FlowContainerChild{{
+            Type: "paragraph", Spans: []ofdrw.FlowSpan{{Text: "Hello"}},
+        }},
+    },
+}})
+if err != nil { return err }
+_ = placements // []ofdrw.BoxPlacement
+```
+
+Positions are absolute OFD millimeters on an existing global page. Zero height
+measures content; positive heights control allocation and decoration while children
+may overflow. No pages are added. Nested text/images/tables, offsets, layers and
+placeholders follow flow-container rules. Page-area fillers are ignored. Invalid
+later content rolls back the whole call. Images accept `Data []byte`.

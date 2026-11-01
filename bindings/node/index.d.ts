@@ -1076,6 +1076,8 @@ export class Document {
   addPathPage(commands: string, boundary: [number, number, number, number], pageWidth?: number, pageHeight?: number, fill?: boolean, stroke?: boolean): void;
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
   measureFlowedSpans(documentIndex: number, spans: FlowSpan[], contentWidth: number, options?: FlowTextOptions): FlowTextMetrics;
+  /** Draw absolute mixed containers on an existing page; never adds pages. */
+  addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];
   addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;
   addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
   addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
@@ -1163,6 +1165,8 @@ export class Document {
 export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTextOptions }
 
 /** Mixed children with measured height, nested floating rows and repeated table headers. */
+/** Absolute allocation position and mixed content; positive heights are retained. */
+export interface FixedContainer { position: [number, number]; container: FlowContainer }
 export interface FlowContainer { layout: LayoutBox; children?: FlowContainerChild[]; gap?: number }
 export type FlowContainerChild =
   | {type: 'paragraph'; spans: FlowSpan[]; style?: FlowTextOptions}

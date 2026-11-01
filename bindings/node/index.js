@@ -307,6 +307,7 @@ const api = {
   addFlowedText: library.func('int ofd_add_flowed_text_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowedSpans: library.func('int ofd_add_flowed_spans_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowBlocks: library.func('int ofd_add_flow_blocks_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
+  addFixedContainers: library.func('int ofd_add_fixed_containers_json(OfdDocument handle, size_t page_index, str layout, _Out_ OfdBuffer *output)'),
   addFlowContainers: library.func('int ofd_add_flow_containers_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addTextBoxes: library.func('int ofd_add_text_boxes_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addBoxLayout: library.func('int ofd_add_box_layout_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
@@ -1666,6 +1667,17 @@ class Document {
     if (!Array.isArray(spans)) throw new TypeError('spans must be an array');
     const request = { ...optionsObject(options), spans, content_width: size(contentWidth, 'contentWidth') };
     return this._json(api.measureFlowedSpans, index(documentIndex, 'documentIndex'), JSON.stringify(request));
+  }
+
+  addFixedContainers(pageIndex, containers) {
+    if (!Array.isArray(containers)) throw new TypeError('containers must be an array');
+    const payload = JSON.stringify({containers}, (_key, value) => {
+      if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new RangeError('box layout numbers must be finite');
+      }
+      return value;
+    });
+    return this._json(api.addFixedContainers, index(pageIndex, 'pageIndex'), payload);
   }
 
   addFlowContainers(documentIndex, containers, options = {}) {

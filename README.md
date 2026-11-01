@@ -184,6 +184,15 @@ PDF 导入支持批注的正常外观流（`AP/N`），包括 Widget、FreeText
 各语言继续使用现有 PDF 导入、导出接口；交互表单行为和
 导出限制见[功能说明](docs/FEATURES.md#pdf-导入与兼容范围)。
 
+## 固定页面混合容器（开发版）
+
+开发版还提供在已有页面上按绝对坐标绘制混合容器的接口：Rust
+`add_fixed_containers`、Python `add_fixed_containers`、Go `AddFixedContainers`
+和 Node.js `addFixedContainers`。支持文本、图片、表格和嵌套盒子，返回各容器的
+几何位置，保持页面数不变。此接口尚未包含在 0.3.0 中，须使用同一提交构建的
+绑定和原生库；各语言 README 提供用法，详见
+[固定页面混合容器](docs/FEATURES.md#固定页面混合容器)。
+
 ## 测试与发布
 
 CI 在 Linux、macOS、Windows 的 x64/ARM64 上运行 Rust 和三个语言绑定的测试，
