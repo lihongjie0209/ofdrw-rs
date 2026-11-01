@@ -1,72 +1,42 @@
-# Unreleased
+# v0.3.0
 
-- Extend existing-page continuation to dense and merged-cell tables, retaining
-  repeated headers with complete row groups and supporting nonzero canvas origins.
+## Upgrade notes
 
-- Add optional existing-page continuation to plain, styled and shaped text flow,
-  with canvas-origin handling, normal continuation margins and atomic validation.
+Rust `FlowTextStyle` and `TableStyle` add `start: Option<FlowStart>`. Use
+`..Default::default()` in struct literals or set `start: None` to retain new-page
+layout. The C ABI version remains 1. Use matching versions of language wrappers
+and native libraries.
 
-- Bake mapped TrueType font scaling into glyph geometry so it does not scale
-  stroke widths or paint coordinates. Text rendering also retains inherited
-  cap/join/miter and dash parameters. Independent PDF rasters cover filled,
-  affine, reflected, solid-stroked and dashed glyphs.
+## Changes since v0.2.0
 
-- Import empty ActualText over painted embedded glyphs as separate native vector
-  paths, keeping paint order, opacity, affine placement and clipping without
-  retaining the suppressed text. Add independent font/transform/stroke rasters
-  and OFD/PDF round trips. Fix nested raster layer coordinate budgets while preserving viewport clips
-  and fractional edge coverage.
-
-- Add annotation graphic action reading, appending, removal and rectangular
-  trigger-region editing in Rust, C, Python, Go and Node.js. Supports ordered
-  CLICK URI, page, bookmark and attachment targets, with same-document checks
-  and atomic rejection of invalid edits.
-
-- Preserve native Link annotation action sequences and overlapping rectangular
-  click regions. Default regions use each owning graphic's boundary within the
-  appearance. Split PDF links paint the original artwork once, retaining
-  transparency and annotation order; rectangular hit areas stay precise when
-  the appearance frame is larger. Includes edited imported sequences, native
-  OFD/PDF round trips and Python/Go/Node integration tests.
-
-- Preserve native page/template URI, GoTo and bookmark click sequences when
-  exporting PDF. Shared trigger regions use Next actions; different rectangular
-  regions are partitioned so overlaps execute all active actions in order.
-  Multiple Areas of one action form a union. Disjoint attachment activation
-  remains independent. Explicit work/payload limits and unsupported mixed
-  geometry errors replace silently dropping later supported actions.
-
-- Preserve PDF Link `Next` action trees containing URI and local GoTo actions.
-  Native CLICK actions retain depth-first execution order, repeated shared
-  actions and trigger regions. OFD/PDF round trips preserve the full sequence;
-  the PDF writer emits a flat Next array. Cycles, unsupported children, mouse
-  mapping and incompatible sequence edits return errors. Limits cover nesting,
-  expanded action count and total URI payload. Tests exercise mixed trees,
-  shared actions, precise quadrilaterals and Python/Go/Node round trips.
-
-- Resolve PDF relative URI links against catalog `URI/Base`, retaining their
-  absolute target through OFD and PDF round trips. Includes indirect entries,
-  Unicode/UTF-16 strings, path merging, queries, fragments, authority-relative
-  paths and empty references. Absolute links and links without a base retain
-  their existing behavior. Invalid bases and bounded-resolution failures are
-  reported explicitly. Covered by Rust and Python/Go/Node integration tests.
-
-- Reject unsupported PDF `ActualText` scopes containing only composite objects
-  before handling empty replacement text. Previously an empty replacement could
-  return success while leaving the composite's original text intact.
-
-- Import empty PDF `ActualText` over nonpainting native text without retaining
-  the suppressed text in extraction. Preserve intervening graphics and the
-  following PDF text cursor; painted-text empty replacements still return an error.
-
-- Import shorter nonempty PDF ActualText across consecutive compatible text
-  runs. Native coalescing retains all original glyphs and positions, including
-  affine/reflected text, TrueType, CFF and CID CFF font matrices. Outline bounds
-  protect existing clipping, repeated bounds are cached, and glyph/outline work
-  is limited. Independent original-PDF rasters, native/PDF round trips,
-  external text extraction and Python/Go/Node integration tests cover the path.
-  Empty replacements, mixed paint styles, explicit text clips and interleaved
-  paints remain outside this coalescing path.
+- Continue plain, styled and shaped text on an existing page. Tables support
+  the same starting position, including dense and merged-cell input. Canvas
+  origins, document ownership and normal continuation margins are retained;
+  repeated headers stay with the first complete body row group. Invalid edits
+  leave the source unchanged. Rust, C, Python, Go and Node.js expose the options.
+- Bake mapped TrueType font scaling into glyph geometry, preventing it from
+  scaling stroke widths or paint coordinates. Text rendering also resolves
+  inherited cap, join, miter and dash parameters. Independent PDF rasters cover
+  ordinary, affine, reflected, solid-stroked and dashed glyphs and round trips.
+- Import empty PDF ActualText over nonpainting runs without retaining suppressed
+  text. Painted embedded TrueType/CFF runs with complete glyph mappings become native vector composites,
+  preserving paint order, opacity, clipping, font matrices and paint placement.
+  Shorter replacements across compatible consecutive runs retain original glyph
+  mappings and positions. Composite-only scopes, incompatible runs and invalid
+  glyph programs return explicit errors. Glyph, outline and payload budgets
+  bound conversion work.
+- Import PDF Link Next action trees and resolve relative URI targets against
+  catalog URI/Base. Native CLICK sequences retain supported URI, local page,
+  bookmark and attachment targets, execution order and rectangular trigger
+  regions. PDF export preserves overlapping regions and paints link appearances
+  once. Cycles, unsupported actions and incompatible geometry return errors.
+- Read, append, remove and edit trigger regions of annotation graphic actions
+  through every language binding, with same-document target validation and
+  atomic rejection of invalid edits.
+- Fix nested raster layer and mask coordinate budgets and use independent
+  pattern-tile budgets, preserving fractional viewport clipping. Published
+  renderer and SVG-to-PDF dependencies contain the fixes. Tests cover native
+  OFD/PDF round trips, independent original-PDF rasters and language interfaces.
 
 # v0.2.0
 

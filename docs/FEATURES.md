@@ -243,7 +243,7 @@ write the same appearance in a `Stamp` annotation; C JSON accepts
 or composite graphics to an existing appearance and return their new object IDs.
 The edit is atomic; missing resources and invalid geometry leave the document
 unchanged.
-Unreleased main provides `annotation_object_actions()`,
+Version 0.3.0 provides `annotation_object_actions()`,
 `add_annotation_object_action()`, `remove_annotation_object_action()` and
 `set_annotation_object_action_regions()` in Rust/Python. Go exposes
 `AnnotationObjectActions`, `AddAnnotationObjectAction`,
@@ -261,7 +261,7 @@ same document body. Rectangles use `[x, y, width, height]` in appearance
 coordinates; an empty list restores the owning graphic's default trigger area.
 Indices are zero-based. Invalid edits and edits to signed content are rejected
 without changing the package. Nested PageBlocks and existing namespace prefixes
-are preserved. Published 0.2.0 packages do not yet include these APIs.
+are preserved. These APIs require 0.3.0 or later.
 
 `annotation_objects(page_index, annotation_id)` (Rust/Python),
 `AnnotationObjects()` (Go), `annotationObjects()` (Node.js), and
@@ -711,7 +711,7 @@ receive blank pages without requiring a font resource.
 
 ## 文本流式布局
 
-**Unreleased:** `FlowTextStyle.start = Some(FlowStart { page_index, y })` starts
+**v0.3.0:** `FlowTextStyle.start = Some(FlowStart { page_index, y })` starts
 plain, styled or shaped flow on an existing page instead of always appending a
 new one. Python uses `start={"page_index": 0, "y": 40}`, Go uses
 `Start: &FlowStart{PageIndex: 0, Y: 40}`, and Node.js/C JSON accepts the same
@@ -805,7 +805,7 @@ content.
 
 ## 表格与嵌套布局
 
-**Unreleased:** Tables accept the same optional `start` position as text flow
+**v0.3.0:** Tables accept the same optional `start` position as text flow
 (`TableStyle.start` in Rust, `Start` in Go, `start` in Python/Node.js/C JSON).
 Both row matrices and positioned cells may start on an existing page. Canvas
 sizes must match `page_size`, and the starting coordinate follows the text-flow
@@ -1013,7 +1013,7 @@ more rectangular trigger areas for an existing action; an empty list removes
 its explicit `Region`. The C entry point is
 `ofd_set_page_object_action_regions_json()`, taking an array of `[x,y,width,height]`
 rectangles in page millimeters. Action readers return each Area path and its
-commands. **Unreleased main:** PDF export preserves ordered supported `CLICK`
+commands. **v0.3.0:** PDF export preserves ordered supported `CLICK`
 actions on visible page and template graphic objects. Actions sharing a trigger
 region use a PDF `Next` sequence. Different rectangular regions are partitioned
 into click areas: an overlap executes every active action once in native order,
@@ -1035,7 +1035,7 @@ accurately by a PDF link quadrilateral. Link annotation actions also use
 explicit Regions when present. Template actions produce links on each page
 that references the template, in the same layer order as rendering.
 
-**Unreleased main:** Native Link annotations preserve all supported click
+**v0.3.0:** Native Link annotations preserve all supported click
 actions using the same sequence and rectangular partitioning rules. An action
 without `Region` uses its owning graphic's `Boundary`, translated from appearance
 coordinates to page coordinates. Different graphics in one appearance therefore
@@ -1110,7 +1110,7 @@ Mapped TrueType and CFF glyphs bake their font matrix into outline geometry,
 keeping stroke widths in the owning object's coordinate units. Text paint
 resolves cap/join/miter and dash parameters from the object and its DrawParam.
 Independent PDF raster tests cover ordinary, affine, reflected, solid and dashed
-mapped glyphs; OFD save/reopen retains the raster. These changes are unreleased.
+mapped glyphs; OFD save/reopen retains the raster. These changes are included in 0.3.0.
 
 
 Standalone SVG previews carry visible embedded TrueType/OpenType sfnt fonts as
@@ -1482,7 +1482,7 @@ an optional byte-order mark, or UTF-16BE/UTF-16LE strings with a byte-order
 mark, including non-ASCII paths. Malformed encodings and characters invalid
 in XML fail import.
 
-**Unreleased main:** Relative URI actions resolve against the catalog's
+**v0.3.0:** Relative URI actions resolve against the catalog's
 `URI/Base`, including indirect dictionaries and base strings, using
 [RFC 3986 reference resolution](https://www.rfc-editor.org/rfc/rfc3986#section-5.2).
 Unicode paths, query-only and fragment-only targets, authority-relative paths,
@@ -1768,7 +1768,7 @@ the OFD annotation's generated date unchanged.
 
 PDF `Link` annotations with URI or direct page `GoTo` actions import as OFD
 links, including page rotation, `UserUnit`, print, and visibility flags.
-**Unreleased main:** Link action dictionaries also import `Next` trees of URI
+**v0.3.0:** Link action dictionaries also import `Next` trees of URI
 and local `GoTo` actions, including dictionary/array references and shared
 actions. The tree is expanded in depth-first execution order; a shared action
 is retained at every occurrence. Each native CLICK action keeps the original
@@ -2153,7 +2153,7 @@ positions are approximate because ActualText supplies no such positions.
 Graphic-only scopes add nonpainting semantic text. Nested replacements use the
 outer scope. The [replacement-text rule](https://pdf-issues.pdfa.org/32000-2-2020/clause14.html)
 applies to the marked sequence rather than independently to each glyph.
-**Unreleased main:** Shorter nonempty replacements also accept consecutive
+**v0.3.0:** Shorter nonempty replacements also accept consecutive
 native runs with the same font, text style, linear transform and solid paint,
 normal blending and full object opacity, with no explicit object clips.
 They coalesce into one native TextObject while retaining all original glyph IDs
@@ -2167,7 +2167,7 @@ Empty replacements remove nonpainting native text runs (`Fill="false"` and
 no stroke), preserving interleaved graphics and the original PDF text advance.
 This includes invisible `3 Tr` text, zero object opacity and zero fill/stroke
 alpha, and does not require embedded glyph data.
-**Unreleased main:** Painted runs with complete embedded glyph mappings are
+**v0.3.0:** Painted runs with complete embedded glyph mappings are
 converted to separate vector paths inside native composite resources. This
 removes their text semantics while retaining glyph paint order, original
 Boundary clipping, affine placement, object opacity and explicit clip Areas.
