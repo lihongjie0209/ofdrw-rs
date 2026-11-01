@@ -20,6 +20,7 @@
 - [盒模型与浮动分段](#盒模型与浮动分段)
 - [自动文字盒](#自动文字盒)
 - [嵌套混合流容器](#嵌套混合流容器)
+- [固定页面混合容器](#固定页面混合容器)
 - [表格与嵌套布局](#表格与嵌套布局)
 - [页面顺序与对象分组](#页面顺序与对象分组)
 - [SVG 预览](#svg-预览)
@@ -846,6 +847,13 @@ style fields, and returns the same metrics JSON. Go and TypeScript provide
 `FlowLineMetrics` and `FlowTextMetrics` models. All bindings preserve read-only
 behavior, including failed measurements.
 
+Natural zero font advances, such as combining marks, remain valid in plain
+styled text. A zero logical width can retain nonempty text. Measurements use
+font advances and preserve graphemes across wrapping and styled spans;
+tracking cannot cancel an otherwise advancing glyph or create negative
+advances. The shared rule also applies to automatic boxes and containers in
+all language bindings.
+
 ## 图片自动尺寸
 
 **未发布（开发分支）：** Rust `TableCellImage::from_intrinsic(data, format)`
@@ -1131,6 +1139,40 @@ cycles. Node.js validates finite request numbers and includes TypeScript models.
 The shared fixture manually derives all root fragment fields for mixed shaped
 and ordinary text, nested decoration, image and table pagination. Tests also
 verify output text, image bounds, round trips, continuation and atomic errors.
+
+## 固定页面混合容器
+
+**未发布，Rust 接口：** `OfdDocument::add_fixed_containers(page_index, &[FixedContainer])`
+paints mixed containers on one existing global page. Each `FixedContainer` has
+`position: [x, y]` and a `container: FlowContainer`. Coordinates use the same
+OFD page space as `add_text_object`; physical-box origins are not added again.
+Root widths are preserved even outside a smaller page. Heights of zero are
+measured automatically; positive `layout.size[1]` controls the content box and
+decoration at every nesting level. Text, images and full tables can overflow
+the declared box or physical page, and the call keeps the existing page count.
+
+Nested float/clear rules, line breaks, row gaps, ordinary/shaped text,
+relative offsets, dashed borders, inherited layers and placeholders use the
+shared container preparation and painting code. A table is drawn completely
+with one header. Page-area fillers are ignored in this fixed-page context,
+matching Java fixed-page rendering. Each root's decoration and children are
+painted before the next root. Within a layer, later roots can cover earlier
+content; the normal OFD layer order applies across layers.
+
+The result is one `BoxPlacement` per root in input order, with zero source
+offset and both `first`/`last` set. All root positions and declared heights
+must be finite; widths remain positive and heights nonnegative. Invalid
+later content, coordinate overflow, excess nesting/nodes and protected-page
+writes fail atomically. The eight-level and 10,000-entry container limits
+apply. Selected pages in later document bodies use that body's font resources;
+other page XML remains unchanged. Tests compare automatic sizing and raster
+output with flow, and cover explicit-height overflow, nested floating rows,
+root overlap, global pages, off-page coordinates, images, tables, controls,
+placeholders, glyph shaping and rollback. An independent Java VirtualPage/Div
+reference verifies absolute allocations and background geometry, including
+negative coordinates, smaller canvases, tall boxes and fractional edges.
+This API is currently Rust-only;
+C/Python/Go/Node.js bindings are planned next.
 
 ## 表格与嵌套布局
 

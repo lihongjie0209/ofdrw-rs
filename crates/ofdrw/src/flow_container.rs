@@ -1,9 +1,12 @@
 use super::*;
+mod fixed;
 mod pagination;
+pub use fixed::FixedContainer;
 
 /// A vertical sequence of text, images, tables, spacing and nested decorated boxes.
 ///
-/// Content height is automatic; `layout.size[0]` is the requested width.
+/// Paginated flow measures content height automatically; fixed-page containers
+/// retain positive declared heights. `layout.size[0]` is the requested width.
 /// Containers support Java-style floating rows at every nesting level.
 /// Paragraph, image, spacer and table children occupy full rows; nested boxes
 /// share rows according to their float direction, clear rules and widths.
@@ -44,6 +47,7 @@ pub enum FlowContainerChild {
 }
 
 struct PreparedContainer<'a> {
+    declared_height: f64,
     layout: LayoutBox,
     children: Vec<PlacedChild<'a>>,
     ranges: Vec<[f64; 2]>,
@@ -418,6 +422,7 @@ impl OfdDocument {
         }
         layout.size[1] = y;
         Ok(PreparedContainer {
+            declared_height: b.layout.size[1],
             layout,
             children,
             ranges,
