@@ -1007,7 +1007,7 @@ child containers and mixed child kinds remain pending.
 ## 嵌套混合流容器
 
 **未发布，Rust 接口：** `OfdDocument::add_flow_containers()` lays out vertical
-`FlowContainer` sequences containing paragraphs, images, spacing and recursively
+`FlowContainer` sequences containing paragraphs, images, tables, spacing and recursively
 nested decorated containers. Each container measures its own content height,
 clamps width before text wrapping, and adds its margin, padding and border
 bands. Paragraphs share the ordinary/shaped text preparation and drawing code.
@@ -1018,8 +1018,7 @@ bands only once, and parent decoration is painted before child content.
 Root containers support shared floating rows through the measured-box engine.
 Within a container, children form a vertical sequence separated by `gap`;
 nested float direction controls horizontal alignment and nested clear must be
-`Both`. Child floating rows, table children and arbitrary DOM layout remain
-pending. The API accepts eight container levels and 10,000 container/child
+`Both`. Child floating rows and arbitrary DOM layout remain pending. The API accepts eight container levels and 10,000 container/child
 entries. Invalid later content or overflowing nested coordinates rolls back
 the whole call. Placeholders reserve measured space without painting children.
 Returned placements describe roots; child objects use nested content positions.
@@ -1027,6 +1026,16 @@ Returned placements describe roots; child objects use nested content positions.
 Tests cover mixed text/image/decorated-child pagination, complete child boxes,
 spacing and alignment, shaped Arabic and combining text, floating roots,
 placeholders, geometry overflow, structural limits and OFD round trips.
+Table children use `FlowContainerChild::Table { table, style, align }`.
+`NestedTable` supplies grid geometry and cell content; `TableStyle` supplies
+font selection and text defaults. Complete merged-row groups are protected
+from page cuts. Sliced table drawing reuses cached cell ordering and only
+builds positions for the selected rows. Existing nested cell tables, images,
+backgrounds and text decorations use the ordinary table renderer. Repeated
+headers inside containers remain pending and `repeat_header: true` is rejected.
+Tests compare container-table raster output with the existing table API and
+cover merged rows, fractional geometry and rollback of malformed tables.
+
 Binding convenience methods for these mixed containers remain pending.
 
 ## 表格与嵌套布局
