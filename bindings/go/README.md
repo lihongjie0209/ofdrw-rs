@@ -123,3 +123,30 @@ if err != nil {
     return err
 }
 ```
+
+### Automatic text boxes (unreleased source API)
+
+```go
+typography := ofdrw.DefaultFlowTextStyle()
+typography.FontSize, typography.LineHeight = 4, 5
+result, err := doc.AddTextBoxes(0, []ofdrw.TextBox{{
+    Layout: ofdrw.LayoutBox{
+        Size: [2]float64{40, 0}, Padding: [4]float64{2, 2, 2, 2},
+        Border: [4]float64{0.2, 0.2, 0.2, 0.2},
+    },
+    Spans: []ofdrw.FlowSpan{{Text: "Text wraps and grows this decorated box."}},
+    Style: typography,
+}}, ofdrw.DefaultBoxLayoutStyle())
+if err != nil {
+    return err
+}
+_ = result
+```
+
+Content height replaces `layout.size[1]` / `Layout.Size[1]` automatically.
+Width is clamped before wrapping, and complete lines move to the next page.
+Typography can enable shaped text or paragraph keep rules; page geometry and
+continuation come from the shared box options. The result contains all
+fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
+General nested child containers remain separate work. This API is available
+from the development source and is not included in published version 0.3.0.

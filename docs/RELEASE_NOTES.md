@@ -41,6 +41,10 @@
   shaped spans atomically. Measurement and box drawing share prepared lines;
   ordinary flow and box text share painting helpers.
 
+- Expose automatic text boxes through C, Python, Go and Node.js, returning
+  complete fragment geometry and continuation. Add shared reference fixtures,
+  shaped/plain rendering tests, rollback checks, TypeScript and usage examples.
+
 # v0.3.0
 
 ## Upgrade notes

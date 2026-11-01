@@ -1,0 +1,137 @@
+{
+  "reference": "Four 3mm lines with 0.5mm padding and 0.25mm borders; first page fits 3 complete lines.",
+  "request": {
+    "boxes": [
+      {
+        "layout": {
+          "size": [
+            8,
+            0
+          ],
+          "padding": [
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ],
+          "border": [
+            0.25,
+            0.25,
+            0.25,
+            0.25
+          ],
+          "background_color": [
+            240,
+            220,
+            200
+          ]
+        },
+        "spans": [
+          {
+            "text": "A\nB\nC\nD"
+          }
+        ],
+        "style": {
+          "font_size": 2,
+          "line_height": 3
+        }
+      }
+    ],
+    "page_size": [
+      20,
+      14
+    ],
+    "margins": [
+      2,
+      2,
+      2,
+      2
+    ]
+  },
+  "expected": {
+    "pages": [
+      0,
+      1
+    ],
+    "placements": [
+      {
+        "source_index": 0,
+        "page_index": 0,
+        "allocation": [
+          2.0,
+          2.0,
+          9.5,
+          9.75
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          9.5,
+          9.75
+        ],
+        "padding_box": [
+          2.25,
+          2.25,
+          9.0,
+          9.5
+        ],
+        "content_box": [
+          2.75,
+          2.75,
+          8.0,
+          9.0
+        ],
+        "borders": [
+          0.25,
+          0.25,
+          0.0,
+          0.25
+        ],
+        "source_offset": 0.0,
+        "first": true,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 1,
+        "allocation": [
+          2.0,
+          2.0,
+          9.5,
+          3.75
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          9.5,
+          3.75
+        ],
+        "padding_box": [
+          2.25,
+          2.0,
+          9.0,
+          3.5
+        ],
+        "content_box": [
+          2.75,
+          2.0,
+          8.0,
+          3.0
+        ],
+        "borders": [
+          0.0,
+          0.25,
+          0.25,
+          0.25
+        ],
+        "source_offset": 9.75,
+        "first": false,
+        "last": true
+      }
+    ],
+    "next": {
+      "page_index": 1,
+      "y": 5.75
+    }
+  }
+}

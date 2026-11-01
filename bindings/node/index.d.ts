@@ -1072,6 +1072,7 @@ export class Document {
   addPathPage(commands: string, boundary: [number, number, number, number], pageWidth?: number, pageHeight?: number, fill?: boolean, stroke?: boolean): void;
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
   measureFlowedSpans(documentIndex: number, spans: FlowSpan[], contentWidth: number, options?: FlowTextOptions): FlowTextMetrics;
+  addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
   addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
   addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
   addFlowedSpans(documentIndex: number, spans: FlowSpan[], options?: FlowTextOptions): number[];
@@ -1152,3 +1153,6 @@ export class Document {
   duplicatePageObject(page: number, objectId: string): string;
   removePageObject(page: number, objectId: string): void;
 }
+
+/** Automatically measured text children in a decorated box. Height is replaced. */
+export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTextOptions }

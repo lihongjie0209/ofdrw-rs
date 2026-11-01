@@ -992,9 +992,16 @@ boxes, independent floating columns, width clamping, placeholders, rollback
 and document round trips. These remain logical line bounds; painted ink and
 underline overhang can extend beyond them.
 
+Python exposes `Document.add_text_boxes(document_index, boxes, **options)`,
+Go uses `Document.AddTextBoxes(documentIndex, boxes, style)`, Node.js uses
+`Document.addTextBoxes(documentIndex, boxes, options)`, and C provides
+`ofd_add_text_boxes_json()`. JSON requests contain `boxes` with `layout`,
+`spans`, and optional `style`, plus shared `page_size`, `margins`, and `start`.
+Layout fields match measured boxes, without a `type` field. The response is
+the ordinary box layout result, including full fragments and `next`.
+
 This provides text children inside automatically sized boxes. General nested
-child containers, mixed child kinds and the multi-language convenience API
-remain pending.
+child containers and mixed child kinds remain pending.
 
 ## 表格与嵌套布局
 
