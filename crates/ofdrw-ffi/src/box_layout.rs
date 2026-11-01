@@ -208,7 +208,7 @@ mod tests {
             ] {
                 let value = serde_json::json!({"type":"box","size":[4,3],"margin":[1,2,3,4],"padding":[0.1,0.2,0.3,0.4],
                     "border":[0.5,0.6,0.7,0.8],"background_color":[1,2,3],"border_color":[4,5,6],"alpha":128,
-                    "float":float,"clear":clear,"integrity":true,"offset":[2,-1],"placeholder":true});
+                    "float":float,"clear":clear,"integrity":true,"offset":[2,-1],"placeholder":true,"layer":"body"});
                 let BoxLayoutItem::Box(b) = parse_item(&value).unwrap() else {
                     panic!("expected box")
                 };
@@ -221,6 +221,7 @@ mod tests {
                 assert_eq!(b.background_color, Some([1, 2, 3]));
                 assert_eq!(b.border_color, [4, 5, 6]);
                 assert_eq!(b.alpha, Some(128));
+                assert_eq!(b.layer, Some(BoxLayer::Body));
                 assert!(b.integrity && b.placeholder);
             }
         }
