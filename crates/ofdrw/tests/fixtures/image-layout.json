@@ -1,0 +1,42 @@
+{
+  "reference": "50x25 pixels / 5 pixels per mm, then shrink to 4x4: 4x2 mm",
+  "request": {
+    "blocks": [
+      {
+        "type": "image",
+        "data_base64": "iVBORw0KGgoAAAANSUhEUgAAADIAAAAZCAIAAAD8NuoTAAAAMUlEQVR4nO3OMQ0AAAgDMG5E4F8UYpDBjiYV0NrpQPU+0NLS0tLSyqClpZVAS0srwQGFKfXFsc8+wwAAAABJRU5ErkJggg==",
+        "format": "PNG",
+        "intrinsic_size": true,
+        "fit_within": [
+          4,
+          4
+        ]
+      }
+    ],
+    "page_size": [
+      20,
+      20
+    ],
+    "margins": [
+      2,
+      2,
+      2,
+      2
+    ]
+  },
+  "expected": {
+    "pages": [
+      0
+    ],
+    "next": {
+      "page_index": 0,
+      "y": 4
+    }
+  },
+  "boundary": [
+    2,
+    2,
+    4,
+    2
+  ]
+}

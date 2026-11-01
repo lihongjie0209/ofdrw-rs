@@ -62,3 +62,21 @@ test('mixed flow rejects invalid content atomically and preserves explicit blank
   } finally { doc.close(); }
   assert.throws(() => doc.addFlowBlocks(0, blocks));
 });
+
+test('intrinsic image sizing and fit bounds match reference and reject ambiguous sizes atomically', () => {
+  const { request, expected, boundary } = JSON.parse(fs.readFileSync(path.join(fixtures, 'image-layout.json')));
+  const { blocks, ...options } = request;
+  const doc = Document.create();
+  try {
+    assert.deepEqual(doc.addFlowBlocks(0, blocks, options), expected);
+    assert.deepEqual(doc.pageImages(0)[0].boundary, boundary);
+    const before = doc.toBytes();
+    for (const [key, value] of [['width', 2], ['intrinsic_size', 'true'],
+      ['fit_within', [0, 4]], ['fit_within', [4]], ['format', 'JPEG']]) {
+      const bad = structuredClone(blocks);
+      bad[0][key] = value;
+      assert.throws(() => doc.addFlowBlocks(0, bad, options));
+      assert.deepEqual(doc.toBytes(), before);
+    }
+  } finally { doc.close(); }
+});

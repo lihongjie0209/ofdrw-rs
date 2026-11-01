@@ -82,3 +82,21 @@ def test_mixed_flow_paragraph_overrides_and_explicit_breaks():
         assert result == {"pages": [0, 1, 2], "next": {"page_index": 2, "y": 2}}
         assert doc.page_text_objects(0)[1]["boundary"][:2] == [2, 10]
         assert doc.page_text(1) == []
+
+
+def test_intrinsic_image_size_and_fit_bounds_match_reference_and_errors_are_atomic():
+    fixture = json.loads((FIXTURES / "image-layout.json").read_text())
+    request = copy.deepcopy(fixture["request"])
+    blocks = request.pop("blocks")
+    with Document.new() as doc:
+        assert doc.add_flow_blocks(0, blocks, **request) == fixture["expected"]
+        assert doc.page_images(0)[0]["boundary"] == fixture["boundary"]
+        before = doc.to_bytes()
+        for key, value in [("width", 2), ("intrinsic_size", "true"),
+                           ("fit_within", [0, 4]), ("fit_within", [4]),
+                           ("format", "JPEG")]:
+            bad = copy.deepcopy(blocks)
+            bad[0][key] = value
+            with pytest.raises(OfdError):
+                doc.add_flow_blocks(0, bad, **request)
+            assert doc.to_bytes() == before

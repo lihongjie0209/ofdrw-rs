@@ -27,6 +27,10 @@
   Validate encoded data before sizing; preserve original bytes and support
   the existing image formats, including JPEG 2000 and JBIG2.
 
+- Expose intrinsic image sizing and aspect-preserving fit bounds through C,
+  Python, Go and Node.js flow and table image requests, with cross-language
+  geometry and rollback tests.
+
 # v0.3.0
 
 ## Upgrade notes

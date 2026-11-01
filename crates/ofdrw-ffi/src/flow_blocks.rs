@@ -99,6 +99,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn intrinsic_image_sizing_uses_the_shared_parser_and_rejects_ambiguous_requests() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../ofdrw/tests/fixtures/image-layout.json"))
+                .unwrap();
+        let block = &fixture["request"]["blocks"][0];
+        let FlowBlock::Image { image, .. } = parse_block(block).unwrap() else {
+            panic!("image expected")
+        };
+        assert_eq!([image.width, image.height], [4., 2.]);
+        let mut plain = block.clone();
+        plain.as_object_mut().unwrap().remove("fit_within");
+        assert_eq!(parse_table_cell_image(&plain).unwrap().width, 10.);
+        plain["width"] = serde_json::json!(0);
+        plain["height"] = serde_json::json!(0);
+        assert_eq!(parse_table_cell_image(&plain).unwrap().height, 5.);
+        plain["intrinsic_size"] = serde_json::json!(false);
+        plain["width"] = serde_json::json!(10);
+        plain["height"] = serde_json::json!(5);
+        plain["fit_within"] = serde_json::json!([4, 4]);
+        assert_eq!(parse_table_cell_image(&plain).unwrap().width, 4.);
+        for (key, value) in [
+            ("intrinsic_size", serde_json::json!("true")),
+            ("width", serde_json::json!(2)),
+            ("height", serde_json::json!(null)),
+            ("fit_within", serde_json::json!([0, 4])),
+            ("fit_within", serde_json::json!([4])),
+            ("fit_within", serde_json::json!([4, 4, 4])),
+            ("fit_within", serde_json::json!([4, null])),
+            ("data_base64", serde_json::json!("invalid")),
+            ("format", serde_json::json!("JPEG")),
+        ] {
+            let mut bad = block.clone();
+            bad[key] = value;
+            assert!(parse_block(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn ffi_mixed_flow_returns_cursor_and_preserves_the_source_on_invalid_output_or_late_error() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../ofdrw/tests/fixtures/flow-blocks.json"))
