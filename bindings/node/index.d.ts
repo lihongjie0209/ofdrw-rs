@@ -413,6 +413,7 @@ export interface FlowSpan {
 }
 
 export interface TableOptions {
+  start?: FlowStart;
   column_widths: number[];
   row_height?: number;
   font_size?: number;

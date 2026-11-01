@@ -805,8 +805,18 @@ content.
 
 ## 表格与嵌套布局
 
+**Unreleased:** Tables accept the same optional `start` position as text flow
+(`TableStyle.start` in Rust, `Start` in Go, `start` in Python/Node.js/C JSON).
+Both row matrices and positioned cells may start on an existing page. Canvas
+sizes must match `page_size`, and the starting coordinate follows the text-flow
+rules above. Overflow resumes at normal margins. Repeated headers stay with the
+first complete body row group, including merged cells, so a header is not left
+alone in the available space. Nonzero canvas origins, image-only tables without
+fonts, and document-relative resource scopes are retained.
+
+
 `add_table()` (Rust/Python), `AddTable()` (Go), and `ofd_add_table_json()` (C)
-lay out fixed-width columns on newly appended pages. A positive `row_height`
+lay out fixed-width columns and append pages by default. A positive `row_height`
 uses fixed-height rows; `row_height=0` sizes each row from its wrapped content.
 Cell text wraps within padding, rows stay together, and the first row can
 repeat as a header after a page break. `add_table_cells()` (Rust/Python) and

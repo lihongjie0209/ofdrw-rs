@@ -6403,6 +6403,7 @@ fn writes_gouraud_text_fill_with_shared_edge_and_alpha() {
 fn lays_out_table_rows_with_wrapped_cells_and_repeated_header() {
     let mut document = OfdDocument::new();
     let style = TableStyle {
+        start: None,
         page_size: [30.0, 26.0],
         margins: [2.0, 2.0, 2.0, 2.0],
         column_widths: vec![12.0, 12.0],

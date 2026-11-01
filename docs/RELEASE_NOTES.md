@@ -1,5 +1,8 @@
 # Unreleased
 
+- Extend existing-page continuation to dense and merged-cell tables, retaining
+  repeated headers with complete row groups and supporting nonzero canvas origins.
+
 - Add optional existing-page continuation to plain, styled and shaped text flow,
   with canvas-origin handling, normal continuation margins and atomic validation.
 

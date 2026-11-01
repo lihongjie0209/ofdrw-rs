@@ -4146,8 +4146,9 @@ class Document:
         border_color: tuple[int, int, int] = (0, 0, 0),
         font_id: str | int | None = None,
         repeat_header: bool = False,
+        start: dict | None = None,
     ) -> list[int]:
-        """Append a table, splitting between rows; row_height=0 sizes rows from content."""
+        """Flow a table, optionally starting on an existing page; zero row height sizes content."""
         self._require_open()
         if document_index < 0:
             raise IndexError(document_index)
@@ -4159,6 +4160,8 @@ class Document:
             "border_width": border_width, "border_color": border_color,
             "repeat_header": repeat_header,
         }
+        if start is not None:
+            payload["start"] = start
         if font_id is not None:
             payload["font_id"] = str(font_id)
         output = _ffi.new("OfdBuffer *")
@@ -4188,8 +4191,9 @@ class Document:
         border_color: tuple[int, int, int] = (0, 0, 0),
         font_id: str | int | None = None,
         repeat_header: bool = False,
+        start: dict | None = None,
     ) -> list[int]:
-        """Append positioned cells with spans and optional image dictionaries.
+        """Flow positioned cells with spans and optional image dictionaries.
 
         An image may contain ``data`` as bytes, plus ``format``, ``width`` and
         ``height``. Ordered ``blocks`` may contain text, image, spacer,
@@ -4244,6 +4248,8 @@ class Document:
             "padding": padding, "border_width": border_width,
             "border_color": border_color, "repeat_header": repeat_header,
         }
+        if start is not None:
+            payload["start"] = start
         if font_id is not None:
             payload["font_id"] = str(font_id)
         output = _ffi.new("OfdBuffer *")

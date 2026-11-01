@@ -10329,22 +10329,28 @@ pub unsafe extern "C" fn ofd_insert_blank_page(
     })
 }
 
-fn parse_flow_style(input: &serde_json::Value) -> Result<FlowTextStyle, String> {
-    let mut style = FlowTextStyle::default();
-    if let Some(start) = input.get("start").filter(|value| !value.is_null()) {
-        let start = start.as_object().ok_or("start must be an object")?;
-        let page_index = start
-            .get("page_index")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or("start.page_index must be a nonnegative integer")?;
-        let y = start
-            .get("y")
-            .and_then(serde_json::Value::as_f64)
-            .ok_or("start.y must be a number")?;
-        style.start = Some(ofdrw::FlowStart { page_index, y });
-    }
+fn parse_flow_start(input: &serde_json::Value) -> Result<Option<ofdrw::FlowStart>, String> {
+    let Some(start) = input.get("start").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let start = start.as_object().ok_or("start must be an object")?;
+    let page_index = start
+        .get("page_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or("start.page_index must be a nonnegative integer")?;
+    let y = start
+        .get("y")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or("start.y must be a number")?;
+    Ok(Some(ofdrw::FlowStart { page_index, y }))
+}
 
+fn parse_flow_style(input: &serde_json::Value) -> Result<FlowTextStyle, String> {
+    let mut style = FlowTextStyle {
+        start: parse_flow_start(input)?,
+        ..Default::default()
+    };
     if let Some(value) = input.get("page_size") {
         style.page_size = serde_json::from_value(value.clone())
             .map_err(|_| "page_size must contain two numbers")?;
@@ -10718,6 +10724,7 @@ pub unsafe extern "C" fn ofd_add_table_json(
         let input: serde_json::Value =
             serde_json::from_str(input_string(table_json)?).map_err(|error| error.to_string())?;
         let mut style = TableStyle {
+            start: parse_flow_start(&input)?,
             column_widths: serde_json::from_value(
                 input
                     .get("column_widths")

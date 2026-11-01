@@ -1075,6 +1075,7 @@ type FlowTextStyle struct {
 // TableStyle controls table layout and row pagination. RowHeight zero sizes
 // each row from its wrapped cell content.
 type TableStyle struct {
+	Start        *FlowStart `json:"start,omitempty"`
 	PageSize     [2]float64 `json:"page_size"`
 	Margins      [4]float64 `json:"margins"`
 	ColumnWidths []float64  `json:"column_widths"`
@@ -9893,7 +9894,8 @@ func (doc *Document) AddFlowedText(documentIndex int, text string, style FlowTex
 	return indexes, nil
 }
 
-// AddTable appends a fixed-grid table and returns its new page indexes.
+// AddTable flows a fixed-grid table and returns the indexes of pages used.
+// Start selects an existing first page; otherwise the method appends pages.
 func (doc *Document) AddTable(documentIndex int, rows [][]string, style TableStyle) ([]int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -9932,7 +9934,8 @@ func (doc *Document) AddTable(documentIndex int, rows [][]string, style TableSty
 	return indexes, nil
 }
 
-// AddTableCells appends a table with cells that may span rows or columns.
+// AddTableCells flows cells that may span rows or columns.
+// Start selects an existing first page; returned indexes cover pages used.
 func (doc *Document) AddTableCells(documentIndex, rowCount int, cells []TableCell, style TableStyle) ([]int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()

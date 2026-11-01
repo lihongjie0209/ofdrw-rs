@@ -1730,7 +1730,7 @@ pub enum FlowTextAlign {
     Right,
 }
 
-/// Continue flowing text on an existing page. `y` is measured from the canvas top.
+/// Start flowing content on an existing page. `y` is measured from the canvas top.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlowStart {
     pub page_index: usize,
@@ -1767,9 +1767,11 @@ pub struct FlowTextStyle {
     pub language: Option<String>,
 }
 
-/// Fixed-grid table layout on newly appended pages.
+/// Fixed-grid table layout with optional existing-page continuation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableStyle {
+    /// Optional existing first page; subsequent pages use the normal margins.
+    pub start: Option<FlowStart>,
     pub page_size: [f64; 2],
     /// Top, right, bottom, left margins in millimeters.
     pub margins: [f64; 4],
@@ -1873,6 +1875,7 @@ pub struct TableCellImage {
 impl Default for TableStyle {
     fn default() -> Self {
         Self {
+            start: None,
             page_size: [210.0, 297.0],
             margins: [25.4, 31.7, 25.4, 31.7],
             column_widths: Vec::new(),
@@ -1963,20 +1966,27 @@ struct FlowPageCursor {
     page: Option<usize>,
     origin: [f64; 2],
     y: f64,
+    page_size: [f64; 2],
+    margins: [f64; 4],
 }
 
 impl FlowPageCursor {
     fn new(
         document: &OfdDocument,
         document_index: usize,
-        style: &FlowTextStyle,
+        page_size: [f64; 2],
+        margins: [f64; 4],
+        start: Option<FlowStart>,
     ) -> Result<Self, OfdError> {
-        let Some(start) = style.start else {
-            return Ok(Self {
-                page: None,
-                origin: [0., 0.],
-                y: style.margins[0],
-            });
+        let mut cursor = Self {
+            page: None,
+            origin: [0., 0.],
+            y: margins[0],
+            page_size,
+            margins,
+        };
+        let Some(start) = start else {
+            return Ok(cursor);
         };
         let pages = document.pages()?;
         let page = pages
@@ -1990,14 +2000,14 @@ impl FlowPageCursor {
         let [x, y, width, height] = page
             .physical_box
             .ok_or_else(|| OfdError::Invalid("flow start page has no canvas".into()))?;
-        if (width - style.page_size[0]).abs() > 1e-9 || (height - style.page_size[1]).abs() > 1e-9 {
+        if (width - page_size[0]).abs() > 1e-9 || (height - page_size[1]).abs() > 1e-9 {
             return Err(OfdError::Invalid(
                 "flow start canvas size must match page_size".into(),
             ));
         }
         if !start.y.is_finite()
-            || start.y < style.margins[0]
-            || start.y > height - style.margins[2]
+            || start.y < margins[0]
+            || start.y > height - margins[2]
             || ![x + width, y + height, y + start.y]
                 .iter()
                 .all(|v| v.is_finite())
@@ -2006,27 +2016,24 @@ impl FlowPageCursor {
                 "flow start position is outside the content area".into(),
             ));
         }
-        Ok(Self {
-            page: Some(start.page_index),
-            origin: [x, y],
-            y: y + start.y,
-        })
+        cursor.page = Some(start.page_index);
+        cursor.origin = [x, y];
+        cursor.y = y + start.y;
+        Ok(cursor)
     }
 
     fn place(
         &mut self,
         document: &mut OfdDocument,
         document_index: usize,
-        style: &FlowTextStyle,
         required: f64,
         gap: f64,
         indexes: &mut Vec<usize>,
     ) -> Result<(usize, f64, f64), OfdError> {
         if self.page.is_none()
-            || self.y + gap + required
-                > self.origin[1] + style.page_size[1] - style.margins[2] + 1e-9
+            || self.y + gap + required > self.origin[1] + self.page_size[1] - self.margins[2] + 1e-9
         {
-            document.append_blank_page(document_index, style.page_size[0], style.page_size[1])?;
+            document.append_blank_page(document_index, self.page_size[0], self.page_size[1])?;
             self.page = Some(
                 document
                     .pages()?
@@ -2036,7 +2043,7 @@ impl FlowPageCursor {
                     .index,
             );
             self.origin = [0., 0.];
-            self.y = style.margins[0];
+            self.y = self.margins[0];
         } else {
             self.y += gap;
         }
@@ -26559,9 +26566,15 @@ impl OfdDocument {
         } else {
             Vec::new()
         };
+        let mut cursor = FlowPageCursor::new(
+            self,
+            document_index,
+            style.page_size,
+            style.margins,
+            style.start,
+        )?;
         let mut staged = self.clone();
         let mut indexes = Vec::new();
-        let mut cursor = FlowPageCursor::new(self, document_index, &style)?;
         for (line_index, line) in lines.iter().enumerate() {
             let gap = if line.paragraph_start && line_index != 0 {
                 style.paragraph_gap
@@ -26574,14 +26587,8 @@ impl OfdDocument {
                 } else {
                     style.line_height
                 };
-            let (page_index, origin_x, y) = cursor.place(
-                &mut staged,
-                document_index,
-                &style,
-                required,
-                gap,
-                &mut indexes,
-            )?;
+            let (page_index, origin_x, y) =
+                cursor.place(&mut staged, document_index, required, gap, &mut indexes)?;
             if !line.text.is_empty() {
                 let available = content_width - line.indent * style.font_size;
                 let rendered_width = line.width * style.font_size;
@@ -26829,9 +26836,15 @@ impl OfdDocument {
         } else {
             Vec::new()
         };
+        let mut cursor = FlowPageCursor::new(
+            self,
+            document_index,
+            style.page_size,
+            style.margins,
+            style.start,
+        )?;
         let mut staged = self.clone();
         let mut indexes = Vec::new();
-        let mut cursor = FlowPageCursor::new(self, document_index, &style)?;
         for (line_index, line) in lines.iter().enumerate() {
             let baseline = if line.glyphs.is_empty() {
                 style.font_size
@@ -26858,14 +26871,8 @@ impl OfdDocument {
                 } else {
                     line_height
                 };
-            let (page_index, origin_x, y) = cursor.place(
-                &mut staged,
-                document_index,
-                &style,
-                required,
-                gap,
-                &mut indexes,
-            )?;
+            let (page_index, origin_x, y) =
+                cursor.place(&mut staged, document_index, required, gap, &mut indexes)?;
             let available = page_width - left - right - line.indent;
             let free = (available - line.width).max(0.0);
             let align_offset = match style.align {
@@ -26912,7 +26919,8 @@ impl OfdDocument {
         Ok(indexes)
     }
 
-    /// Append a fixed-grid table, breaking only between complete rows.
+    /// Flow a fixed-grid table, optionally starting on an existing page.
+    /// Breaks only between complete rows and returns the indexes of pages used.
     pub fn add_table(
         &mut self,
         document_index: usize,
@@ -26965,7 +26973,8 @@ impl OfdDocument {
         self.add_table_cells(document_index, rows.len(), &cells, style)
     }
 
-    /// Append a table whose cells may span rows or columns.
+    /// Flow a table whose cells may span rows or columns.
+    /// `style.start` selects an existing first page; returned indexes cover pages used.
     ///
     /// Cells must cover every grid slot exactly once. A vertical span stays on
     /// one page; a group that cannot fit alongside a repeated header is
@@ -27317,6 +27326,7 @@ impl OfdDocument {
                           page_index: usize,
                           first: usize,
                           end: usize,
+                          origin_x: f64,
                           y: f64|
          -> Result<(), OfdError> {
             let mut y_positions = Vec::with_capacity(end - first + 1);
@@ -27331,6 +27341,7 @@ impl OfdDocument {
                 }
                 let x = x_positions[cell.column];
                 let width = x_positions[cell.column + cell.column_span] - x;
+                let x = origin_x + x;
                 let cell_y = y_positions[cell.row - first];
                 let height = y_positions[cell.row + cell.row_span - first] - cell_y;
                 let [pad_top, pad_right, pad_bottom, pad_left] =
@@ -27484,30 +27495,33 @@ impl OfdDocument {
             }
             Ok(())
         };
+        let mut cursor = FlowPageCursor::new(
+            self,
+            document_index,
+            style.page_size,
+            style.margins,
+            style.start,
+        )?;
         let mut staged = self.clone();
         let mut pages = Vec::new();
-        let mut current_page = None;
-        let mut y = top;
+        let first_body_height = groups.get(1).map_or(0., |group| group.2);
         for (first, end, height) in groups {
-            if current_page.is_none() || y + height > page_height - bottom + 1e-9 {
-                staged.append_blank_page(document_index, page_width, page_height)?;
-                let page_index = staged
-                    .pages()?
-                    .into_iter()
-                    .rfind(|page| page.document_index == document_index)
-                    .ok_or_else(|| OfdError::Invalid("new table page is missing".into()))?
-                    .index;
-                pages.push(page_index);
-                current_page = Some(page_index);
-                y = top;
-                if first > 0 && style.repeat_header {
-                    draw_group(&mut staged, page_index, 0, 1, y)?;
-                    y += row_heights[0];
-                }
+            // A repeated header starts together with its first complete body group.
+            let required = if first == 0 && style.repeat_header {
+                height + first_body_height
+            } else {
+                height
+            };
+            let previous_page = cursor.page;
+            let (page_index, origin_x, mut y) =
+                cursor.place(&mut staged, document_index, required, 0., &mut pages)?;
+            if previous_page != Some(page_index) && first > 0 && style.repeat_header {
+                draw_group(&mut staged, page_index, 0, 1, origin_x, y)?;
+                y += row_heights[0];
+                cursor.y += row_heights[0];
             }
-            let page_index = current_page.expect("table page was appended");
-            draw_group(&mut staged, page_index, first, end, y)?;
-            y += height;
+            draw_group(&mut staged, page_index, first, end, origin_x, y)?;
+            cursor.y += height;
         }
         *self = staged;
         Ok(pages)
@@ -27699,9 +27713,15 @@ impl OfdDocument {
         } else {
             Vec::new()
         };
+        let mut cursor = FlowPageCursor::new(
+            self,
+            document_index,
+            style.page_size,
+            style.margins,
+            style.start,
+        )?;
         let mut staged = self.clone();
         let mut indexes = Vec::new();
-        let mut cursor = FlowPageCursor::new(self, document_index, &style)?;
         for (line_index, line) in lines.iter().enumerate() {
             let baseline = if line.units.is_empty() {
                 style.font_size
@@ -27728,14 +27748,8 @@ impl OfdDocument {
                 } else {
                     line_height
                 };
-            let (page_index, origin_x, y) = cursor.place(
-                &mut staged,
-                document_index,
-                &style,
-                required,
-                gap,
-                &mut indexes,
-            )?;
+            let (page_index, origin_x, y) =
+                cursor.place(&mut staged, document_index, required, gap, &mut indexes)?;
             let available = content_width - line.indent;
             let free = (available - line.width).max(0.0);
             let offset = match style.align {

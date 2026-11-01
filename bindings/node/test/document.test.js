@@ -4311,3 +4311,45 @@ test('continue plain, styled and shaped flow on an existing page', () => {
     }
   }
 });
+
+test('continue tables without orphan headers or split merged rows', () => {
+  const font = fs.readFileSync(fixture('dejavu-serif.ttf'));
+  for (const value of [
+    {merged: false, y: 10, pages: [0, 1], first: ['seed', 'H', 'A'], last: ['H', 'B']},
+    {merged: false, y: 12, pages: [1], first: ['seed'], last: ['H', 'A', 'B']},
+    {merged: true, y: 4, pages: [0, 1], first: ['seed', 'H', 'M'], last: ['H', 'B']},
+    {merged: true, y: 8, pages: [1], first: ['seed'], last: ['H', 'M', 'B']},
+  ]) {
+    const document = Document.create();
+    try {
+      document.addTextPage('seed', 20, 20);
+      const fontId = document.addEmbeddedFont('DejaVu Serif', font);
+      const options = {page_size: [20, 20], margins: [2, 2, 2, 2], column_widths: [16],
+        row_height: 4, font_size: 2, line_height: 3, padding: 0.5, font_id: fontId,
+        repeat_header: true, start: {page_index: 0, y: value.y}};
+      const write = () => value.merged
+        ? document.addTableCells(0, 4, [
+          {row: 0, column: 0, text: 'H'}, {row: 1, column: 0, row_span: 2, text: 'M'},
+          {row: 3, column: 0, text: 'B'},
+        ], options)
+        : document.addTable(0, [['H'], ['A'], ['B']], options);
+      assert.deepEqual(write(), value.pages);
+      assert.deepEqual(document.pageText(0), value.first);
+      assert.deepEqual(document.pageText(1), value.last);
+      const before = document.toBytes();
+      options.start.y = 19;
+      assert.throws(write, OfdError);
+      assert.deepEqual(document.toBytes(), before);
+      const reopened = Document.fromBytes(before);
+      try {
+        assert.deepEqual(reopened.pageText(1), value.last);
+        assert.deepEqual(reopened.validateReferences(), []);
+        assert.deepEqual(reopened.pagePng(1, 72), document.pagePng(1, 72));
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      document.close();
+    }
+  }
+});

@@ -6,6 +6,11 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
   const continuation: FlowStart = {page_index: 0, y: 40};
   document.addFlowedText(0, 'continued', {start: continuation});
   document.addFlowedSpans(0, [{text: 'continued'}], {start: continuation});
+  document.addTable(0, [['H'], ['A']], {column_widths: [16], start: continuation});
+  document.addTableCells(0, 2, [{row: 0, column: 0, text: 'H'}, {row: 1, column: 0, text: 'A'}],
+    {column_widths: [16], start: continuation});
+  // @ts-expect-error table start requires a numeric page index
+  document.addTable(0, [['bad']], {column_widths: [16], start: {page_index: '0', y: 40}});
   // @ts-expect-error flow start requires a numeric coordinate
   document.addFlowedText(0, 'bad', {start: {page_index: 0, y: '40'}});
 
