@@ -11043,6 +11043,34 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
     layout_json: *const c_char,
     output: *mut OfdBuffer,
 ) -> i32 {
+    add_box_layout_request(handle, document_index, layout_json, output, false)
+}
+
+/// Arrange measured boxes while protecting indivisible content ranges from page cuts.
+///
+/// JSON uses the ordinary box-layout request and a required `content_ranges`
+/// array of `{source_index, ranges: [[start, end], ...]}` policies. Ranges use
+/// original content coordinates. Returns ordinary fragment geometry and continuation.
+///
+/// # Safety
+/// `handle` must be live, `layout_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_box_layout_with_content_ranges_json(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    add_box_layout_request(handle, document_index, layout_json, output, true)
+}
+
+unsafe fn add_box_layout_request(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+    with_content_ranges: bool,
+) -> i32 {
     run(|| {
         if output.is_null() {
             return Err("output buffer is null".into());
@@ -11053,7 +11081,8 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
             .as_object()
             .ok_or("box layout request must be an object")?;
         for key in object.keys() {
-            if !matches!(key.as_str(), "items" | "page_size" | "margins" | "start") {
+            let ordinary = matches!(key.as_str(), "items" | "page_size" | "margins" | "start");
+            if !(ordinary || with_content_ranges && key == "content_ranges") {
                 return Err(format!("unsupported box layout option: {key}"));
             }
         }
@@ -11080,8 +11109,13 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
             .iter()
             .map(box_layout::parse_item)
             .collect::<Result<Vec<_>, _>>()?;
+        let policies = if with_content_ranges {
+            box_layout::parse_content_ranges(&input)?
+        } else {
+            Vec::new()
+        };
         let result = document_mut(handle)?
-            .add_box_layout(document_index, &items, style)
+            .add_box_layout_with_content_ranges(document_index, &items, &policies, style)
             .map_err(|e| e.to_string())?;
         output_buffer(
             serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,

@@ -279,3 +279,24 @@ measured/extracted text omits placeholders. Invalid later input rolls back the
 call. A leading placeholder absorbs a configured first-line indent once.
 For character-count reservations use `count * (font_size + letter_spacing)` as
 the width. Available since 0.4.0; use matching bindings and native library.
+
+### Protected content ranges (unreleased source API)
+
+Use matching source bindings and native library; this addition is outside 0.4.0.
+Protect complete measured lines while placing/decorating a box:
+
+```python
+metrics = doc.measure_flowed_spans(0, [{"text": "A\nB\nC\nD"}], 8,
+                                   font_size=2, line_height=3)
+policies = [{"source_index": 0, "ranges": [[line["y"], line["y"] + line["height"]]
+             for line in metrics["lines"]]}]
+result = doc.add_box_layout_with_content_ranges(0,
+    [{"type": "box", "size": [8, metrics["height"]]}], policies,
+    page_size=[20, 14], margins=[2] * 4)
+```
+
+Intervals use original content coordinates and must be ordered, positive,
+disjoint and inside the box. A cut inside an interval moves it intact to the
+next page. The result uses ordinary box-layout fragment fields and continuation;
+callers draw child content separately. Empty policies retain geometric cuts.
+Invalid policies roll back the entire call.

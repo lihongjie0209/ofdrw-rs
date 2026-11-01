@@ -309,3 +309,25 @@ The same spans work in styled flow, text boxes, flow blocks and fixed/flow
 containers. A leading placeholder absorbs a configured first-line indent once.
 For character-count reservations use `count * (fontSize + letterSpacing)` as
 width. Available since 0.4.0; use matching bindings and native library.
+
+### Protected content ranges (unreleased source API)
+
+Use matching source bindings and native library; this addition is outside 0.4.0.
+`BoxContentRangesFromText` builds indivisible intervals from measured lines:
+
+```go
+policy := ofdrw.BoxContentRangesFromText(0, metrics)
+result, err := doc.AddBoxLayoutWithContentRanges(
+    0,
+    []ofdrw.BoxLayoutItem{{Type: "box", LayoutBox: &ofdrw.LayoutBox{Size: [2]float64{8, metrics.Height}}}},
+    []ofdrw.BoxContentRanges{policy},
+    ofdrw.BoxLayoutStyle{PageSize: [2]float64{20, 14}, Margins: [4]float64{2, 2, 2, 2}},
+)
+if err != nil { return err }
+_ = result
+```
+
+Intervals use original content coordinates and must be ordered, positive,
+disjoint and inside the box. Nil/empty policies retain geometric cuts. The
+result uses ordinary box-layout geometry and continuation; callers draw child
+content separately. Invalid policies roll back the entire call.

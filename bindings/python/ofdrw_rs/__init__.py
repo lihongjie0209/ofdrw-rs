@@ -321,6 +321,7 @@ _ffi.cdef(
     int ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
+    int ofd_add_box_layout_with_content_ranges_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);
     int ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
@@ -4341,6 +4342,29 @@ class Document:
         _check(_lib.ofd_add_text_boxes_json(
             self._handle, document_index,
             _utf8(json.dumps({**options, "boxes": normalized}, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def add_box_layout_with_content_ranges(self, document_index: int, items: list[dict],
+                                          content_ranges: list[dict], **options) -> dict:
+        """Place and decorate measured boxes without cutting protected content intervals.
+
+        Policies contain source_index and ordered disjoint [start, end] ranges
+        relative to the original content top. Options and results match add_box_layout.
+        Children are drawn separately in the returned fragment rectangles.
+        """
+        self._require_open()
+        if document_index < 0:
+            raise IndexError(document_index)
+        if not isinstance(items, list) or not isinstance(content_ranges, list):
+            raise TypeError("items and content_ranges must be lists")
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_add_box_layout_with_content_ranges_json(
+            self._handle, document_index,
+            _utf8(json.dumps({**options, "items": items, "content_ranges": content_ranges}, allow_nan=False)), output,
         ))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))

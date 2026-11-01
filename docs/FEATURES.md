@@ -1012,7 +1012,19 @@ whole operation. Ordinary `add_box_layout()` retains geometric splitting.
 This low-level API places and decorates fragments; callers draw child content
 in the returned rectangles. Automatic text boxes and mixed containers below
 provide styled child drawing and nested pagination. Direct range policies
-remain Rust-only.
+are Rust-only in 0.4.0.
+
+**未发布（源码接口）：** C adds `ofd_add_box_layout_with_content_ranges_json`,
+Python `add_box_layout_with_content_ranges`, Go `AddBoxLayoutWithContentRanges`,
+and Node.js `addBoxLayoutWithContentRanges`. The request combines ordinary box
+items and options with `content_ranges: [{source_index, ranges: [[start, end]]}]`.
+An empty policy list retains ordinary geometric cuts. The ordinary box-layout
+entry point still rejects this extra option. Go provides `BoxContentRanges`
+and `BoxContentRangesFromText`; other callers build ranges from measured line
+`y` and `height` values. Policy objects reject unknown fields, and invalid later
+policies roll back all geometry and decoration. Limits are 10,000 policies and
+100,000 total intervals. Matching source bindings and native library are
+required; this addition is outside the 0.4.0 release candidate.
 
 
 ### Dashed box borders (since v0.4.0)

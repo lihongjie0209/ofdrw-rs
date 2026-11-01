@@ -4,6 +4,41 @@ use ofdrw::{
 };
 use serde::Serialize;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentRangesRequest {
+    source_index: usize,
+    ranges: Vec<[f64; 2]>,
+}
+
+pub(super) fn parse_content_ranges(
+    input: &serde_json::Value,
+) -> Result<Vec<ofdrw::BoxContentRanges>, String> {
+    let values = input
+        .get("content_ranges")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("content_ranges must be an array")?;
+    if values.len() > 10_000 {
+        return Err("too many box content policies".into());
+    }
+    let mut total = 0usize;
+    values
+        .iter()
+        .map(|value| {
+            let request: ContentRangesRequest =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            total = total.saturating_add(request.ranges.len());
+            if total > 100_000 {
+                return Err("too many box content ranges".into());
+            }
+            Ok(ofdrw::BoxContentRanges {
+                source_index: request.source_index,
+                ranges: request.ranges,
+            })
+        })
+        .collect()
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FloatRequest {
@@ -180,6 +215,158 @@ impl<'a> From<&'a BoxLayoutResult> for Response<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_range_parser_enforces_policy_and_total_interval_limits() {
+        let policy = serde_json::json!({"source_index":0,"ranges":[]});
+        assert!(
+            parse_content_ranges(&serde_json::json!({"content_ranges":vec![policy;10_001]}))
+                .is_err()
+        );
+        for (count, valid) in [(100_000, true), (100_001, false)] {
+            let input = serde_json::json!({"content_ranges":[{"source_index":0,"ranges":vec![[0.,1.];count]}]});
+            assert_eq!(parse_content_ranges(&input).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn ffi_content_ranges_preserve_fragments_and_reject_bad_policies_atomically() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/box-content-ranges.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut handle = ptr::null_mut();
+            assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+            let input = CString::new(case["request"].to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    ofd_add_box_layout_with_content_ranges_json(
+                        handle,
+                        0,
+                        input.as_ptr(),
+                        &mut output,
+                    )
+                },
+                0
+            );
+            let actual: serde_json::Value = serde_json::from_slice(unsafe {
+                std::slice::from_raw_parts(output.data, output.len)
+            })
+            .unwrap();
+            unsafe { ofd_buffer_free(output) };
+            // Numeric JSON encodings differ for integral geometry; compare values recursively below.
+            fn equal_geometry(a: &serde_json::Value, b: &serde_json::Value) {
+                match (a, b) {
+                    (serde_json::Value::Number(_), serde_json::Value::Number(_)) => {
+                        assert_eq!(a.as_f64(), b.as_f64())
+                    }
+                    (serde_json::Value::Array(a), serde_json::Value::Array(b)) => {
+                        assert_eq!(a.len(), b.len());
+                        for (a, b) in a.iter().zip(b) {
+                            equal_geometry(a, b);
+                        }
+                    }
+                    (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                        assert_eq!(a.len(), b.len());
+                        for (key, b) in b {
+                            equal_geometry(&a[key], b);
+                        }
+                    }
+                    _ => assert_eq!(a, b),
+                }
+            }
+            equal_geometry(&actual, &case["expected"]);
+            let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+            let invalid = [
+                serde_json::json!(null),
+                serde_json::json!({}),
+                serde_json::json!([{"source_index":0,"ranges":[[0,11]]}]),
+                serde_json::json!([{"source_index":0,"ranges":[[3,2]]}]),
+                serde_json::json!([{"source_index":0,"ranges":[[0,4],[3,5]]}]),
+                serde_json::json!([{"source_index":0,"ranges":[[0,2]],"extra":true}]),
+                serde_json::json!([{"source_index":-1,"ranges":[]}]),
+                serde_json::json!([{"source_index":0,"ranges":[[0]]}]),
+                serde_json::json!([{"source_index":0,"ranges":[]},{"source_index":0,"ranges":[]}]),
+            ];
+            for policy in invalid {
+                let mut request = case["request"].clone();
+                request["content_ranges"] = policy;
+                let input = CString::new(request.to_string()).unwrap();
+                let mut output = OfdBuffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
+                assert_ne!(
+                    unsafe {
+                        ofd_add_box_layout_with_content_ranges_json(
+                            handle,
+                            0,
+                            input.as_ptr(),
+                            &mut output,
+                        )
+                    },
+                    0
+                );
+                assert!(output.data.is_null());
+                assert_eq!(
+                    unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                    before
+                );
+            }
+            assert_ne!(
+                unsafe {
+                    ofd_add_box_layout_with_content_ranges_json(
+                        handle,
+                        0,
+                        input.as_ptr(),
+                        ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_ne!(
+                unsafe {
+                    ofd_add_box_layout_with_content_ranges_json(
+                        ptr::null_mut(),
+                        0,
+                        input.as_ptr(),
+                        &mut output,
+                    )
+                },
+                0
+            );
+            assert_ne!(
+                unsafe {
+                    ofd_add_box_layout_with_content_ranges_json(
+                        handle,
+                        99,
+                        input.as_ptr(),
+                        &mut output,
+                    )
+                },
+                0
+            );
+            // Ordinary box layout continues rejecting range options.
+            assert_ne!(
+                unsafe { ofd_add_box_layout_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            assert_eq!(
+                unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                before
+            );
+            unsafe { ofd_close(handle) };
+        }
+    }
 
     #[test]
     fn box_request_preserves_defaults_and_all_drawing_and_row_options() {

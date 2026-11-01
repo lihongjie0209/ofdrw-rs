@@ -632,3 +632,22 @@ containers. Geometry participates in wrapping and line height while text omits
 the placeholders. A leading placeholder absorbs a configured first-line indent
 once. Character-count reservations use `count * (font_size + letter_spacing)`.
 Use matching bindings and native library (0.4.0 or later).
+
+### Protected content ranges (unreleased source API)
+
+Use matching source bindings and native library; this addition is outside 0.4.0.
+`BoxContentRanges` protects indivisible intervals while placing/decorating boxes:
+
+```js
+const metrics = doc.measureFlowedSpans(0, [{text: 'A\nB\nC\nD'}], 8,
+  {font_size: 2, line_height: 3});
+const policies = [{source_index: 0, ranges: metrics.lines.map(line => [line.y, line.y+line.height])}];
+const result = doc.addBoxLayoutWithContentRanges(0,
+  [{type: 'box', size: [8, metrics.height]}], policies,
+  {page_size: [20,14], margins: [2,2,2,2]});
+```
+
+Intervals use original content coordinates and must be ordered, positive,
+disjoint and inside the box. Empty policies retain geometric cuts. The result
+uses ordinary box-layout geometry and continuation; child drawing remains with
+the caller. Invalid policies roll back the entire call.

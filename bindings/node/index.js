@@ -310,6 +310,7 @@ const api = {
   addFixedContainers: library.func('int ofd_add_fixed_containers_json(OfdDocument handle, size_t page_index, str layout, _Out_ OfdBuffer *output)'),
   addFlowContainers: library.func('int ofd_add_flow_containers_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addTextBoxes: library.func('int ofd_add_text_boxes_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
+  addBoxLayoutWithContentRanges: library.func('int ofd_add_box_layout_with_content_ranges_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addBoxLayout: library.func('int ofd_add_box_layout_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   measureFlowedSpans: library.func('int ofd_measure_flowed_spans_json(OfdDocument handle, size_t document_index, str measure, _Out_ OfdBuffer *output)'),
   addTable: library.func('int ofd_add_table_json(OfdDocument handle, size_t document_index, str table, _Out_ OfdBuffer *output)'),
@@ -1702,6 +1703,18 @@ class Document {
       return value;
     });
     return this._json(api.addTextBoxes, index(documentIndex, 'documentIndex'), payload);
+  }
+
+  addBoxLayoutWithContentRanges(documentIndex, items, contentRanges, options = {}) {
+    if (!Array.isArray(items) || !Array.isArray(contentRanges)) throw new TypeError('items and contentRanges must be arrays');
+    const request = { ...optionsObject(options), items, content_ranges: contentRanges };
+    const payload = JSON.stringify(request, (_key, value) => {
+      if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new RangeError('box layout numbers must be finite');
+      }
+      return value;
+    });
+    return this._json(api.addBoxLayoutWithContentRanges, index(documentIndex, 'documentIndex'), payload);
   }
 
   addBoxLayout(documentIndex, items, options = {}) {

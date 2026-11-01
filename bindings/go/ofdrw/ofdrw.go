@@ -329,6 +329,7 @@ type nativeAPI struct {
 	addFixedContainers              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowContainers               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addTextBoxes                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addBoxLayoutWithContentRanges   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureFlowedSpans              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
@@ -698,6 +699,7 @@ func loadAPI() error {
 			{"ofd_add_table_json", &api.addTable},
 			{"ofd_add_flowed_spans_json", &api.addFlowedSpans},
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
+			{"ofd_add_box_layout_with_content_ranges_json", &api.addBoxLayoutWithContentRanges},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
 			{"ofd_add_text_boxes_json", &api.addTextBoxes},
 			{"ofd_add_fixed_containers_json", &api.addFixedContainers},
@@ -1215,6 +1217,22 @@ type BoxPlacement struct {
 	SourceOffset float64    `json:"source_offset"`
 	First        bool       `json:"first"`
 	Last         bool       `json:"last"`
+}
+
+// BoxContentRanges protects ordered disjoint vertical intervals from page cuts.
+// SourceIndex identifies a box item; intervals use its original content coordinates.
+type BoxContentRanges struct {
+	SourceIndex int          `json:"source_index"`
+	Ranges      [][2]float64 `json:"ranges"`
+}
+
+// BoxContentRangesFromText protects each measured line, including its leading.
+func BoxContentRangesFromText(sourceIndex int, metrics FlowTextMetrics) BoxContentRanges {
+	ranges := make([][2]float64, len(metrics.Lines))
+	for i, line := range metrics.Lines {
+		ranges[i] = [2]float64{line.Y, line.Y + line.Height}
+	}
+	return BoxContentRanges{SourceIndex: sourceIndex, Ranges: ranges}
 }
 
 // BoxLayoutResult gives global page indexes, fragment coordinates, and a continuation.
@@ -10374,6 +10392,71 @@ func (doc *Document) AddTextBoxes(documentIndex int, boxes []TextBox, style BoxL
 	var result BoxLayoutResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		return BoxLayoutResult{}, fmt.Errorf("decode text boxes result: %w", err)
+	}
+	return result, nil
+}
+
+// AddBoxLayoutWithContentRanges protects indivisible intervals while arranging and painting boxes.
+// It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
+// Invalid later input leaves the document unchanged.
+func (doc *Document) AddBoxLayoutWithContentRanges(
+	documentIndex int,
+	items []BoxLayoutItem,
+	contentRanges []BoxContentRanges,
+	style BoxLayoutStyle,
+) (BoxLayoutResult, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return BoxLayoutResult{}, err
+	}
+	if documentIndex < 0 {
+		return BoxLayoutResult{}, errors.New("negative document index")
+	}
+	if style == (BoxLayoutStyle{}) {
+		style = DefaultBoxLayoutStyle()
+	}
+	if items == nil {
+		items = []BoxLayoutItem{}
+	}
+	policies := make([]BoxContentRanges, len(contentRanges))
+	for i, policy := range contentRanges {
+		policies[i] = policy
+		if policies[i].Ranges == nil {
+			policies[i].Ranges = [][2]float64{}
+		}
+	}
+	payload, err := json.Marshal(struct {
+		Items         []BoxLayoutItem    `json:"items"`
+		ContentRanges []BoxContentRanges `json:"content_ranges"`
+		BoxLayoutStyle
+	}{Items: items, ContentRanges: policies, BoxLayoutStyle: style})
+	if err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("encode box layout: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addBoxLayoutWithContentRanges(
+		doc.handle,
+		uintptr(documentIndex),
+		&payloadBytes[0],
+		&buffer,
+	)); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("add box layout: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	var result BoxLayoutResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("decode box layout result: %w", err)
 	}
 	return result, nil
 }

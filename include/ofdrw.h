@@ -420,6 +420,8 @@ int32_t ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, co
 /* Mixed flow returns {pages, next}; images use base64 data and tables use nested grids. */
 int32_t ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
 /* Measured box rows return {pages, placements, next}; all distances are millimeters. */
+/* Adds required content_ranges:[{source_index,ranges:[[start,end],...]}]. */
+int32_t ofd_add_box_layout_with_content_ranges_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 /* Fixed mixed containers on one existing global page; returns a placement array. */

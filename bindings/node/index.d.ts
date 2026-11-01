@@ -440,6 +440,8 @@ export interface BoxPlacement {
   first: boolean;
   last: boolean;
 }
+/** Ordered indivisible intervals in original content coordinates for one box. */
+export interface BoxContentRanges { source_index: number; ranges: [number, number][] }
 export interface BoxLayoutResult { pages: number[]; placements: BoxPlacement[]; next: FlowStart | null }
 
 export type TextObjectOptions = {
@@ -1082,6 +1084,7 @@ export class Document {
   addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];
   addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;
   addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
+  addBoxLayoutWithContentRanges(documentIndex: number, items: BoxLayoutItem[], contentRanges: BoxContentRanges[], options?: BoxLayoutOptions): BoxLayoutResult;
   addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
   addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
   addFlowedSpans(documentIndex: number, spans: FlowSpan[], options?: FlowTextOptions): number[];

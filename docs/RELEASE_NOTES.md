@@ -1,3 +1,10 @@
+# Unreleased
+
+- Expose direct protected content-range pagination through C, Python, Go and
+  Node.js. Keep ordinary box-layout behavior, exact fragment geometry and
+  independent column offsets; add strict policy parsing, bounds, atomic rollback
+  tests and shared fixtures. Go provides a measured-line conversion helper.
+
 # v0.4.0
 
 ## Upgrade notes
