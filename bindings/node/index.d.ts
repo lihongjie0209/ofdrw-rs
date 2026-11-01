@@ -99,6 +99,7 @@ export interface AnnotationPath {
   even_odd?: boolean;
   alpha?: number;
   stroke?: boolean;
+  /** Path width in millimeters; zero selects one device pixel (after 0.4.0). */
   line_width?: number;
   cap?: 'butt' | 'round' | 'square';
   join?: 'miter' | 'round' | 'bevel';
@@ -753,6 +754,7 @@ export interface PageObjectStrokeStyleInfo {
 }
 
 export interface PathStrokeStyle {
+  /** Zero selects one device pixel (after 0.4.0). */
   line_width: number;
   cap?: 'butt' | 'round' | 'square';
   join?: 'miter' | 'round' | 'bevel';

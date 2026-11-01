@@ -331,3 +331,14 @@ Intervals use original content coordinates and must be ordered, positive,
 disjoint and inside the box. Nil/empty policies retain geometric cuts. The
 result uses ordinary box-layout geometry and continuation; callers draw child
 content separately. Invalid policies roll back the entire call.
+
+## Device hairlines (unreleased; after 0.4.0)
+
+For path writers, use `ofdrw.PathStyle{Stroke: true, Hairline: true}` to
+preserve a zero line width. This applies to page paths, composite paths,
+single/multiple/mixed path annotations, and appended annotation paths.
+Without `Hairline`, the existing zero-value default remains 0.4 mm. A
+positive `LineWidth` is always honored, even when `Hairline` is true.
+`PathStrokeStyle{LineWidth: 0}` also updates existing paths to device hairlines.
+PNG uses one device pixel at any DPI; PDF exports a native zero-width stroke.
+Use a matching native library built from the same unreleased source.

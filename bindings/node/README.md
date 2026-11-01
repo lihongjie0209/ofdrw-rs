@@ -651,3 +651,11 @@ Intervals use original content coordinates and must be ordered, positive,
 disjoint and inside the box. Empty policies retain geometric cuts. The result
 uses ordinary box-layout geometry and continuation; child drawing remains with
 the caller. Invalid policies roll back the entire call.
+
+## Device hairlines (unreleased; after 0.4.0)
+
+Pass `{line_width: 0}` to `addPathObject`, `addCompositePathObject`, or
+`addPathAnnotation`. Existing paths accept
+`doc.setPagePathStrokeStyle(0, objectId, {line_width: 0})`.
+PNG retains one device pixel across DPI and transforms; PDF preserves a
+native zero-width stroke. Use the matching unreleased native library.

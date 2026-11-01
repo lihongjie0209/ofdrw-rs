@@ -300,3 +300,11 @@ disjoint and inside the box. A cut inside an interval moves it intact to the
 next page. The result uses ordinary box-layout fragment fields and continuation;
 callers draw child content separately. Empty policies retain geometric cuts.
 Invalid policies roll back the entire call.
+
+## Device hairlines (unreleased; after 0.4.0)
+
+Pass `line_width=0` to `add_path_object`, `add_composite_path_object`, or
+`add_path_annotation` for a one-device-pixel path stroke. Existing paths
+accept `set_page_path_stroke_style(0, object_id, {"line_width": 0})`.
+PNG retains device width across DPI and transforms; PDF preserves a native
+zero-width stroke. Use the matching unreleased native library.

@@ -5611,7 +5611,7 @@ func (doc *Document) AppendAnnotationObjects(pageIndex int, annotationID string,
 	prepared := make([]AnnotationGraphic, len(objects))
 	copy(prepared, objects)
 	for index := range prepared {
-		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 {
+		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 && !prepared[index].Hairline {
 			prepared[index].LineWidth = 0.4
 		}
 	}
@@ -8884,10 +8884,13 @@ func (doc *Document) RemovePageLayer(pageIndex int, layerID string) error {
 
 // PathStyle controls the appearance of a positioned vector path.
 type PathStyle struct {
-	Fill         bool        `json:"fill"`
-	EvenOdd      bool        `json:"even_odd"`
-	Alpha        *uint8      `json:"alpha,omitempty"`
-	Stroke       bool        `json:"stroke"`
+	Fill    bool   `json:"fill"`
+	EvenOdd bool   `json:"even_odd"`
+	Alpha   *uint8 `json:"alpha,omitempty"`
+	Stroke  bool   `json:"stroke"`
+	// Hairline preserves a zero LineWidth instead of applying the writer's default.
+	// A nonzero LineWidth is always honored.
+	Hairline     bool        `json:"-"`
 	LineWidth    float64     `json:"line_width"`
 	Cap          string      `json:"cap,omitempty"`
 	Join         string      `json:"join,omitempty"`
@@ -8927,7 +8930,7 @@ type AnnotationGraphic struct {
 }
 
 // AddPathObject adds a vector path to a page and returns its OFD object ID.
-// A zero LineWidth selects the default width of 0.4 mm.
+// A zero LineWidth selects 0.4 mm unless Hairline is true.
 func (doc *Document) AddPathObject(pageIndex int, commands string, boundary [4]float64, style PathStyle) (int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -8937,7 +8940,7 @@ func (doc *Document) AddPathObject(pageIndex int, commands string, boundary [4]f
 	if pageIndex < 0 {
 		return 0, errors.New("negative page index")
 	}
-	if style.LineWidth == 0 {
+	if style.LineWidth == 0 && !style.Hairline {
 		style.LineWidth = 0.4
 	}
 	payload, err := json.Marshal(struct {
@@ -9002,7 +9005,7 @@ func (doc *Document) AddCompositePathObject(pageIndex int, commands string, boun
 	if pageIndex < 0 {
 		return 0, errors.New("negative page index")
 	}
-	if style.LineWidth == 0 {
+	if style.LineWidth == 0 && !style.Hairline {
 		style.LineWidth = 0.4
 	}
 	payload, err := json.Marshal(struct {
@@ -9245,7 +9248,7 @@ func (doc *Document) addImageAnnotation(pageIndex int, boundary [4]float64, opac
 }
 
 // AddPathAnnotation adds a styled vector Path annotation and returns its ID.
-// A zero LineWidth selects the default width of 0.4 mm.
+// A zero LineWidth selects 0.4 mm unless Hairline is true.
 func (doc *Document) AddPathAnnotation(pageIndex int, commands string, boundary [4]float64, style PathStyle) (int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -9255,7 +9258,7 @@ func (doc *Document) AddPathAnnotation(pageIndex int, commands string, boundary 
 	if pageIndex < 0 {
 		return 0, errors.New("negative page index")
 	}
-	if style.LineWidth == 0 {
+	if style.LineWidth == 0 && !style.Hairline {
 		style.LineWidth = 0.4
 	}
 	payload, err := json.Marshal(struct {
@@ -9292,7 +9295,7 @@ func (doc *Document) AddMultiPathAnnotation(pageIndex int, boundary [4]float64, 
 	prepared := make([]AnnotationPath, len(paths))
 	copy(prepared, paths)
 	for index := range prepared {
-		if prepared[index].LineWidth == 0 {
+		if prepared[index].LineWidth == 0 && !prepared[index].Hairline {
 			prepared[index].LineWidth = 0.4
 		}
 	}
@@ -9339,7 +9342,7 @@ func (doc *Document) addMixedAnnotation(pageIndex int, boundary [4]float64, obje
 	prepared := make([]AnnotationGraphic, len(objects))
 	copy(prepared, objects)
 	for index := range prepared {
-		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 {
+		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 && !prepared[index].Hairline {
 			prepared[index].LineWidth = 0.4
 		}
 	}

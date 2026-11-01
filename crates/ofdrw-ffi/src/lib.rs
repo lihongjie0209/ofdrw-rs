@@ -22118,6 +22118,55 @@ mod tests {
     }
 
     #[test]
+    fn ffi_writes_and_updates_device_hairlines_and_rejects_negative_widths_atomically() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        assert_eq!(unsafe { ofd_add_blank_page(handle, 20., 20.) }, 0);
+        let payload =
+            CString::new(r#"{"commands":"M 2 5 L 18 5","boundary":[0,0,20,20],"line_width":0}"#)
+                .unwrap();
+        let mut id = 0;
+        assert_eq!(
+            unsafe { ofd_add_path_object_json(handle, 0, payload.as_ptr(), &mut id) },
+            0
+        );
+        let id = CString::new(id.to_string()).unwrap();
+        let inspect = || {
+            let doc = unsafe { document_ref(handle).unwrap() };
+            assert_eq!(
+                doc.page_object_stroke_styles(0).unwrap()[0]
+                    .style
+                    .line_width,
+                0.
+            );
+            assert!(doc.page_svg(0).unwrap().contains("ofd-device-hairline-"));
+            for dpi in [25.4, 101.6, 300.] {
+                assert!(!doc.page_png(0, dpi).unwrap().is_empty());
+            }
+        };
+        inspect();
+        let update = CString::new(r#"{"line_width":0,"dash_pattern":[2,2]}"#).unwrap();
+        assert_eq!(
+            unsafe { ofd_set_page_path_stroke_style_json(handle, 0, id.as_ptr(), update.as_ptr()) },
+            0
+        );
+        inspect();
+        let before = unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap();
+        let negative = CString::new(r#"{"line_width":-1}"#).unwrap();
+        assert_ne!(
+            unsafe {
+                ofd_set_page_path_stroke_style_json(handle, 0, id.as_ptr(), negative.as_ptr())
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
     fn ffi_creates_and_assigns_reusable_draw_param() {
         let mut handle = ptr::null_mut();
         assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
