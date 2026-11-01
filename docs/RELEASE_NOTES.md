@@ -22,6 +22,11 @@
   dimensions. Measured height can size decorated text boxes. Independent font
   table fixtures and rendering comparisons cover ordinary and shaped text.
 
+- Add Rust `TableCellImage::from_intrinsic` using Java OFDRW’s 5 pixels/mm
+  conversion, plus aspect-preserving `fit_within` that never enlarges images.
+  Validate encoded data before sizing; preserve original bytes and support
+  the existing image formats, including JPEG 2000 and JBIG2.
+
 # v0.3.0
 
 ## Upgrade notes
