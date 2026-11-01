@@ -48,7 +48,12 @@
 - Add Rust vertical mixed flow containers with recursive decorated children,
   paragraph and image children, safe content page cuts, gap/spacing and
   atomic validation. Root boxes retain floating rows; internal floating rows
-  and table children remain pending.
+  remain pending.
+
+- Add paginated table children inside Rust flow containers, preserving complete
+  merged-row groups and reusing existing cell drawing. Cache cell ordering
+  and draw selected row intervals without rebuilding full-table row positions.
+  Repeated headers inside containers remain pending.
 
 # v0.3.0
 

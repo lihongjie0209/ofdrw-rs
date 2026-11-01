@@ -1,6 +1,6 @@
 use super::*;
 
-/// A vertical sequence of text, images, spacing and nested decorated boxes.
+/// A vertical sequence of text, images, tables, spacing and nested decorated boxes.
 ///
 /// Content height is automatic; `layout.size[0]` is the requested width.
 /// Root containers support ordinary box floating rows. Nested containers are
@@ -21,6 +21,14 @@ pub enum FlowContainerChild {
     },
     Image {
         image: TableCellImage,
+        align: FlowTextAlign,
+    },
+    /// Rows split only between complete merged-row groups. Table geometry
+    /// comes from `table`; `style` supplies text defaults and font selection.
+    /// Repeated headers inside containers are currently unsupported.
+    Table {
+        table: Box<NestedTable>,
+        style: Box<TableStyle>,
         align: FlowTextAlign,
     },
     Container(Box<FlowContainer>),
@@ -45,7 +53,18 @@ struct PlacedChild<'a> {
 enum PreparedChild<'a> {
     Text(text_measurement::PreparedFlowText),
     Image(&'a TableCellImage),
+    Table {
+        prepared: Box<PreparedNestedTable<'a>>,
+        style: &'a TableStyle,
+        groups: Vec<TableGroup>,
+    },
     Container(Box<PreparedContainer<'a>>),
+}
+
+struct TableGroup {
+    rows: std::ops::Range<usize>,
+    start: f64,
+    end: f64,
 }
 
 fn expected_units(b: &PreparedContainer<'_>) -> usize {
@@ -57,6 +76,7 @@ fn expected_units(b: &PreparedContainer<'_>) -> usize {
         .map(|child| match &child.node {
             PreparedChild::Text(flow) => flow.metrics.lines.len(),
             PreparedChild::Image(_) => 1,
+            PreparedChild::Table { groups, .. } => groups.len(),
             PreparedChild::Container(nested) => expected_units(nested),
         })
         .sum()
@@ -251,6 +271,64 @@ impl OfdDocument {
                         vec![[0., image.height]],
                     )
                 }
+                FlowContainerChild::Table {
+                    table,
+                    style,
+                    align,
+                } => {
+                    if style.repeat_header {
+                        return Err(OfdError::Invalid(
+                            "repeated table headers inside containers are unsupported".into(),
+                        ));
+                    }
+                    let (font, metrics) =
+                        self.container_table_fonts(document_index, table, style)?;
+                    let prepared =
+                        prepare_nested_table(table, width, style, &metrics, font.as_deref(), 0)?;
+                    let mut row_end = (1..=table.row_count).collect::<Vec<_>>();
+                    for cell in &table.cells {
+                        row_end[cell.row] = row_end[cell.row].max(cell.row + cell.row_span);
+                    }
+                    let mut groups = Vec::new();
+                    let mut row = 0;
+                    let mut offset = 0.;
+                    while row < table.row_count {
+                        let mut stop = row_end[row];
+                        let mut scan = row + 1;
+                        while scan < stop {
+                            stop = stop.max(row_end[scan]);
+                            scan += 1;
+                        }
+                        let end = offset + prepared.row_heights[row..stop].iter().sum::<f64>();
+                        if !end.is_finite() || end <= offset {
+                            return Err(OfdError::Invalid(
+                                "container table row group has invalid height".into(),
+                            ));
+                        }
+                        groups.push(TableGroup {
+                            rows: row..stop,
+                            start: offset,
+                            end,
+                        });
+                        offset = end;
+                        row = stop;
+                    }
+                    let table_width = table.column_widths.iter().sum::<f64>();
+                    let protected = groups
+                        .iter()
+                        .map(|group| [group.start, group.end])
+                        .collect();
+                    (
+                        aligned_x(width, table_width, *align),
+                        offset,
+                        Some(PreparedChild::Table {
+                            prepared: Box::new(prepared),
+                            style,
+                            groups,
+                        }),
+                        protected,
+                    )
+                }
                 FlowContainerChild::Container(child) => {
                     let prepared =
                         self.prepare_container(document_index, child, width, depth + 1, count)?;
@@ -309,6 +387,60 @@ impl OfdDocument {
             children,
             ranges,
         })
+    }
+
+    fn container_table_fonts(
+        &self,
+        document_index: usize,
+        table: &NestedTable,
+        style: &TableStyle,
+    ) -> Result<(Option<String>, HashMap<String, FlowFontMetrics>), OfdError> {
+        if !style.font_size.is_finite()
+            || style.font_size <= 0.
+            || !style.line_height.is_finite()
+            || style.line_height < style.font_size
+        {
+            return Err(OfdError::Invalid(
+                "container table typography is invalid".into(),
+            ));
+        }
+        let mut parts = Vec::new();
+        collect_table_text(&table.cells, &mut parts, 0)?;
+        if parts.iter().all(|text| text.is_empty()) {
+            return Ok((None, HashMap::new()));
+        }
+        let fonts = self.fonts()?;
+        let default = fonts
+            .iter()
+            .find(|font| {
+                font.document_index == document_index
+                    && style
+                        .font_id
+                        .as_ref()
+                        .is_none_or(|id| resource_id_key(id) == resource_id_key(&font.id))
+            })
+            .ok_or_else(|| OfdError::Invalid("container table font is not defined".into()))?;
+        let mut ids = HashSet::new();
+        ids.insert(default.id.clone());
+        collect_table_font_ids(&table.cells, &mut ids);
+        let all_text = parts.join("\n");
+        let mut metrics = HashMap::new();
+        for id in ids {
+            let font = fonts
+                .iter()
+                .find(|font| {
+                    font.document_index == document_index
+                        && resource_id_key(&font.id) == resource_id_key(&id)
+                })
+                .ok_or_else(|| {
+                    OfdError::Invalid(format!("container table font {id} is not defined"))
+                })?;
+            metrics.insert(
+                resource_id_key(&id),
+                flow_font_metrics(self, font, &all_text)?,
+            );
+        }
+        Ok((Some(default.id.clone()), metrics))
     }
 
     fn draw_container_children(
@@ -378,6 +510,34 @@ impl OfdDocument {
                                 image.width,
                                 image.height,
                             ],
+                        )?;
+                    }
+                }
+                PreparedChild::Table {
+                    prepared,
+                    style,
+                    groups,
+                } => {
+                    for (index, group) in groups.iter().enumerate() {
+                        let from = child.y + group.start;
+                        let to = child.y + group.end;
+                        let tolerance = to.abs().max(1.) * 1e-12;
+                        if from + tolerance < start || to > end + tolerance {
+                            continue;
+                        }
+                        if !drawn.insert((child.id, index)) {
+                            return Err(OfdError::Invalid(
+                                "container table group was placed more than once".into(),
+                            ));
+                        }
+                        draw_nested_table_rows(
+                            self,
+                            p.page_index,
+                            prepared,
+                            p.content_box[0] + child.x,
+                            p.content_box[1] + from - start,
+                            style,
+                            group.rows.clone(),
                         )?;
                     }
                 }

@@ -34636,6 +34636,7 @@ struct PreparedNestedTable<'a> {
     table: &'a NestedTable,
     cells: Vec<Vec<PreparedTableBlock<'a>>>,
     row_heights: Vec<f64>,
+    ordered_cells: Vec<usize>,
     height: f64,
 }
 
@@ -35122,10 +35123,14 @@ fn prepare_nested_table<'a>(
         }
     }
     let height = row_heights.iter().sum();
+    let mut ordered_cells = (0..table.cells.len()).collect::<Vec<_>>();
+    ordered_cells
+        .sort_unstable_by_key(|index| (table.cells[*index].row, table.cells[*index].column));
     Ok(PreparedNestedTable {
         table,
         cells,
         row_heights,
+        ordered_cells,
         height,
     })
 }
@@ -35138,23 +35143,57 @@ fn draw_nested_table(
     y: f64,
     style: &TableStyle,
 ) -> Result<(), OfdError> {
+    draw_nested_table_rows(
+        document,
+        page_index,
+        prepared,
+        x,
+        y,
+        style,
+        0..prepared.table.row_count,
+    )
+}
+
+fn draw_nested_table_rows(
+    document: &mut OfdDocument,
+    page_index: usize,
+    prepared: &PreparedNestedTable<'_>,
+    x: f64,
+    y: f64,
+    style: &TableStyle,
+    rows: std::ops::Range<usize>,
+) -> Result<(), OfdError> {
+    if rows.start >= rows.end || rows.end > prepared.table.row_count {
+        return Err(OfdError::Invalid(
+            "table row fragment is out of bounds".into(),
+        ));
+    }
     let table = prepared.table;
     let mut x_positions = vec![x];
     for width in &table.column_widths {
         x_positions.push(x_positions.last().copied().unwrap_or(x) + width);
     }
     let mut y_positions = vec![y];
-    for height in &prepared.row_heights {
+    for height in &prepared.row_heights[rows.clone()] {
         y_positions.push(y_positions.last().copied().unwrap_or(y) + height);
     }
-    let mut ordered = (0..table.cells.len()).collect::<Vec<_>>();
-    ordered.sort_unstable_by_key(|index| (table.cells[*index].row, table.cells[*index].column));
-    for index in ordered {
+    let first = prepared
+        .ordered_cells
+        .partition_point(|index| table.cells[*index].row < rows.start);
+    for &index in prepared.ordered_cells[first..]
+        .iter()
+        .take_while(|index| table.cells[**index].row < rows.end)
+    {
         let cell = &table.cells[index];
+        if cell.row + cell.row_span > rows.end {
+            return Err(OfdError::Invalid(
+                "table fragment cuts a merged cell".into(),
+            ));
+        }
         let cell_x = x_positions[cell.column];
-        let cell_y = y_positions[cell.row];
+        let cell_y = y_positions[cell.row - rows.start];
         let width = x_positions[cell.column + cell.column_span] - cell_x;
-        let height = y_positions[cell.row + cell.row_span] - cell_y;
+        let height = y_positions[cell.row + cell.row_span - rows.start] - cell_y;
         let [pad_top, pad_right, pad_bottom, pad_left] =
             table_cell_padding(cell, table.padding, width)?;
         let path = format!("M 0 0 L {width} 0 L {width} {height} L 0 {height} C");
