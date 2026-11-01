@@ -26590,9 +26590,20 @@ impl OfdDocument {
                     let escaped_text = escape_text_code(&line.text);
                     let escaped_font = escape_xml(&font.id);
                     let size = style.font_size;
-                    let height = style.line_height;
+                    let ([x, y, width, height], [code_x, code_y]) = metrics.ink_box(
+                        [x, y, rendered_width, style.line_height],
+                        size,
+                        size,
+                        0.,
+                        glyphs.iter().enumerate().map(|(index, ch)| {
+                            let kerning = glyphs
+                                .get(index + 1)
+                                .map_or(0., |right| metrics.kerning(*ch, *right));
+                            (*ch, (metrics.advance(*ch) + kerning) * size)
+                        }),
+                    )?;
                     staged.append_page_object(page_index, |prefix, object_id| {
-                            format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {rendered_width} {height}\" Font=\"{escaped_font}\" Size=\"{size}\"><{prefix}TextCode X=\"0\" Y=\"{size}\"{delta}>{escaped_text}</{prefix}TextCode></{prefix}TextObject>")
+                            format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {width} {height}\" Font=\"{escaped_font}\" Size=\"{size}\"><{prefix}TextCode X=\"{code_x}\" Y=\"{code_y}\"{delta}>{escaped_text}</{prefix}TextCode></{prefix}TextObject>")
                         })?;
                 }
             }
@@ -27519,7 +27530,24 @@ impl OfdDocument {
         span: &PreparedFlowSpan,
         glyphs: &[FlowGlyph],
     ) -> Result<String, OfdError> {
-        let [x, y, width, height] = boundary;
+        let stroke_pad = if span.stroke {
+            span.stroke_width.unwrap_or(span.font_size) / 2.
+        } else {
+            0.
+        };
+        let styled_pad =
+            if span.italic || span.weight.unwrap_or(if span.bold { 800 } else { 400 }) > 400 {
+                span.font_size * 0.25
+            } else {
+                0.
+            };
+        let ([x, y, width, height], [code_x, code_y]) = span.metrics.ink_box(
+            boundary,
+            baseline,
+            span.font_size,
+            stroke_pad + styled_pad,
+            glyphs.iter().map(|glyph| (glyph.ch, glyph.width)),
+        )?;
         let font_id = escape_xml(&span.font_id);
         let text = escape_text_code(text);
         let size = span.font_size;
@@ -27547,7 +27575,7 @@ impl OfdDocument {
             } else {
                 format!(" DeltaX=\"{delta_x}\"")
             };
-            format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {width} {height}\" Font=\"{font_id}\" Size=\"{size}\" Weight=\"{weight}\" Italic=\"{italic}\" Fill=\"{}\" Stroke=\"{}\"{stroke_width}>{fill}{stroke_color}<{prefix}TextCode X=\"0\" Y=\"{baseline}\"{delta}>{text}</{prefix}TextCode></{prefix}TextObject>", span.fill, span.stroke)
+            format!("<{prefix}TextObject ID=\"{object_id}\" Boundary=\"{x} {y} {width} {height}\" Font=\"{font_id}\" Size=\"{size}\" Weight=\"{weight}\" Italic=\"{italic}\" Fill=\"{}\" Stroke=\"{}\"{stroke_width}>{fill}{stroke_color}<{prefix}TextCode X=\"{code_x}\" Y=\"{code_y}\"{delta}>{text}</{prefix}TextCode></{prefix}TextObject>", span.fill, span.stroke)
         })
     }
 
@@ -34115,6 +34143,8 @@ fn svg_path_data(data: &str) -> Result<String, OfdError> {
 struct FlowFontMetrics {
     advances: HashMap<char, f64>,
     kerning: HashMap<(char, char), f64>,
+    // Em-relative ink extents for zero-advance glyphs, with downward OFD y.
+    zero_advance_bounds: HashMap<char, [f64; 4]>,
 }
 
 impl FlowFontMetrics {
@@ -34124,6 +34154,52 @@ impl FlowFontMetrics {
 
     fn kerning(&self, left: char, right: char) -> f64 {
         self.kerning.get(&(left, right)).copied().unwrap_or(0.0)
+    }
+
+    fn ink_box(
+        &self,
+        boundary: [f64; 4],
+        baseline: f64,
+        size: f64,
+        pad: f64,
+        glyphs: impl IntoIterator<Item = (char, f64)>,
+    ) -> Result<([f64; 4], [f64; 2]), OfdError> {
+        let [mut x, mut y, mut width, mut height] = boundary;
+        if width == 0. {
+            width = 0.001;
+        }
+        let mut code_x = 0.;
+        let mut code_y = baseline;
+        if !self.zero_advance_bounds.is_empty() {
+            let (mut left, mut top, mut right, mut bottom) = (0_f64, 0_f64, width, height);
+            let mut pen = 0.;
+            for (ch, advance) in glyphs {
+                if let Some(ink) = self.zero_advance_bounds.get(&ch) {
+                    left = left.min(pen + ink[0] * size - pad);
+                    top = top.min(baseline + ink[1] * size - pad);
+                    right = right.max(pen + ink[2] * size + pad);
+                    bottom = bottom.max(baseline + ink[3] * size + pad);
+                }
+                pen += advance;
+            }
+            x += left;
+            y += top;
+            width = right - left;
+            height = bottom - top;
+            code_x = 0. - left;
+            code_y -= top;
+        }
+        if [x, y, width, height, code_x, code_y, x + width, y + height]
+            .iter()
+            .any(|value| !value.is_finite())
+            || width <= 0.
+            || height <= 0.
+        {
+            return Err(OfdError::Invalid(
+                "flowed text ink bounds are invalid".into(),
+            ));
+        }
+        Ok(([x, y, width, height], [code_x, code_y]))
     }
 }
 
@@ -34142,15 +34218,30 @@ fn flow_font_metrics(
         .filter(|(left, right)| *left != '\n' && *right != '\n')
         .collect();
     let mut kerning = HashMap::new();
+    let mut zero_advance_bounds = HashMap::new();
     let mut measure = |bytes: &[u8], face_index: u32| {
         if let Ok(face) = ttf_parser::Face::parse(bytes, face_index) {
             let units = f64::from(face.units_per_em());
             for (ch, advance) in &mut advances {
-                if let Some(width) = face
-                    .glyph_index(*ch)
-                    .and_then(|glyph| face.glyph_hor_advance(glyph))
-                {
-                    *advance = f64::from(width) / units;
+                let Some(glyph) = face.glyph_index(*ch) else {
+                    continue;
+                };
+                let Some(width) = face.glyph_hor_advance(glyph) else {
+                    continue;
+                };
+                *advance = f64::from(width) / units;
+                if width == 0 {
+                    if let Some(bounds) = face.glyph_bounding_box(glyph) {
+                        zero_advance_bounds.insert(
+                            *ch,
+                            [
+                                f64::from(bounds.x_min) / units,
+                                -f64::from(bounds.y_max) / units,
+                                f64::from(bounds.x_max) / units,
+                                -f64::from(bounds.y_min) / units,
+                            ],
+                        );
+                    }
                 }
             }
             if let Some(shaping_face) = rustybuzz::Face::from_slice(bytes, face_index) {
@@ -34221,7 +34312,11 @@ fn flow_font_metrics(
             database.with_face_data(id, measure);
         }
     }
-    Ok(FlowFontMetrics { advances, kerning })
+    Ok(FlowFontMetrics {
+        advances,
+        kerning,
+        zero_advance_bounds,
+    })
 }
 
 fn text_delta_x_attribute(
@@ -37893,6 +37988,7 @@ mod tests {
     fn flowed_text_wraps_glyphs_and_preserves_spaces() {
         let advances = "abc def中".chars().map(|ch| (ch, 1.0)).collect();
         let metrics = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances,
             kerning: HashMap::new(),
         };
@@ -37913,6 +38009,7 @@ mod tests {
     #[test]
     fn flowed_text_never_splits_a_grapheme_cluster() {
         let metrics = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances: [('X', 0.3), ('A', 0.5), ('\u{301}', 0.5), ('B', 0.4)]
                 .into_iter()
                 .collect(),
@@ -37930,6 +38027,7 @@ mod tests {
         assert!(wrap_flow_lines("A\u{301}", 0.9, 0.0, &metrics, false).is_err());
 
         let emoji = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances: [('X', 0.3), ('👩', 0.3), ('\u{200d}', 0.3), ('💻', 0.3)]
                 .into_iter()
                 .collect(),
@@ -37943,6 +38041,7 @@ mod tests {
     #[test]
     fn flowed_text_prefers_unicode_word_breaks_before_emergency_wrap() {
         let metrics = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances: "helo wrd".chars().map(|ch| (ch, 1.0)).collect(),
             kerning: HashMap::new(),
         };
@@ -37976,6 +38075,7 @@ mod tests {
         assert_eq!(flow_paragraphs("\r\nA\r\n"), ["", "A"]);
 
         let metrics = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances: "ABCDEFGHI".chars().map(|ch| (ch, 1.0)).collect(),
             kerning: HashMap::new(),
         };
@@ -38177,6 +38277,7 @@ mod tests {
             underline_width: 0.0,
             keep_together: false,
             metrics: FlowFontMetrics {
+                zero_advance_bounds: HashMap::new(),
                 advances: HashMap::new(),
                 kerning: HashMap::new(),
             },
@@ -38243,6 +38344,7 @@ mod tests {
     fn flowed_text_indents_only_the_first_line_of_the_block() {
         let advances = "abcd".chars().map(|ch| (ch, 1.0)).collect();
         let metrics = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances,
             kerning: HashMap::new(),
         };
@@ -38291,6 +38393,7 @@ mod tests {
     fn flowed_text_rejects_overwide_glyph_and_moves_past_first_indent() {
         let advances = [('中', 4.0), ('A', 1.0)].into_iter().collect();
         let metrics = FlowFontMetrics {
+            zero_advance_bounds: HashMap::new(),
             advances,
             kerning: HashMap::new(),
         };
@@ -38340,6 +38443,7 @@ mod tests {
             underline_width: 0.0,
             keep_together: false,
             metrics: FlowFontMetrics {
+                zero_advance_bounds: HashMap::new(),
                 advances: HashMap::new(),
                 kerning: HashMap::new(),
             },
