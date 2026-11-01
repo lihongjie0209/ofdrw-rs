@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -126,5 +128,94 @@ func TestBoxLayoutRejectsInvalidInputsAtomically(t *testing.T) {
 	doc.Close()
 	if _, err := doc.AddBoxLayout(0, nil, BoxLayoutStyle{}); err == nil {
 		t.Fatal("accepted closed document")
+	}
+}
+
+func TestDashedBoxBordersMatchJavaReference(t *testing.T) {
+	fixturePath := filepath.Join(
+		"..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "box-border-dashes-java.json",
+	)
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Cases []struct {
+			Name   string     `json:"name"`
+			Dash   []float64  `json:"dash"`
+			Border [4]float64 `json:"border"`
+			Paths  []struct {
+				Boundary []float64 `json:"boundary"`
+				Pattern  []float64 `json:"pattern"`
+			} `json:"paths"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range fixture.Cases {
+		t.Run(entry.Name, func(t *testing.T) {
+			doc, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			source := LayoutBox{Size: [2]float64{10, 5}, Border: entry.Border, BorderDash: entry.Dash}
+			style := DefaultBoxLayoutStyle()
+			style.PageSize, style.Margins = [2]float64{30, 20}, [4]float64{2, 2, 2, 2}
+			items := []BoxLayoutItem{{Type: "box", LayoutBox: &source}}
+			if _, err := doc.AddBoxLayout(0, items, style); err != nil {
+				t.Fatal(err)
+			}
+			paths, err := doc.PagePaths(0)
+			if err != nil || len(paths) != len(entry.Paths) {
+				t.Fatalf("paths: %v, %v", paths, err)
+			}
+			for i, expected := range entry.Paths {
+				if !reflect.DeepEqual(paths[i].Boundary, expected.Boundary) {
+					t.Fatalf("boundary: %v", paths[i].Boundary)
+				}
+			}
+			pages, err := doc.Pages()
+			if err != nil {
+				t.Fatal(err)
+			}
+			xml, err := doc.Entry(pages[0].Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pattern []string
+			for _, value := range entry.Paths[0].Pattern {
+				pattern = append(pattern, strconv.FormatFloat(
+					value, 'g', -1, 64,
+				))
+			}
+			if strings.Count(string(xml), `DashPattern="`+strings.Join(pattern, " ")+`"`) != len(entry.Paths) {
+				t.Fatal("incorrect dash pattern")
+			}
+			encoded, err := doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := FromBytes(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			actual, err := reopened.PagePaths(0)
+			if err != nil || !reflect.DeepEqual(actual, paths) {
+				t.Fatalf("roundtrip: %v", err)
+			}
+			for _, dash := range [][]float64{{0}, {-1}, {1, 0}, {math.MaxFloat64}, {math.NaN()}} {
+				source.BorderDash = dash
+				if _, err := doc.AddBoxLayout(0, items, style); err == nil {
+					t.Fatal("invalid dash accepted")
+				}
+				after, err := doc.ToBytes()
+				if err != nil || !bytes.Equal(encoded, after) {
+					t.Fatalf("mutation: %v", err)
+				}
+			}
+		})
 	}
 }

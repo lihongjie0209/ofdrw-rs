@@ -57,3 +57,35 @@ test('box layout defaults, explicit breaks, invalid content and closed documents
   } finally { doc.close(); }
   assert.throws(() => doc.addBoxLayout(0, []));
 });
+
+
+test('Java dashed border reference matches boxes, measured text and nested containers', () => {
+  const reference = JSON.parse(fs.readFileSync(path.resolve(__dirname,
+    '../../../crates/ofdrw/tests/fixtures/box-border-dashes-java.json')));
+  for (const kind of ['box', 'text_box', 'container']) for (const entry of reference.cases) {
+    const box = {size: [10, 5], border: entry.border, border_dash: entry.dash};
+    const options = {page_size: [30, 20], margins: [2, 2, 2, 2]};
+    const doc = Document.create();
+    try {
+      if (kind === 'box') doc.addBoxLayout(0, [{type: 'box', ...box}], options);
+      else if (kind === 'text_box') doc.addTextBoxes(0, [{layout: box, spans: [{text: 'A'}],
+        style: {font_size: 2, line_height: 5}}], options);
+      else doc.addFlowContainers(0, [{layout: {size: [20, 0]}, children: [
+        {type: 'container', container: {layout: box, children: [{type: 'paragraph',
+          spans: [{text: 'A'}], style: {font_size: 2, line_height: 5}}]}}, {type: 'line_break'},
+      ]}], options);
+      assert.deepEqual(doc.pagePaths(0).map(p => p.boundary), entry.paths.map(p => p.boundary));
+      const xml = doc.entry(doc.pages()[0].path).toString();
+      const pattern = entry.paths[0].pattern.join(' ');
+      assert.equal(xml.split(`DashPattern="${pattern}"`).length - 1, entry.paths.length);
+      const reopened = Document.fromBytes(doc.toBytes());
+      try { assert.deepEqual(reopened.pagePaths(0), doc.pagePaths(0)); assert.ok(reopened.pagePng(0, 30).length); }
+      finally { reopened.close(); }
+      const before = doc.toBytes();
+      for (const border_dash of [[0], [-1], [1, 0], [Number.MAX_VALUE], Array(258).fill(1)]) {
+        assert.throws(() => doc.addBoxLayout(0, [{type: 'box', ...box, border_dash}], options));
+        assert.deepEqual(doc.toBytes(), before);
+      }
+    } finally { doc.close(); }
+  }
+});

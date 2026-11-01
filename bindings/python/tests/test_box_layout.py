@@ -75,3 +75,36 @@ def test_box_layout_rejects_invalid_inputs_and_preserves_source():
         doc.close()
     with pytest.raises(OfdError):
         doc.add_box_layout(0, [])
+
+
+@pytest.mark.parametrize("kind", ["box", "text_box", "container"])
+def test_dashed_borders_match_java_reference_across_box_writers(kind):
+    fixture = json.loads((FIXTURES / "box-border-dashes-java.json").read_text())
+    for case in fixture["cases"]:
+        box = {"size": [10, 5], "border": case["border"], "border_dash": case["dash"]}
+        options = {"page_size": [30, 20], "margins": [2] * 4}
+        with Document.new() as doc:
+            if kind == "box":
+                doc.add_box_layout(0, [{"type": "box", **box}], **options)
+            elif kind == "text_box":
+                doc.add_text_boxes(0, [{"layout": box, "spans": [{"text": "A"}],
+                    "style": {"font_size": 2, "line_height": 5}}], **options)
+            else:
+                doc.add_flow_containers(0, [{"layout": {"size": [20, 0]}, "children": [
+                    {"type": "container", "container": {"layout": box, "children": [
+                        {"type": "paragraph", "spans": [{"text": "A"}],
+                         "style": {"font_size": 2, "line_height": 5}}]}},
+                    {"type": "line_break"}]}], **options)
+            expected = case["paths"]
+            assert [p["boundary"] for p in doc.page_paths(0)] == [p["boundary"] for p in expected]
+            encoded = doc.entry(doc.pages()[0]["path"]).decode()
+            pattern = " ".join(format(v, "g") for v in expected[0]["pattern"])
+            assert encoded.count(f'DashPattern="{pattern}"') == len(expected)
+            with Document.from_bytes(doc.to_bytes()) as reopened:
+                assert reopened.page_paths(0) == doc.page_paths(0)
+                assert reopened.page_png(0, 30)
+            before = doc.to_bytes()
+            for invalid in [[0], [-1], [1, 0], [float.fromhex("0x1.fffffffffffffp+1023")], [1] * 258]:
+                with pytest.raises(OfdError):
+                    doc.add_box_layout(0, [{"type": "box", **box, "border_dash": invalid}], **options)
+                assert doc.to_bytes() == before

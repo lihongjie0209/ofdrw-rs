@@ -199,6 +199,7 @@ impl OfdDocument {
                 "flow container depth or node limit exceeded".into(),
             ));
         }
+        box_layout::validate_border_dash(b.layout.border_dash.as_deref())?;
         if !b.gap.is_finite()
             || b.gap < 0.
             || !b.layout.size[0].is_finite()

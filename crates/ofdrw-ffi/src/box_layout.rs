@@ -34,6 +34,7 @@ struct BoxRequest {
     background_color: Option<[u8; 3]>,
     #[serde(default)]
     border_color: [u8; 3],
+    border_dash: Option<Vec<f64>>,
     alpha: Option<u8>,
     #[serde(default, rename = "float")]
     float_direction: FloatRequest,
@@ -67,6 +68,7 @@ pub(super) fn parse_item(value: &serde_json::Value) -> Result<BoxLayoutItem, Str
             border: b.border,
             background_color: b.background_color,
             border_color: b.border_color,
+            border_dash: b.border_dash,
             alpha: b.alpha,
             float: match b.float_direction {
                 FloatRequest::Left => BoxFloat::Left,
@@ -214,6 +216,62 @@ mod tests {
             parse_item(&serde_json::json!({"type":"page_break"})).unwrap(),
             BoxLayoutItem::PageBreak
         ));
+    }
+
+    #[test]
+    fn ffi_dashed_boxes_match_java_boundaries_and_reject_invalid_patterns_atomically() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/box-border-dashes-java.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut handle = ptr::null_mut();
+            assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+            let mut request = serde_json::json!({"page_size":[30,20], "margins":[2,2,2,2],
+                "items":[{"type":"box", "size":[10,5], "border":case["border"], "border_dash":case["dash"]}]});
+            let input = CString::new(request.to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_eq!(
+                unsafe { ofd_add_box_layout_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            unsafe { ofd_buffer_free(output) };
+            let paths = unsafe { document_ref(handle).unwrap().page_paths(0).unwrap() };
+            let expected = case["paths"].as_array().unwrap();
+            assert_eq!(paths.len(), expected.len());
+            for (actual, expected) in paths.iter().zip(expected) {
+                assert_eq!(serde_json::json!(actual.boundary), expected["boundary"]);
+            }
+            let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+            for invalid in [
+                serde_json::json!([0]),
+                serde_json::json!([-1]),
+                serde_json::json!([1, 0]),
+                serde_json::json!(["1"]),
+                serde_json::json!({}),
+                serde_json::json!(vec![1; 258]),
+            ] {
+                request["items"][0]["border_dash"] = invalid;
+                let input = CString::new(request.to_string()).unwrap();
+                let mut output = OfdBuffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
+                assert_ne!(
+                    unsafe { ofd_add_box_layout_json(handle, 0, input.as_ptr(), &mut output) },
+                    0
+                );
+                assert!(output.data.is_null());
+                assert_eq!(
+                    unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                    before
+                );
+            }
+            unsafe { ofd_close(handle) };
+        }
     }
 
     #[test]

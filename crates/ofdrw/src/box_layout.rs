@@ -32,6 +32,10 @@ pub struct LayoutBox {
     pub border: [f64; 4],
     pub background_color: Option<[u8; 3]>,
     pub border_color: [u8; 3],
+    /// Java-style dash arguments: one length repeats as dash/gap; even-length
+    /// sequences have zero offset; odd sequences begin with the offset.
+    /// Empty sequences select a solid border. Up to 256 positive lengths.
+    pub border_dash: Option<Vec<f64>>,
     pub alpha: Option<u8>,
     pub float: BoxFloat,
     pub clear: BoxClear,
@@ -372,6 +376,7 @@ impl OfdDocument {
                 prepared.push(None);
                 continue;
             };
+            validate_border_dash(b.border_dash.as_deref())?;
             if b.size
                 .into_iter()
                 .chain(b.margin)
@@ -613,6 +618,9 @@ impl OfdDocument {
         if w <= 0. || h <= 0. {
             return Ok(());
         }
+        if let Some(dash) = b.border_dash.as_deref().filter(|dash| !dash.is_empty()) {
+            return self.draw_dashed_box_border(b, p, dash);
+        }
         // Filled edge strips retain independent widths, including partially split borders.
         for (edge, [ex, ey, ew, eh]) in [
             [x, y, w, p.borders[0]],
@@ -650,6 +658,75 @@ impl OfdDocument {
                     ..Default::default()
                 },
             )?;
+        }
+        Ok(())
+    }
+
+    fn draw_dashed_box_border(
+        &mut self,
+        b: &LayoutBox,
+        p: &BoxPlacement,
+        arguments: &[f64],
+    ) -> Result<(), OfdError> {
+        let (offset, pattern) = if arguments.len() == 1 {
+            (0., vec![arguments[0]; 2])
+        } else if arguments.len() % 2 == 1 {
+            // Java omits offsets below 0.000001 mm.
+            (
+                if arguments[0] >= 1e-6 {
+                    arguments[0]
+                } else {
+                    0.
+                },
+                arguments[1..].to_vec(),
+            )
+        } else {
+            (0., arguments.to_vec())
+        };
+        let style = |width| PathStyle {
+            fill: false,
+            stroke: true,
+            line_width: width,
+            dash_sequence: Some(pattern.clone()),
+            dash_offset: (offset != 0.).then_some(offset),
+            stroke_color: Some(b.border_color),
+            alpha: b.alpha,
+            ..Default::default()
+        };
+        let [x, y, w, h] = p.border_box;
+        let [top, right, bottom, left] = p.borders;
+        if top > 0. && p.borders.iter().all(|width| *width == top) {
+            let half = top / 2.;
+            let (right, bottom) = (w - half, h - half);
+            self.add_path_object(
+                p.page_index,
+                &format!("M {half} {half} L {right} {half} L {right} {bottom} L {half} {bottom} C"),
+                [x, y, w, h],
+                style(top),
+            )?;
+            return Ok(());
+        }
+        // Match Java's separate-edge geometry: horizontal edges own the corners.
+        for (boundary, width, horizontal) in [
+            ([x, y, w, top], top, true),
+            ([x, y + h - bottom, w, bottom], bottom, true),
+            ([x, y + top, left, (h - top - bottom).max(0.)], left, false),
+            (
+                [x + w - right, y + top, right, (h - top - bottom).max(0.)],
+                right,
+                false,
+            ),
+        ] {
+            if width <= 0. || boundary[2] <= 0. || boundary[3] <= 0. {
+                continue;
+            }
+            let half = width / 2.;
+            let commands = if horizontal {
+                format!("M 0 {half} L {} {half}", boundary[2])
+            } else {
+                format!("M {half} 0 L {half} {}", boundary[3])
+            };
+            self.add_path_object(p.page_index, &commands, boundary, style(width))?;
         }
         Ok(())
     }
@@ -704,4 +781,30 @@ pub(super) fn nested_fragment(
         }
     }
     Ok(placement)
+}
+
+pub(super) fn validate_border_dash(dash: Option<&[f64]>) -> Result<(), OfdError> {
+    let Some(dash) = dash.filter(|dash| !dash.is_empty()) else {
+        return Ok(());
+    };
+    if dash.len() > 257 {
+        return Err(OfdError::Limit(
+            "box border dash sequence is too long".into(),
+        ));
+    }
+    let pattern = if dash.len() > 1 && dash.len() % 2 == 1 {
+        &dash[1..]
+    } else {
+        dash
+    };
+    if dash.iter().any(|value| !value.is_finite())
+        || pattern.iter().any(|value| *value <= 0.)
+        || !pattern.iter().sum::<f64>().is_finite()
+        || (dash.len() == 1 && !(dash[0] * 2.).is_finite())
+    {
+        return Err(OfdError::Invalid(
+            "box border dash arguments are invalid".into(),
+        ));
+    }
+    Ok(())
 }
