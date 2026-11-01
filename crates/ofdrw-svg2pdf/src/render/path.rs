@@ -102,6 +102,9 @@ pub(crate) fn stroke_path(
     }
 
     let operation = |content: &mut Content, stroke: &Stroke| {
+        if path.id().starts_with("ofd-device-hairline-") {
+            content.set_line_width(0.0);
+        }
         draw_path(path.data().segments(), content);
         finish_path(Some(stroke), None, content);
         Ok(())

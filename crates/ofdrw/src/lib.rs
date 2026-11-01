@@ -444,7 +444,7 @@ impl PathStrokeStyle {
             return Err(OfdError::Invalid("path has two dash definitions".into()));
         }
         if !self.line_width.is_finite()
-            || self.line_width <= 0.0
+            || self.line_width < 0.0
             || self
                 .miter_limit
                 .is_some_and(|value| !value.is_finite() || value <= 0.0)
@@ -2839,7 +2839,7 @@ pub struct PathStyle {
     pub alpha: Option<u8>,
     /// Paint the path outline.
     pub stroke: bool,
-    /// Stroke width in millimeters.
+    /// Stroke width in millimeters; zero is a one-device-pixel hairline.
     pub line_width: f64,
     /// Optional stroke cap; OFD defaults to butt.
     pub cap: Option<PathLineCap>,
@@ -2992,7 +2992,7 @@ impl PathStyle {
             return Err(OfdError::Invalid("path has two dash definitions".into()));
         }
         if !self.line_width.is_finite()
-            || self.line_width <= 0.0
+            || self.line_width < 0.0
             || self
                 .miter_limit
                 .is_some_and(|value| !value.is_finite() || value <= 0.0)
@@ -3485,7 +3485,7 @@ impl PatternStyle {
                         return Err(OfdError::Invalid("Pattern path commands are empty".into()));
                     }
                     svg_path_data(commands)?;
-                    if !style.line_width.is_finite() || style.line_width <= 0.0 {
+                    if !style.line_width.is_finite() || style.line_width < 0.0 {
                         return Err(OfdError::Invalid(
                             "Pattern path line width is invalid".into(),
                         ));
@@ -9260,7 +9260,7 @@ impl OfdDocument {
             || boundary[2] <= 0.0
             || boundary[3] <= 0.0
             || !style.line_width.is_finite()
-            || style.line_width <= 0.0
+            || style.line_width < 0.0
         {
             return Err(OfdError::Invalid(
                 "annotation path geometry is invalid".into(),
@@ -18606,7 +18606,7 @@ impl OfdDocument {
                 ("none".to_owned(), 1.0)
             };
             let stroke_style = resolved_stroke_style(object, &draw_style)?;
-            let line_width = stroke_style.line_width;
+            let (line_width, hairline) = svg_path_hairline(stroke_style.line_width, clip_serial);
             let fill_rule = svg_fill_rule(object.attribute("Rule"))?;
             let cap = stroke_style.cap.as_deref().unwrap_or("butt");
             let join = stroke_style.join.as_deref().unwrap_or("miter");
@@ -18625,7 +18625,7 @@ impl OfdDocument {
                         stroke_style.dash_offset
                     )
                 });
-            svg.push_str(&format!("<path d=\"{path}\" stroke=\"{stroke}\" fill=\"{fill}\" stroke-width=\"{line_width}\" fill-rule=\"{fill_rule}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\" stroke-miterlimit=\"{miter_limit}\" fill-opacity=\"{fill_opacity}\" stroke-opacity=\"{stroke_opacity}\"{dash}/>"));
+            svg.push_str(&format!("<path d=\"{path}\" stroke=\"{stroke}\" fill=\"{fill}\" stroke-width=\"{line_width}\" fill-rule=\"{fill_rule}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\" stroke-miterlimit=\"{miter_limit}\" fill-opacity=\"{fill_opacity}\" stroke-opacity=\"{stroke_opacity}\"{dash}{hairline}/>"));
         } else if is_element(object, "CompositeObject") {
             let id = object
                 .attribute("ResourceID")
@@ -20509,7 +20509,7 @@ impl OfdDocument {
             || boundary[2] <= 0.0
             || boundary[3] <= 0.0
             || !style.line_width.is_finite()
-            || style.line_width <= 0.0
+            || style.line_width < 0.0
         {
             return Err(OfdError::Invalid("path object geometry is invalid".into()));
         }
@@ -20610,7 +20610,7 @@ impl OfdDocument {
             || boundary[2] <= 0.0
             || boundary[3] <= 0.0
             || !style.line_width.is_finite()
-            || style.line_width <= 0.0
+            || style.line_width < 0.0
         {
             return Err(OfdError::Invalid(
                 "composite path geometry is invalid".into(),
@@ -32523,7 +32523,7 @@ fn svg_clip_groups(
                         resources.draw_params,
                     )?;
                     let stroke_style = resolved_stroke_style(shape, &style)?;
-                    let line_width = stroke_style.line_width;
+                    let (line_width, hairline) = svg_path_hairline(stroke_style.line_width, serial);
                     let cap = stroke_style.cap.as_deref().unwrap_or("butt");
                     let join = stroke_style.join.as_deref().unwrap_or("miter");
                     let miter_limit = stroke_style.miter_limit.unwrap_or(3.528);
@@ -32542,7 +32542,7 @@ fn svg_clip_groups(
                                     stroke_style.dash_offset
                                 )
                             });
-                    svg.push_str(&format!("<path d=\"{path}\" transform=\"{transform}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{line_width}\" fill-rule=\"{rule}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\" stroke-miterlimit=\"{miter_limit}\"{dash}/>", if fill { "white" } else { "none" }, if stroke { "white" } else { "none" }));
+                    svg.push_str(&format!("<path d=\"{path}\" transform=\"{transform}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{line_width}\" fill-rule=\"{rule}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\" stroke-miterlimit=\"{miter_limit}\"{dash}{hairline}/>", if fill { "white" } else { "none" }, if stroke { "white" } else { "none" }));
                 } else if fill {
                     svg.push_str(&format!(
                         "<path d=\"{path}\" transform=\"{transform}\" clip-rule=\"{rule}\"/>"
@@ -33032,6 +33032,18 @@ fn resolved_stroke_style(
         dash_sequence,
         dash_offset,
     })
+}
+
+fn svg_path_hairline(width: f64, serial: &mut usize) -> (f64, String) {
+    if width != 0. {
+        return (width, String::new());
+    }
+    let index = *serial;
+    *serial += 1;
+    (
+        1.,
+        format!(" id=\"ofd-device-hairline-{index}\" vector-effect=\"non-scaling-stroke\""),
+    )
 }
 
 fn svg_effective_paint(

@@ -1807,6 +1807,19 @@ bytes retained. Raw
 CFF text without glyph mappings still uses the text fallback. The PDF importer
 encapsulates supported raw programs in deterministic sfnt wrappers.
 
+### 路径设备发丝线（后续版本，尚未发布）
+
+Rust 路径写入与更新接受 `line_width: 0`，表示一个设备像素宽的线。
+页面路径、批注、组合对象、重复图案和描边裁剪共用此行为；
+继承的 DrawParam 零线宽也会保留。PNG 输出在不同 DPI 和非均匀 CTM 下保持设备宽度，
+虚线间隔仍按路径坐标计算。SVG 使用 `vector-effect="non-scaling-stroke"`，
+原生渲染器通过保留的 `ofd-device-hairline-` ID 前缀识别设备描边。
+PDF 导出写入零线宽操作符；导入不再将路径零线宽替换成固定毫米值。
+
+此项尚未包含在 v0.4.0 发布候选中。文字描边仍要求正线宽；
+PDF 导入仍不支持非均匀或倾斜变换下的虚线描边。
+Go 的部分写入接口仍会把零值替换成默认线宽，语言接口支持尚待补齐。
+
 ## PNG 渲染
 
 Pages can also be rendered to PNG at a requested DPI through Rust, C, Python,

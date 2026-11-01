@@ -110,7 +110,13 @@ fn stroke_path(
     paint.anti_alias = path.rendering_mode().use_shape_antialiasing();
     paint.blend_mode = blend_mode;
 
-    pixmap.stroke_path(path.data(), &paint, &stroke.to_tiny_skia(), transform, None);
+    let mut geometry = stroke.to_tiny_skia();
+    // OFD device hairlines survive the SVG parser as tagged positive-width paths.
+    // tiny-skia width zero selects a one-device-pixel stroke after transformation.
+    if path.id().starts_with("ofd-device-hairline-") {
+        geometry.width = 0.0;
+    }
+    pixmap.stroke_path(path.data(), &paint, &geometry, transform, None);
 
     Some(())
 }
@@ -210,4 +216,30 @@ fn render_pattern_pixmap(
     ts = ts.pre_scale(1.0 / sx, 1.0 / sy);
 
     Some((pixmap, ts))
+}
+
+#[cfg(test)]
+mod device_hairline_tests {
+    #[test]
+    fn marked_paths_use_device_pixels_and_ordinary_strokes_keep_transform_scaling() {
+        for (id, expected) in [("ofd-device-hairline-0", 255i32), ("ordinary", 510i32)] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><path id="{id}" d="M1 4H9" transform="scale(4 2)" stroke="black" stroke-width="1" fill="none"/></svg>"#
+            );
+            let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
+            let mut pixmap = tiny_skia::Pixmap::new(40, 20).unwrap();
+            crate::render(
+                &tree,
+                tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            let coverage: i32 = (0..20)
+                .map(|y| i32::from(pixmap.pixel(20, y).unwrap().alpha()))
+                .sum();
+            assert!(
+                (coverage - expected).abs() <= 3,
+                "{id}: coverage {coverage}, expected {expected}"
+            );
+        }
+    }
 }

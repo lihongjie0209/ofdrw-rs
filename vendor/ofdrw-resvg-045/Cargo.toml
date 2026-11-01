@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.67.1"
 name = "ofdrw-resvg"
-version = "0.45.1-ofdrw.1"
+version = "0.45.1-ofdrw.2"
 build = false
 exclude = ["tests"]
 autolib = false

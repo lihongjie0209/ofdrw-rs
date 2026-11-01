@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-resvg"
-version = "0.45.1-ofdrw.1"
+version = "0.45.1-ofdrw.2"
 dependencies = [
  "bytemuck",
  "gif",

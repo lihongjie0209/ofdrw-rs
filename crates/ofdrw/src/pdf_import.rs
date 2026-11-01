@@ -1019,9 +1019,14 @@ fn paint(
         ..PathStyle::default()
     };
     if mode.stroke {
-        let scale = state.stroke_scale()? * MM_PER_PT;
-        let width = state.line_width * scale;
-        style.line_width = if width > 0.0 { width } else { 0.1 };
+        let scale = if state.line_width == 0.0 && state.dash_pattern.is_none() {
+            // Undashed device hairlines have no physical width to scale; their
+            // already-transformed geometry remains valid under skew or unequal scales.
+            MM_PER_PT
+        } else {
+            state.stroke_scale()? * MM_PER_PT
+        };
+        style.line_width = state.line_width * scale;
         style.cap = Some(state.line_cap);
         style.join = Some(state.line_join);
         style.miter_limit = Some(state.miter_limit);
