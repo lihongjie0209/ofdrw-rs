@@ -51,10 +51,14 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 
 ## 发布步骤
 
-转换器 [ofdrw-svg2pdf 0.13.0-ofdrw.1](https://crates.io/crates/ofdrw-svg2pdf/0.13.0-ofdrw.1)
-已发布，源提交为 `f919fd7c7ff717643c459ca005082b554000b142`。
-[发布工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41136637318)
-已成功，公开包的校验和、源码提交和核心所需的 `srgb_profile()` 接口均已核验。
+转换器 [ofdrw-svg2pdf 0.13.0-ofdrw.2](https://crates.io/crates/ofdrw-svg2pdf/0.13.0-ofdrw.2)
+及渲染依赖 [ofdrw-resvg 0.45.1-ofdrw.1](https://crates.io/crates/ofdrw-resvg/0.45.1-ofdrw.1)、
+[0.48.1-ofdrw.1](https://crates.io/crates/ofdrw-resvg/0.48.1-ofdrw.1) 已发布到 crates.io，
+源提交为 `4a97c576264bab55089a36f30cab921599c8ca04`。
+[渲染器发布](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41297016851)与
+[转换器发布](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41297280146)均已成功。
+公开包的校验和、源码提交、许可证及 Cargo 索引可见性已核验；转换器使用已发布的
+`ofdrw-resvg 0.45.1-ofdrw.1`，发布清单不依赖本地路径。
 
 转换器依赖 `ofdrw-svg2pdf` 使用独立版本。首次发布或修改该分支时，
 先更新其 Cargo 版本及核心依赖，将提交推送到 main 并等待完整 CI 成功。
@@ -65,14 +69,13 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 [转换器说明](../crates/ofdrw-svg2pdf/README.md)。
 
 
-尚未发布的渲染修复新增两个独立依赖版本：`ofdrw-resvg`
-`0.45.1-ofdrw.1` 与 `0.48.1-ofdrw.1`。其来源和许可证保留在
-`vendor/ofdrw-resvg-045`、`vendor/ofdrw-resvg-048`。
-等待对应 main 提交的完整 CI 成功后，先运行 `Publish SVG renderers`
-（`publish-renderers.yml`），输入该提交 SHA。确认两个版本均已在 crates.io
-可见，再发布依赖它们的 `ofdrw-svg2pdf 0.13.0-ofdrw.2`，最后发布新核心版本。
-这些工作流使用现有的 `CARGO_REGISTRY_TOKEN`，无需增加凭据。
-已发布的 `ofdrw 0.2.0` 和转换器旧版本保持不变。
+渲染器分支保留在 `vendor/ofdrw-resvg-045`、`vendor/ofdrw-resvg-048`，
+各目录的 `UPSTREAM.md` 记录来源与许可证。修改时先递增对应依赖版本，
+等待 main 提交的完整 CI 成功后，运行 `Publish SVG renderers`
+（`publish-renderers.yml`），输入该提交 SHA。确认新版本在 crates.io 可见，
+再发布依赖它的转换器，最后发布新核心版本。
+这些工作流使用现有的 `CARGO_REGISTRY_TOKEN`。
+已发布版本保持不可变；后续修改使用新版本号。
 
 1. 更新 Rust 核心、C ABI、Python 和 Node.js 的版本，运行 `scripts/check_release_version.py vX.Y.Z`。
 2. 将提交推送到 `main`，等待该提交的完整 CI 成功。
