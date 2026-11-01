@@ -4,7 +4,26 @@ import type { GradientPaintStyle, GouraudPaintStyle, ImageBorderStyle, PatternPa
 
 import type { FlowBlock, FlowDocumentOptions, FlowLayoutResult } from '../index';
 
+import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index';
+
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const boxes: BoxLayoutItem[] = [
+    {type: 'box', size: [20, 10], margin: [1, 1, 1, 1], float: 'right', clear: 'none', alpha: 128},
+    {type: 'line_break'}, {type: 'page_break'},
+  ];
+  const boxOptions: BoxLayoutOptions = {page_size: [40, 40], margins: [2, 2, 2, 2]};
+  const boxResult: BoxLayoutResult = document.addBoxLayout(0, boxes, boxOptions);
+  if (boxResult.next) document.addBoxLayout(0, [], {...boxOptions, start: boxResult.next});
+  if (boxResult.placements[0]) document.addTextObject(boxResult.placements[0].page_index,
+    'Hi', boxResult.placements[0].content_box);
+  // @ts-expect-error measured boxes require a content size
+  document.addBoxLayout(0, [{type: 'box'}]);
+  // @ts-expect-error unsupported float direction
+  document.addBoxLayout(0, [{type: 'box', size: [2, 2], float: 'justify'}]);
+  // @ts-expect-error typography belongs to text layout, not measured boxes
+  document.addBoxLayout(0, [], {font_size: 2});
+  // @ts-expect-error row breaks have no box geometry
+  document.addBoxLayout(0, [{type: 'line_break', size: [2, 2]}]);
   const mixedBlocks: FlowBlock[] = [
     {type: 'paragraph', text: 'A', style: {font_size: 4, shape: false}},
     {type: 'image', data_base64: '', format: 'PNG', width: 10, height: 5},

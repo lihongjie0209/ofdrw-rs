@@ -401,3 +401,24 @@ try {
 支持图片、跨页表格和 `page_break`，并提供 `FlowBlock`、`FlowDocumentOptions`
 和 `FlowLayoutResult` TypeScript 类型。图片使用 `data_base64`。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
+
+## 盒模型与浮动行（源码开发功能，尚未发布）
+
+```js
+const document = Document.create();
+try {
+  const result = document.addBoxLayout(0, [
+    {type: 'box', size: [40, 10], padding: [2, 2, 2, 2],
+      border: [0.2, 0.2, 0.2, 0.2], float: 'left', clear: 'none'},
+    {type: 'box', size: [40, 10], float: 'right', clear: 'none'},
+  ]);
+  const placed = result.placements[0];
+  document.addTextObject(placed.page_index, 'Hello', placed.content_box);
+  document.save('boxes.ofd');
+} finally { document.close(); }
+```
+
+提供 `LayoutBox`、`BoxLayoutItem`、`BoxLayoutOptions`、`BoxPlacement` 和
+`BoxLayoutResult` TypeScript 类型。`next` 可传给下次调用的 `start`。
+接口布局已测量尺寸的盒子；自动内容测量和一般子容器仍待实现。
+详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。

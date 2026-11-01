@@ -1,5 +1,6 @@
 //! Versioned C ABI for OFD package operations.
 
+mod box_layout;
 mod flow_blocks;
 
 use std::cell::RefCell;
@@ -10986,6 +10987,70 @@ pub unsafe extern "C" fn ofd_add_flow_blocks_json(
         output_buffer(
             serde_json::to_vec(&serde_json::json!({"pages": result.pages, "next": next}))
                 .map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
+/// Arrange measured boxes and draw their decorations atomically.
+///
+/// JSON accepts `items`, optional `page_size`, `margins`, and `start`.
+/// Each item has type `box`, `line_break`, or `page_break`. Boxes require
+/// `size` and accept margin, padding, border, colors, alpha, float, clear,
+/// integrity, relative offset, and placeholder settings. Returns page indexes,
+/// fragment placements with content rectangles, and a continuation position.
+///
+/// # Safety
+/// `handle` must be live, `layout_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_box_layout_json(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(input_string(layout_json)?).map_err(|e| e.to_string())?;
+        let object = input
+            .as_object()
+            .ok_or("box layout request must be an object")?;
+        for key in object.keys() {
+            if !matches!(key.as_str(), "items" | "page_size" | "margins" | "start") {
+                return Err(format!("unsupported box layout option: {key}"));
+            }
+        }
+        let mut style = ofdrw::BoxLayoutStyle {
+            start: parse_flow_start(&input)?,
+            ..Default::default()
+        };
+        if let Some(page_size) = input.get("page_size") {
+            style.page_size = serde_json::from_value(page_size.clone())
+                .map_err(|_| "page_size must contain two numbers")?;
+        }
+        if let Some(margins) = input.get("margins") {
+            style.margins = serde_json::from_value(margins.clone())
+                .map_err(|_| "margins must contain four numbers")?;
+        }
+        let values = input
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("items must be an array")?;
+        if values.len() > 10_000 {
+            return Err("too many layout items".into());
+        }
+        let items = values
+            .iter()
+            .map(box_layout::parse_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = document_mut(handle)?
+            .add_box_layout(document_index, &items, style)
+            .map_err(|e| e.to_string())?;
+        output_buffer(
+            serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
             output,
         )
     })

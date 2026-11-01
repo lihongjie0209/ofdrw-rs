@@ -318,6 +318,7 @@ _ffi.cdef(
     int ofd_add_table_json(OfdDocument *handle, size_t document_index, const char *table_json, OfdBuffer *output);
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
+    int ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
     int ofd_append_path_page(OfdDocument *handle, size_t document_index, const char *commands, double x, double y, double width, double height, double page_width, double page_height, int fill, int stroke);
     int ofd_append_image_page(OfdDocument *handle, size_t document_index, const unsigned char *data, size_t len, const char *format, double width_mm, double height_mm);
@@ -4257,6 +4258,28 @@ class Document:
         _check(_lib.ofd_add_table_json(
             self._handle, document_index,
             _utf8(json.dumps(payload, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def add_box_layout(self, document_index: int, items: list[dict], **options) -> dict:
+        """Arrange measured boxes and draw their backgrounds/borders atomically.
+
+        Options: page_size, margins, and start. Items use type box, line_break,
+        or page_break. Box size and edges are millimeters. The result includes
+        pages, placements with content_box rectangles, and a reusable next.
+        """
+        self._require_open()
+        if document_index < 0:
+            raise IndexError(document_index)
+        if not isinstance(items, list):
+            raise TypeError("items must be a list")
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_add_box_layout_json(
+            self._handle, document_index,
+            _utf8(json.dumps({**options, "items": items}, allow_nan=False)), output,
         ))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))

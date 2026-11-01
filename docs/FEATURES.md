@@ -844,7 +844,7 @@ other DOM layout behavior remain pending.
 
 ## 盒模型与浮动分段
 
-**未发布，当前仅 Rust 核心：** `OfdDocument::add_box_layout()` places measured
+**未发布（开发分支）：** `OfdDocument::add_box_layout()` places measured
 `LayoutBox` elements into Java-style rows and draws their backgrounds and
 borders. `BoxLayoutStyle` supplies page size, margins, and an optional existing
 page start. Boxes include content size, four independent margin/border/padding
@@ -869,8 +869,21 @@ plain splitting, and decorated splitting. Regenerate the independent fixture
 with `python3 scripts/generate_box_layout_reference.py` after building the
 pinned sibling Java layout module. This generator never calls Rust.
 
-Automatic text/image measurement within boxes, general nested child containers,
-and C/Python/Go/Node.js interfaces for this new operation remain pending.
+Python exposes `Document.add_box_layout(document_index, items, **options)`,
+Go uses `Document.AddBoxLayout(documentIndex, items, style)`, Node.js uses
+`Document.addBoxLayout(documentIndex, items, options)`, and C uses
+`ofd_add_box_layout_json()`. JSON items use `type: "box"` plus the box fields,
+`type: "line_break"`, or `type: "page_break"`. `size` is required for boxes;
+edge arrays contain top, right, bottom, and left values. `float` accepts
+`left`, `right`, or `center`, defaulting to `left`; `clear` accepts `none`,
+`left`, `right`, or `both`, defaulting to `both`. Result keys are `pages`,
+`placements`, and `next`; all geometry uses millimeters. Unknown options,
+malformed break items, invalid alpha, and nonfinite values are rejected.
+Go provides `DefaultBoxLayoutStyle()` and typed items, boxes, placements, and
+results; Node.js provides corresponding TypeScript declarations.
+
+Automatic text/image measurement within boxes and general nested child
+containers remain pending.
 
 ## 表格与嵌套布局
 

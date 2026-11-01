@@ -326,6 +326,7 @@ type nativeAPI struct {
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
 	appendPathPage                  func(uintptr, uintptr, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
 	appendImagePage                 func(uintptr, uintptr, *byte, uintptr, *byte, float64, float64) int32
@@ -693,6 +694,7 @@ func loadAPI() error {
 			{"ofd_add_table_json", &api.addTable},
 			{"ofd_add_flowed_spans_json", &api.addFlowedSpans},
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
+			{"ofd_add_box_layout_json", &api.addBoxLayout},
 			{"ofd_append_text_page_with_font", &api.appendTextWithFont},
 			{"ofd_append_path_page", &api.appendPathPage},
 			{"ofd_append_image_page", &api.appendImagePage},
@@ -1129,6 +1131,64 @@ type FlowTable struct {
 type FlowLayoutResult struct {
 	Pages []int      `json:"pages"`
 	Next  *FlowStart `json:"next"`
+}
+
+// LayoutBox describes measured content and independent top/right/bottom/left edges.
+// Float is left, right, or center; Clear is none, left, right, or both.
+// Empty Float/Clear use left/both. Offset affects drawing without moving occupied space.
+type LayoutBox struct {
+	Size            [2]float64 `json:"size"`
+	Margin          [4]float64 `json:"margin"`
+	Padding         [4]float64 `json:"padding"`
+	Border          [4]float64 `json:"border"`
+	BackgroundColor *[3]uint8  `json:"background_color,omitempty"`
+	BorderColor     [3]uint8   `json:"border_color"`
+	Alpha           *uint8     `json:"alpha,omitempty"`
+	Float           string     `json:"float,omitempty"`
+	Clear           string     `json:"clear,omitempty"`
+	Integrity       bool       `json:"integrity,omitempty"`
+	Offset          [2]float64 `json:"offset"`
+	Placeholder     bool       `json:"placeholder,omitempty"`
+}
+
+// BoxLayoutItem is a box, line_break, or page_break. Box items require LayoutBox.
+type BoxLayoutItem struct {
+	Type string `json:"type"`
+	*LayoutBox
+}
+
+// BoxLayoutStyle supplies page geometry and an optional existing-page start.
+type BoxLayoutStyle struct {
+	PageSize [2]float64 `json:"page_size"`
+	Margins  [4]float64 `json:"margins"`
+	Start    *FlowStart `json:"start,omitempty"`
+}
+
+// DefaultBoxLayoutStyle returns A4 geometry with the standard text-flow margins.
+func DefaultBoxLayoutStyle() BoxLayoutStyle {
+	return BoxLayoutStyle{PageSize: [2]float64{210, 297}, Margins: [4]float64{25.4, 31.7, 25.4, 31.7}}
+}
+
+// BoxPlacement describes one box fragment. Drawing rectangles include relative offsets.
+// Allocation describes occupied space; ContentBox can be passed to text/image object APIs.
+type BoxPlacement struct {
+	SourceIndex  int        `json:"source_index"`
+	PageIndex    int        `json:"page_index"`
+	Allocation   [4]float64 `json:"allocation"`
+	BorderBox    [4]float64 `json:"border_box"`
+	PaddingBox   [4]float64 `json:"padding_box"`
+	ContentBox   [4]float64 `json:"content_box"`
+	Borders      [4]float64 `json:"borders"`
+	SourceOffset float64    `json:"source_offset"`
+	First        bool       `json:"first"`
+	Last         bool       `json:"last"`
+}
+
+// BoxLayoutResult gives global page indexes, fragment coordinates, and a continuation.
+type BoxLayoutResult struct {
+	Pages      []int          `json:"pages"`
+	Placements []BoxPlacement `json:"placements"`
+	Next       *FlowStart     `json:"next"`
 }
 
 // TableStyle controls table layout and row pagination. RowHeight zero sizes
@@ -10122,6 +10182,53 @@ func (doc *Document) AddFlowBlocks(documentIndex int, blocks []FlowBlock, style 
 	var result FlowLayoutResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		return FlowLayoutResult{}, fmt.Errorf("decode flow layout result: %w", err)
+	}
+	return result, nil
+}
+
+// AddBoxLayout arranges measured boxes in floating rows and paints their decorations.
+// It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
+// Invalid later input leaves the document unchanged.
+func (doc *Document) AddBoxLayout(documentIndex int, items []BoxLayoutItem, style BoxLayoutStyle) (BoxLayoutResult, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return BoxLayoutResult{}, err
+	}
+	if documentIndex < 0 {
+		return BoxLayoutResult{}, errors.New("negative document index")
+	}
+	if style == (BoxLayoutStyle{}) {
+		style = DefaultBoxLayoutStyle()
+	}
+	if items == nil {
+		items = []BoxLayoutItem{}
+	}
+	payload, err := json.Marshal(struct {
+		Items []BoxLayoutItem `json:"items"`
+		BoxLayoutStyle
+	}{Items: items, BoxLayoutStyle: style})
+	if err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("encode box layout: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addBoxLayout(doc.handle, uintptr(documentIndex), &payloadBytes[0], &buffer)); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("add box layout: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	var result BoxLayoutResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("decode box layout result: %w", err)
 	}
 	return result, nil
 }

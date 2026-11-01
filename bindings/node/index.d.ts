@@ -390,6 +390,37 @@ export type FlowBlock =
   | { type: 'page_break' };
 export interface FlowLayoutResult { pages: number[]; next: FlowStart | null }
 
+/** A measured content box with top/right/bottom/left edges in millimeters. */
+export interface LayoutBox {
+  size: [number, number];
+  margin?: [number, number, number, number];
+  padding?: [number, number, number, number];
+  border?: [number, number, number, number];
+  background_color?: [number, number, number] | null;
+  border_color?: [number, number, number];
+  alpha?: number | null;
+  float?: 'left' | 'right' | 'center';
+  clear?: 'none' | 'left' | 'right' | 'both';
+  integrity?: boolean;
+  offset?: [number, number];
+  placeholder?: boolean;
+}
+export type BoxLayoutItem = ({type: 'box'} & LayoutBox) | {type: 'line_break'} | {type: 'page_break'};
+export type BoxLayoutOptions = Pick<FlowTextOptions, 'page_size' | 'margins' | 'start'>;
+export interface BoxPlacement {
+  source_index: number;
+  page_index: number;
+  allocation: [number, number, number, number];
+  border_box: [number, number, number, number];
+  padding_box: [number, number, number, number];
+  content_box: [number, number, number, number];
+  borders: [number, number, number, number];
+  source_offset: number;
+  first: boolean;
+  last: boolean;
+}
+export interface BoxLayoutResult { pages: number[]; placements: BoxPlacement[]; next: FlowStart | null }
+
 export type TextObjectOptions = {
   size?: number;
   fill_color?: [number, number, number];
@@ -1019,6 +1050,7 @@ export class Document {
   addImagePage(data: Buffer | Uint8Array, format: string, width?: number, height?: number): void;
   addPathPage(commands: string, boundary: [number, number, number, number], pageWidth?: number, pageHeight?: number, fill?: boolean, stroke?: boolean): void;
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
+  addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
   addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
   addFlowedSpans(documentIndex: number, spans: FlowSpan[], options?: FlowTextOptions): number[];
   addEmbeddedFont(name: string, data: Buffer | Uint8Array): string;

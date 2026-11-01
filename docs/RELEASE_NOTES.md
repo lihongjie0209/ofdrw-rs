@@ -11,8 +11,10 @@
   rules, independent margin/border/padding edges, fragment coordinates, complete
   boxes, placeholders and atomic decoration drawing. Independent Java-generated
   coordinates and Rust rendering tests cover the implementation. Automatic
-  content measurement, general child containers and language bindings for boxes
-  remain pending.
+  content measurement and general child containers remain pending.
+- Expose measured-box layout through C, Python, Go and Node.js, including all
+  fragment rectangles, source offsets and continuation positions. Add strict
+  input validation, TypeScript models and shared cross-language fixtures.
 
 # v0.3.0
 
