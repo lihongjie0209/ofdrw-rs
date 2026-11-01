@@ -439,3 +439,28 @@ try {
 提供 `FlowTextMetrics` 和 `FlowLineMetrics` 类型。测量不增加页面或资源，
 页面几何和 `start` 被忽略；逐行位置和逻辑基线相对段落原点。
 测得高度可用于盒模型；一般子容器及按行拆分的容器绘制仍待实现。
+
+### Intrinsic image sizes (unreleased source API)
+
+Flow images, table-cell images and image blocks accept `intrinsic_size: true`
+(`IntrinsicSize: true` in Go). Omit width/height or leave them zero: pixel
+sizes are converted at 5 pixels/mm, matching Java OFDRW, regardless of embedded
+DPI metadata. `fit_within: [width, height]` (`FitWithin: &[2]float64{width, height}`
+in Go) optionally shrinks the image to millimeter bounds while preserving
+aspect ratio. It never enlarges smaller images. Nonzero explicit dimensions
+cannot be combined with intrinsic sizing. Without intrinsic sizing, both
+explicit dimensions remain required. These options share the same native
+validation in C and all bindings and are not included in version 0.3.0.
+
+```javascript
+const fs = require('node:fs');
+const { Document } = require('ofdrw-rs');
+const doc = Document.create();
+try {
+  doc.addFlowBlocks(0, [{
+    type: 'image', data_base64: fs.readFileSync('picture.png').toString('base64'),
+    format: 'PNG', intrinsic_size: true, fit_within: [40, 30],
+  }]);
+  fs.writeFileSync('picture.ofd', doc.toBytes());
+} finally { doc.close(); }
+```

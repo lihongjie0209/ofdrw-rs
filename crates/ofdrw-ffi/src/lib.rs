@@ -10454,24 +10454,48 @@ fn parse_table_cell_image(value: &serde_json::Value) -> Result<TableCellImage, S
         .get("data_base64")
         .and_then(serde_json::Value::as_str)
         .ok_or("table cell image data_base64 must be a string")?;
-    Ok(TableCellImage {
-        data: STANDARD
-            .decode(data)
-            .map_err(|_| "table cell image data_base64 is invalid")?,
-        format: value
-            .get("format")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("table cell image format must be a string")?
-            .to_owned(),
-        width: value
-            .get("width")
-            .and_then(serde_json::Value::as_f64)
-            .ok_or("table cell image width must be a number")?,
-        height: value
-            .get("height")
-            .and_then(serde_json::Value::as_f64)
-            .ok_or("table cell image height must be a number")?,
-    })
+    let data = STANDARD
+        .decode(data)
+        .map_err(|_| "table cell image data_base64 is invalid")?;
+    let format = value
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("table cell image format must be a string")?;
+    let intrinsic = value
+        .get("intrinsic_size")
+        .map(|v| v.as_bool().ok_or("image intrinsic_size must be a boolean"))
+        .transpose()?
+        .unwrap_or(false);
+    let image = if intrinsic {
+        for name in ["width", "height"] {
+            if let Some(dimension) = value.get(name) {
+                if dimension.as_f64() != Some(0.) {
+                    return Err("intrinsic image width and height must be omitted or zero".into());
+                }
+            }
+        }
+        TableCellImage::from_intrinsic(data, format).map_err(|error| error.to_string())?
+    } else {
+        TableCellImage {
+            data,
+            format: format.to_owned(),
+            width: value
+                .get("width")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or("table cell image width must be a number")?,
+            height: value
+                .get("height")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or("table cell image height must be a number")?,
+        }
+    };
+    if let Some(bounds) = value.get("fit_within") {
+        let bounds: [f64; 2] = serde_json::from_value(bounds.clone())
+            .map_err(|_| "image fit_within must contain exactly two numbers")?;
+        image.fit_within(bounds).map_err(|error| error.to_string())
+    } else {
+        Ok(image)
+    }
 }
 
 fn parse_table_cells(values: &serde_json::Value, depth: usize) -> Result<Vec<TableCell>, String> {

@@ -81,3 +81,27 @@ with Document.new() as document:
 逐行 `x`、`y`、`baseline` 相对段落左上角。页面几何和 `start` 不参与测量。
 将测得高度用于盒模型，再按内容矩形调用文本流式绘制；尺寸属于逻辑行框，
 一般嵌套容器及按行拆分的容器绘制仍待实现。
+
+### Intrinsic image sizes (unreleased source API)
+
+Flow images, table-cell images and image blocks accept `intrinsic_size: true`
+(`IntrinsicSize: true` in Go). Omit width/height or leave them zero: pixel
+sizes are converted at 5 pixels/mm, matching Java OFDRW, regardless of embedded
+DPI metadata. `fit_within: [width, height]` (`FitWithin: &[2]float64{width, height}`
+in Go) optionally shrinks the image to millimeter bounds while preserving
+aspect ratio. It never enlarges smaller images. Nonzero explicit dimensions
+cannot be combined with intrinsic sizing. Without intrinsic sizing, both
+explicit dimensions remain required. These options share the same native
+validation in C and all bindings and are not included in version 0.3.0.
+
+```python
+from pathlib import Path
+from ofdrw_rs import Document
+
+with Document.new() as doc:
+    doc.add_flow_blocks(0, [{
+        "type": "image", "data": Path("picture.png").read_bytes(),
+        "format": "PNG", "intrinsic_size": True, "fit_within": [40, 30],
+    }])
+    Path("picture.ofd").write_bytes(doc.to_bytes())
+```

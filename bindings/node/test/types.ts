@@ -40,6 +40,11 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
     {type: 'table', table: {row_count: 1, column_widths: [20], cells: [{row: 0, column: 0, text: 'B'}]}},
     {type: 'spacer', height: 2}, {type: 'page_break'},
   ];
+  document.addFlowBlocks(0, [{type: 'image', data_base64: '', format: 'PNG', intrinsic_size: true, fit_within: [10, 20]}]);
+  // @ts-expect-error intrinsic sizing cannot specify a nonzero width
+  document.addFlowBlocks(0, [{type: 'image', data_base64: '', format: 'PNG', intrinsic_size: true, width: 10}]);
+  // @ts-expect-error explicit sizing still requires both dimensions
+  document.addFlowBlocks(0, [{type: 'image', data_base64: '', format: 'PNG', width: 10}]);
   const mixedOptions: FlowDocumentOptions = {block_gap: 2};
   const mixedResult: FlowLayoutResult = document.addFlowBlocks(0, mixedBlocks, mixedOptions);
   if (mixedResult.next) document.addFlowBlocks(0, [], {start: mixedResult.next});

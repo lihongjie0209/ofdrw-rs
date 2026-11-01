@@ -4329,6 +4329,8 @@ class Document:
         Options match add_flowed_spans, with an additional block_gap in mm.
         Returns {"pages": [...], "next": {"page_index": ..., "y": ...} | None}.
         Image dictionaries accept bytes in data or a data_base64 string.
+        Set intrinsic_size=True to use 5 pixels/mm (omit width/height);
+        fit_within=[width, height] shrinks while preserving aspect ratio.
         Paragraphs accept text or spans, plus optional style overrides.
         """
         self._require_open()

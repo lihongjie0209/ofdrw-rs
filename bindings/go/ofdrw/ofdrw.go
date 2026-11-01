@@ -1104,17 +1104,19 @@ type FlowParagraphStyle struct {
 // FlowBlock is a paragraph, image, table, spacer, or page_break in placement order.
 // Paragraphs require exactly one of Text and Spans. Image Data is encoded as base64.
 type FlowBlock struct {
-	Type         string              `json:"type"`
-	Text         *string             `json:"text,omitempty"`
-	Spans        []FlowSpan          `json:"spans,omitempty"`
-	Style        *FlowParagraphStyle `json:"style,omitempty"`
-	Data         []byte              `json:"data_base64,omitempty"`
-	Format       string              `json:"format,omitempty"`
-	Width        float64             `json:"width,omitempty"`
-	Height       float64             `json:"height,omitempty"`
-	Align        string              `json:"align,omitempty"`
-	Table        *FlowTable          `json:"table,omitempty"`
-	RepeatHeader bool                `json:"repeat_header,omitempty"`
+	Type          string              `json:"type"`
+	Text          *string             `json:"text,omitempty"`
+	Spans         []FlowSpan          `json:"spans,omitempty"`
+	Style         *FlowParagraphStyle `json:"style,omitempty"`
+	Data          []byte              `json:"data_base64,omitempty"`
+	Format        string              `json:"format,omitempty"`
+	Width         float64             `json:"width,omitempty"`
+	Height        float64             `json:"height,omitempty"`
+	Align         string              `json:"align,omitempty"`
+	Table         *FlowTable          `json:"table,omitempty"`
+	RepeatHeader  bool                `json:"repeat_header,omitempty"`
+	IntrinsicSize bool                `json:"intrinsic_size,omitempty"`
+	FitWithin     *[2]float64         `json:"fit_within,omitempty"`
 }
 
 // FlowTable is a paginated grid inside a mixed flow. Padding is explicit:
@@ -1290,10 +1292,12 @@ type NestedTable struct {
 // TableCellImage places an encoded image after a cell's text.
 // Width and height are measured in millimeters.
 type TableCellImage struct {
-	Data   []byte  `json:"data_base64"`
-	Format string  `json:"format"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
+	Data          []byte      `json:"data_base64"`
+	Format        string      `json:"format"`
+	Width         float64     `json:"width"`
+	Height        float64     `json:"height"`
+	IntrinsicSize bool        `json:"intrinsic_size,omitempty"`
+	FitWithin     *[2]float64 `json:"fit_within,omitempty"`
 }
 
 // DefaultTableStyle returns A4 geometry; callers must set ColumnWidths.

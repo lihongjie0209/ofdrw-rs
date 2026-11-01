@@ -487,12 +487,16 @@ export interface TableOptions {
   repeat_header?: boolean;
 }
 
-export interface TableImage {
+/** Images use explicit millimeters or Java-compatible intrinsic sizing (5 pixels/mm). */
+export type TableImage = {
   data_base64: string;
   format: string;
-  width: number;
-  height: number;
-}
+  /** Shrink to these bounds without enlarging or changing aspect ratio. */
+  fit_within?: [number, number];
+} & (
+  { intrinsic_size: true; width?: 0; height?: 0 } |
+  { intrinsic_size?: false; width: number; height: number }
+);
 
 export interface NestedTable {
   row_count: number;

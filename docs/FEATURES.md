@@ -15,6 +15,7 @@
 - [页面对象与文字编辑](#页面对象与文字编辑)
 - [文本流式布局](#文本流式布局)
 - [文本自动测量](#文本自动测量)
+- [图片自动尺寸](#图片自动尺寸)
 - [混合流布局](#混合流布局)
 - [盒模型与浮动分段](#盒模型与浮动分段)
 - [表格与嵌套布局](#表格与嵌套布局)
@@ -842,6 +843,28 @@ style fields, and returns the same metrics JSON. Go and TypeScript provide
 `FlowLineMetrics` and `FlowTextMetrics` models. All bindings preserve read-only
 behavior, including failed measurements.
 
+## 图片自动尺寸
+
+**未发布（开发分支）：** Rust `TableCellImage::from_intrinsic(data, format)`
+reads validated image dimensions and converts pixels at 5 pixels/mm, matching
+Java OFDRW’s `Img(Path)` constructor. Encoded DPI metadata does not affect this
+conversion. `fit_within([width, height])` shrinks to millimeter bounds while
+preserving aspect ratio, without enlarging an image already inside the bounds.
+The encoded image bytes remain unchanged.
+
+C JSON image requests, Python dictionaries, Go `FlowBlock` / `TableCellImage`,
+and Node.js `TableImage` expose `intrinsic_size` (`IntrinsicSize` in Go) and
+`fit_within` (`FitWithin` in Go). These options work in mixed flow, table-cell
+images, and table image blocks through their shared native parser. With
+intrinsic sizing enabled, width and height must be omitted or zero; otherwise
+both explicit dimensions are required. Invalid bytes, format mismatches,
+ambiguous dimensions and invalid fit bounds fail before document mutation.
+
+The shared reference fixture derives a 10×5 mm image from 50×25 pixels and
+fits it to 4×2 mm inside 4×4 mm bounds. Cross-language tests assert the actual
+OFD drawing rectangle and rollback on errors. Supported raster formats include
+PNG, JPEG, GIF, BMP, TIFF, JPEG 2000 and JBIG2 through existing decoders.
+
 ## 混合流布局
 
 **未发布（开发分支）：** `OfdDocument::add_flow_blocks()` accepts an ordered
@@ -876,8 +899,8 @@ Go uses `FlowTable` for top-level paginated grids: its `Padding` zero is explici
 existing `NestedTable` defaults inside cells are preserved.
 
 This is vertical block composition. Measured floating boxes are supported
-separately below; automatic content measurement, general child containers, and
-other DOM layout behavior remain pending.
+separately below; text and image measurement are available independently, while general child
+containers and other DOM layout behavior remain pending.
 
 ## 盒模型与浮动分段
 
@@ -920,7 +943,7 @@ Go provides `DefaultBoxLayoutStyle()` and typed items, boxes, placements, and
 results; Node.js provides corresponding TypeScript declarations.
 
 Text dimensions can be measured with the API above and used to size a box.
-Automatic image sizing, general nested child containers and line-aware
+General nested child containers and line-aware
 container fragmentation remain pending.
 
 ## 表格与嵌套布局

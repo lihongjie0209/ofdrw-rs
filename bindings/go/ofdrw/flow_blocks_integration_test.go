@@ -143,3 +143,60 @@ func TestMixedFlowRejectsInvalidContentAtomically(t *testing.T) {
 		t.Fatal("accepted closed document")
 	}
 }
+
+func TestIntrinsicImageSizingAndFitBounds(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "image-layout.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Request struct {
+			Blocks []FlowBlock `json:"blocks"`
+			FlowDocumentStyle
+		} `json:"request"`
+		Expected FlowLayoutResult `json:"expected"`
+		Boundary []float64        `json:"boundary"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	result, err := doc.AddFlowBlocks(0, fixture.Request.Blocks, fixture.Request.FlowDocumentStyle)
+	if err != nil || !reflect.DeepEqual(result, fixture.Expected) {
+		t.Fatalf("layout: %+v, %v", result, err)
+	}
+	images, err := doc.PageImages(0)
+	if err != nil || len(images) != 1 || !reflect.DeepEqual(images[0].Boundary, fixture.Boundary) {
+		t.Fatalf("images: %+v, %v", images, err)
+	}
+	before, err := doc.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []struct {
+		name   string
+		width  float64
+		bounds [2]float64
+	}{
+		{"conflicting width", 2, [2]float64{4, 4}},
+		{"zero bound", 0, [2]float64{0, 4}},
+		{"nonfinite bound", 0, [2]float64{math.Inf(1), 4}},
+	} {
+		t.Run(input.name, func(t *testing.T) {
+			block := fixture.Request.Blocks[0]
+			block.Width = input.width
+			block.FitWithin = &input.bounds
+			if _, err := doc.AddFlowBlocks(0, []FlowBlock{block}, fixture.Request.FlowDocumentStyle); err == nil {
+				t.Fatal("expected error")
+			}
+			after, err := doc.ToBytes()
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("document changed: %v", err)
+			}
+		})
+	}
+}
