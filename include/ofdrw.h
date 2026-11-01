@@ -421,6 +421,8 @@ int32_t ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, co
 int32_t ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
 /* Measured box rows return {pages, placements, next}; all distances are millimeters. */
 int32_t ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
+/* Read-only logical paragraph metrics; requires spans and content_width in millimeters. */
+int32_t ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);
 int32_t ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
 int32_t ofd_append_path_page(OfdDocument *handle, size_t document_index, const char *commands, double x, double y, double width, double height, double page_width, double page_height, int32_t fill, int32_t stroke);
 int32_t ofd_append_image_page(OfdDocument *handle, size_t document_index, const uint8_t *data, size_t len, const char *format, double width_mm, double height_mm);

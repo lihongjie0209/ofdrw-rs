@@ -319,6 +319,7 @@ _ffi.cdef(
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
+    int ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);
     int ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
     int ofd_append_path_page(OfdDocument *handle, size_t document_index, const char *commands, double x, double y, double width, double height, double page_width, double page_height, int fill, int stroke);
     int ofd_append_image_page(OfdDocument *handle, size_t document_index, const unsigned char *data, size_t len, const char *format, double width_mm, double height_mm);
@@ -4256,6 +4257,42 @@ class Document:
             payload["font_id"] = str(font_id)
         output = _ffi.new("OfdBuffer *")
         _check(_lib.ofd_add_table_json(
+            self._handle, document_index,
+            _utf8(json.dumps(payload, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def measure_flowed_spans(self, document_index: int, spans: list[dict], content_width: float, **options) -> dict:
+        """Measure logical flowing-text dimensions without changing the document.
+
+        Returns width, height and lines (text, x/y, width, height, baseline,
+        paragraph_start). Typography matches add_flowed_spans; page geometry
+        and start are ignored. Interior blank lines retain height; terminal
+        empty paragraphs follow the renderer and are discarded.
+        """
+        self._require_open()
+        if document_index < 0:
+            raise IndexError(document_index)
+        if not isinstance(spans, list):
+            raise TypeError("spans must be a list")
+
+        def normalize(value):
+            item = dict(value)
+            if item.get("font_id") is None:
+                item.pop("font_id", None)
+            else:
+                item["font_id"] = str(item["font_id"])
+            if item.get("language") is None:
+                item.pop("language", None)
+            return item
+
+        payload = {**normalize(options), "spans": [normalize(span) for span in spans],
+                   "content_width": content_width}
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_measure_flowed_spans_json(
             self._handle, document_index,
             _utf8(json.dumps(payload, allow_nan=False)), output,
         ))

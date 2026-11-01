@@ -308,6 +308,7 @@ const api = {
   addFlowedSpans: library.func('int ofd_add_flowed_spans_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowBlocks: library.func('int ofd_add_flow_blocks_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addBoxLayout: library.func('int ofd_add_box_layout_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
+  measureFlowedSpans: library.func('int ofd_measure_flowed_spans_json(OfdDocument handle, size_t document_index, str measure, _Out_ OfdBuffer *output)'),
   addTable: library.func('int ofd_add_table_json(OfdDocument handle, size_t document_index, str table, _Out_ OfdBuffer *output)'),
   addEmbeddedFont: library.func('int ofd_add_embedded_font(OfdDocument handle, str name, const uint8_t *data, size_t len, _Out_ size_t *output)'),
   addEmbeddedFontToDocument: library.func('int ofd_add_embedded_font_to_document(OfdDocument handle, size_t document_index, str name, const uint8_t *data, size_t len, _Out_ size_t *output)'),
@@ -1657,6 +1658,12 @@ class Document {
   addFlowedText(documentIndex, value, options = {}) {
     const request = { ...optionsObject(options), text: textValue(value) };
     return this._json(api.addFlowedText, index(documentIndex, 'documentIndex'), JSON.stringify(request));
+  }
+
+  measureFlowedSpans(documentIndex, spans, contentWidth, options = {}) {
+    if (!Array.isArray(spans)) throw new TypeError('spans must be an array');
+    const request = { ...optionsObject(options), spans, content_width: size(contentWidth, 'contentWidth') };
+    return this._json(api.measureFlowedSpans, index(documentIndex, 'documentIndex'), JSON.stringify(request));
   }
 
   addBoxLayout(documentIndex, items, options = {}) {

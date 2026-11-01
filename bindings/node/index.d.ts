@@ -390,6 +390,23 @@ export type FlowBlock =
   | { type: 'page_break' };
 export interface FlowLayoutResult { pages: number[]; next: FlowStart | null }
 
+/** Logical line coordinates and baseline are relative to the paragraph top-left. */
+export interface FlowLineMetrics {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  baseline: number;
+  paragraph_start: boolean;
+}
+export interface FlowTextMetrics {
+  /** Largest line advance, excluding indentation/alignment offsets. */
+  width: number;
+  height: number;
+  lines: FlowLineMetrics[];
+}
+
 /** A measured content box with top/right/bottom/left edges in millimeters. */
 export interface LayoutBox {
   size: [number, number];
@@ -1050,6 +1067,7 @@ export class Document {
   addImagePage(data: Buffer | Uint8Array, format: string, width?: number, height?: number): void;
   addPathPage(commands: string, boundary: [number, number, number, number], pageWidth?: number, pageHeight?: number, fill?: boolean, stroke?: boolean): void;
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
+  measureFlowedSpans(documentIndex: number, spans: FlowSpan[], contentWidth: number, options?: FlowTextOptions): FlowTextMetrics;
   addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
   addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
   addFlowedSpans(documentIndex: number, spans: FlowSpan[], options?: FlowTextOptions): number[];

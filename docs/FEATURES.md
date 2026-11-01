@@ -14,6 +14,7 @@
 - [多媒体资源与动作](#多媒体资源与动作)
 - [页面对象与文字编辑](#页面对象与文字编辑)
 - [文本流式布局](#文本流式布局)
+- [文本自动测量](#文本自动测量)
 - [混合流布局](#混合流布局)
 - [盒模型与浮动分段](#盒模型与浮动分段)
 - [表格与嵌套布局](#表格与嵌套布局)
@@ -805,6 +806,42 @@ span boundaries inherits the first span's appearance, while any overlapping
 `keep_together` span still keeps the whole touched grapheme with its following
 content.
 
+## 文本自动测量
+
+**未发布（开发分支）：** `OfdDocument::measure_flowed_spans()` computes logical
+line metrics and paragraph dimensions without changing the document. It shares
+font preparation, kerning, tracking, wrapping and shaping with
+`add_flowed_spans()`. Shaped text also checks the writer's glyph mappings,
+including missing glyphs. No pages, objects or resource IDs are allocated.
+
+The caller supplies `content_width` in millimeters and the normal text style.
+Page size, margins, starting page and paragraph page-keep rules are ignored;
+the result describes continuous text before pagination. Interior blank lines
+and paragraph gaps retain their height. Terminal empty paragraphs are discarded,
+matching existing text flow. Invalid typography, unavailable fonts, overwide
+kept spans and nonfinite/overflowing dimensions return errors.
+
+`FlowTextMetrics` contains `width`, `height`, and `lines`. Width is the largest
+line advance, excluding indentation and alignment offsets. Each `FlowLineMetrics`
+contains text, x/y, width, height, a logical baseline position, and
+`paragraph_start`. Positions and baselines are relative to the paragraph's
+origin, not to a page. Height includes the last line's leading. These describe
+layout dimensions; font overhangs and painted decorations may extend outside
+the logical line box.
+
+Use the measured height as `LayoutBox.size[1]` to size a box from its text.
+After box placement, the returned content rectangle can define the start and
+margins for normal text flow. Existing-page origins are applied during drawing.
+General nested containers and line-aware container fragmentation remain pending.
+
+Python: `Document.measure_flowed_spans(document_index, spans, content_width, **options)`.
+Go: `Document.MeasureFlowedSpans(documentIndex, spans, contentWidth, style)`.
+Node.js: `Document.measureFlowedSpans(documentIndex, spans, contentWidth, options)`.
+C: `ofd_measure_flowed_spans_json()` accepts `spans`, `content_width`, and text
+style fields, and returns the same metrics JSON. Go and TypeScript provide
+`FlowLineMetrics` and `FlowTextMetrics` models. All bindings preserve read-only
+behavior, including failed measurements.
+
 ## 混合流布局
 
 **未发布（开发分支）：** `OfdDocument::add_flow_blocks()` accepts an ordered
@@ -882,8 +919,9 @@ malformed break items, invalid alpha, and nonfinite values are rejected.
 Go provides `DefaultBoxLayoutStyle()` and typed items, boxes, placements, and
 results; Node.js provides corresponding TypeScript declarations.
 
-Automatic text/image measurement within boxes and general nested child
-containers remain pending.
+Text dimensions can be measured with the API above and used to size a box.
+Automatic image sizing, general nested child containers and line-aware
+container fragmentation remain pending.
 
 ## 表格与嵌套布局
 

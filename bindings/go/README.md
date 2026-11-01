@@ -82,3 +82,21 @@ if err != nil { log.Fatal(err) }
 `BoxLayoutItem{Type: "line_break"}` 和 `BoxLayoutItem{Type: "page_break"}`。
 接口布局已测量尺寸的盒子；自动测量和一般子容器仍待实现。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
+
+## 文本自动测量（源码开发功能，尚未发布）
+
+```go
+spans := []ofdrw.FlowSpan{{Text: "First line\nSecond line"}}
+textStyle := ofdrw.DefaultFlowTextStyle()
+metrics, err := document.MeasureFlowedSpans(0, spans, 40, textStyle)
+if err != nil { log.Fatal(err) }
+_, err = document.AddBoxLayout(0, []ofdrw.BoxLayoutItem{{Type: "box",
+    LayoutBox: &ofdrw.LayoutBox{Size: [2]float64{40, metrics.Height},
+        Padding: [4]float64{2, 2, 2, 2}, Border: [4]float64{0.2, 0.2, 0.2, 0.2}, Integrity: true},
+}}, ofdrw.DefaultBoxLayoutStyle())
+if err != nil { log.Fatal(err) }
+```
+
+`FlowTextMetrics`、`FlowLineMetrics` 返回逻辑尺寸和逐行位置。测量不修改页面或资源，
+页面几何和 `Start` 不参与计算；坐标和基线相对段落原点。
+一般子容器及按行拆分的容器绘制仍待实现。

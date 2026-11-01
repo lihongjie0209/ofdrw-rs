@@ -65,3 +65,19 @@ with Document.new() as document:
 `size` 是内容宽高；`margin`、`border`、`padding` 均按上、右、下、左排列。
 `result["next"]` 可作为下一次调用的 `start`。接口布局已测量尺寸的盒子并绘制装饰；
 自动测量内容和一般子容器仍待实现。详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
+
+## 文本自动测量（源码开发功能，尚未发布）
+
+```python
+with Document.new() as document:
+    spans = [{"text": "First line\nSecond line"}]
+    metrics = document.measure_flowed_spans(0, spans, 40, font_size=5, line_height=6)
+    print(metrics["width"], metrics["height"], metrics["lines"])
+    boxes = document.add_box_layout(0, [{"type": "box", "size": [40, metrics["height"]],
+        "padding": [2] * 4, "border": [0.2] * 4, "integrity": True}])
+```
+
+测量不会增加页面或资源。`width` 为最大行前进宽度，`height` 包含内部空行和段间距；
+逐行 `x`、`y`、`baseline` 相对段落左上角。页面几何和 `start` 不参与测量。
+将测得高度用于盒模型，再按内容矩形调用文本流式绘制；尺寸属于逻辑行框，
+一般嵌套容器及按行拆分的容器绘制仍待实现。

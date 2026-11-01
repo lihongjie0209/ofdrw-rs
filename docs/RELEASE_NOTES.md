@@ -16,6 +16,12 @@
   fragment rectangles, source offsets and continuation positions. Add strict
   input validation, TypeScript models and shared cross-language fixtures.
 
+- Add read-only flowed-span measurement in Rust, C, Python, Go and Node.js.
+  Share font, wrapping and shaping preparation with drawing, validate shaped
+  glyph mappings, and return per-line positions, baselines and logical total
+  dimensions. Measured height can size decorated text boxes. Independent font
+  table fixtures and rendering comparisons cover ordinary and shaped text.
+
 # v0.3.0
 
 ## Upgrade notes
