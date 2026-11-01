@@ -184,7 +184,7 @@ PDF 导入支持批注的正常外观流（`AP/N`），包括 Widget、FreeText
 各语言继续使用现有 PDF 导入、导出接口；交互表单行为和
 导出限制见[功能说明](docs/FEATURES.md#pdf-导入与兼容范围)。
 
-## 固定页面混合容器（开发版）
+## 新增布局功能（开发版）
 
 开发版还提供在已有页面上按绝对坐标绘制混合容器的接口：Rust
 `add_fixed_containers`、Python `add_fixed_containers`、Go `AddFixedContainers`
@@ -192,6 +192,11 @@ PDF 导入支持批注的正常外观流（`AP/N`），包括 Widget、FreeText
 几何位置，保持页面数不变。此接口尚未包含在 0.3.0 中，须使用同一提交构建的
 绑定和原生库；各语言 README 提供用法，详见
 [固定页面混合容器](docs/FEATURES.md#固定页面混合容器)。
+
+行内占位符可在文字之间预留宽高，并参与换行和行高计算，不生成绘制对象。
+Rust 使用 `FlowSpan::placeholder`，Go 使用 `NewPlaceholderSpan`，Python、Node.js
+和 C JSON 使用空 `text`、`placeholder_width` 和 `font_size` 字段。详见
+[行内占位符](docs/FEATURES.md#行内占位符)及各语言 README。
 
 ## 测试与发布
 

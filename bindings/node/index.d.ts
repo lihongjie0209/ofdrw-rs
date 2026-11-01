@@ -457,6 +457,8 @@ export type TextObjectOptions = {
 
 export interface FlowSpan {
   text: string;
+  /** Reserve an indivisible inline width. Requires empty text; font_size is its height. Zero is allowed. */
+  placeholder_width?: number;
   font_id?: string;
   font_size?: number;
   language?: string;

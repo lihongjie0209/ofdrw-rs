@@ -1322,24 +1322,33 @@ func DefaultTableStyle() TableStyle {
 
 // FlowSpan is one styled segment in a flowing paragraph.
 type FlowSpan struct {
-	Text            string    `json:"text"`
-	FontID          string    `json:"font_id,omitempty"`
-	FontSize        *float64  `json:"font_size,omitempty"`
-	Language        string    `json:"language,omitempty"`
-	FillColor       *[3]uint8 `json:"fill_color,omitempty"`
-	Fill            *bool     `json:"fill,omitempty"`
-	Stroke          bool      `json:"stroke,omitempty"`
-	StrokeColor     *[3]uint8 `json:"stroke_color,omitempty"`
-	StrokeWidth     *float64  `json:"stroke_width,omitempty"`
-	Bold            bool      `json:"bold,omitempty"`
-	Weight          *uint16   `json:"weight,omitempty"`
-	Italic          bool      `json:"italic,omitempty"`
-	LetterSpacing   float64   `json:"letter_spacing,omitempty"`
-	Underline       bool      `json:"underline,omitempty"`
-	UnderlineOffset *float64  `json:"underline_offset,omitempty"`
-	UnderlineWidth  *float64  `json:"underline_width,omitempty"`
-	LineBreakAfter  bool      `json:"line_break_after,omitempty"`
-	KeepTogether    bool      `json:"keep_together,omitempty"`
+	// PlaceholderWidth reserves an indivisible width and requires empty Text.
+	// FontSize supplies its height; zero width requires a non-nil pointer.
+	PlaceholderWidth *float64  `json:"placeholder_width,omitempty"`
+	Text             string    `json:"text"`
+	FontID           string    `json:"font_id,omitempty"`
+	FontSize         *float64  `json:"font_size,omitempty"`
+	Language         string    `json:"language,omitempty"`
+	FillColor        *[3]uint8 `json:"fill_color,omitempty"`
+	Fill             *bool     `json:"fill,omitempty"`
+	Stroke           bool      `json:"stroke,omitempty"`
+	StrokeColor      *[3]uint8 `json:"stroke_color,omitempty"`
+	StrokeWidth      *float64  `json:"stroke_width,omitempty"`
+	Bold             bool      `json:"bold,omitempty"`
+	Weight           *uint16   `json:"weight,omitempty"`
+	Italic           bool      `json:"italic,omitempty"`
+	LetterSpacing    float64   `json:"letter_spacing,omitempty"`
+	Underline        bool      `json:"underline,omitempty"`
+	UnderlineOffset  *float64  `json:"underline_offset,omitempty"`
+	UnderlineWidth   *float64  `json:"underline_width,omitempty"`
+	LineBreakAfter   bool      `json:"line_break_after,omitempty"`
+	KeepTogether     bool      `json:"keep_together,omitempty"`
+}
+
+// NewPlaceholderSpan reserves an inline rectangle without painting text or decorations.
+// Invalid dimensions are reported by measurement or layout. Zero width is allowed.
+func NewPlaceholderSpan(width, height float64) FlowSpan {
+	return FlowSpan{PlaceholderWidth: &width, FontSize: &height}
 }
 
 // DefaultFlowTextStyle returns A4 page and margin settings.

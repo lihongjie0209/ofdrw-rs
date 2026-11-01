@@ -66,6 +66,6 @@ fn main() -> Result<(), ofdrw::OfdError> {
 }
 ```
 
-This input is new development functionality after 0.3.0. Its C/Python/Go/Node.js
-span fields follow separately. See the feature reference for validation and
+This input is new development functionality after 0.3.0. C/Python/Go/Node.js
+accept `placeholder_width`, empty `text` and a `font_size` height in span inputs. See the feature reference for validation and
 leading-indent rules.

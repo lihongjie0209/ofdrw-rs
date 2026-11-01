@@ -9,6 +9,10 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const placeholder: import('../index').FlowSpan = {text: '', placeholder_width: 0, font_size: 4};
+  document.measureFlowedSpans(0, [placeholder], 20, {shape: true});
+  // @ts-expect-error placeholder width is numeric
+  document.measureFlowedSpans(0, [{text: '', placeholder_width: 'wide'}], 20);
   const fixed: import('../index').BoxPlacement[] = document.addFixedContainers(0, [
     {position: [-1, 2], container: {layout: {size: [20, 3]}, children: [{type: 'page_area_fill'}]}}
   ]);

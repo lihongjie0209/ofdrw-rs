@@ -287,3 +287,26 @@ measures content; positive heights control allocation and decoration while child
 may overflow. No pages are added. Nested text/images/tables, offsets, layers and
 placeholders follow flow-container rules. Page-area fillers are ignored. Invalid
 later content rolls back the whole call. Images accept `Data []byte`.
+
+### Inline placeholders (development)
+
+`NewPlaceholderSpan(width, height)` creates a `FlowSpan` with empty text and an
+explicit `PlaceholderWidth *float64`, preserving width zero in JSON. Geometry
+participates in wrapping and line height without painting objects or allocating
+font resources.
+
+```go
+metrics, err := doc.MeasureFlowedSpans(
+    0,
+    []ofdrw.FlowSpan{{Text: "Label:"}, ofdrw.NewPlaceholderSpan(8, 4), {Text: "value"}},
+    50,
+    ofdrw.DefaultFlowTextStyle(),
+)
+if err != nil { return err }
+_ = metrics // line text is "Label:value"
+```
+
+The same spans work in styled flow, text boxes, flow blocks and fixed/flow
+containers. A leading placeholder absorbs a configured first-line indent once.
+For character-count reservations use `count * (fontSize + letterSpacing)` as
+width. This development input requires matching bindings and native library.

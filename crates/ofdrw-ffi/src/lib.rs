@@ -10876,6 +10876,13 @@ fn parse_flow_spans(input: &serde_json::Value) -> Result<Vec<FlowSpan>, String> 
             .and_then(serde_json::Value::as_str)
             .ok_or("span text must be a string")?;
         let mut span = FlowSpan::new(text);
+        if let Some(value) = item.get("placeholder_width") {
+            span.placeholder_width = Some(
+                value
+                    .as_f64()
+                    .ok_or("span placeholder_width must be a number")?,
+            );
+        }
         if let Some(value) = item.get("font_id") {
             span.font_id = Some(
                 value

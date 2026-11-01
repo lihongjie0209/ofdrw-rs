@@ -257,3 +257,26 @@ height controls allocation and decorations while children may overflow. The call
 never adds pages. It supports the same nested text/image/table content, offsets,
 layers and placeholders as flow containers. Page-area fillers are ignored. Invalid
 later content rolls back the entire call. Images accept bytes in `data`.
+
+### Inline placeholders (development)
+
+A span with empty `text`, `placeholder_width` in millimeters and `font_size` as
+height reserves an indivisible inline rectangle without painting objects or
+font resources. Width zero is allowed. For example:
+
+```python
+with Document.new() as doc:
+    metrics = doc.measure_flowed_spans(0, [
+        {"text": "Label:"},
+        {"text": "", "placeholder_width": 8, "font_size": 4},
+        {"text": "value"},
+    ], 50)
+    assert metrics["lines"][0]["text"] == "Label:value"
+```
+
+The same spans work in styled flow, text boxes, flow blocks and fixed/flow
+containers. Reserved geometry participates in wrapping and maximum line height;
+measured/extracted text omits placeholders. Invalid later input rolls back the
+call. A leading placeholder absorbs a configured first-line indent once.
+For character-count reservations use `count * (font_size + letter_spacing)` as
+the width. This development input requires matching bindings and native library.
