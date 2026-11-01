@@ -318,6 +318,7 @@ _ffi.cdef(
     int ofd_add_table_json(OfdDocument *handle, size_t document_index, const char *table_json, OfdBuffer *output);
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
+    int ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);
     int ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
@@ -4295,6 +4296,49 @@ class Document:
         _check(_lib.ofd_measure_flowed_spans_json(
             self._handle, document_index,
             _utf8(json.dumps(payload, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def add_text_boxes(self, document_index: int, boxes: list[dict], **options) -> dict:
+        """Measure, paginate and draw styled text boxes atomically.
+
+        Each box has layout, spans and optional style. Layout height is measured
+        automatically; page_size, margins and start are shared options.
+        """
+        self._require_open()
+        if document_index < 0:
+            raise IndexError(document_index)
+        if not isinstance(boxes, list):
+            raise TypeError("boxes must be a list")
+        def typography(value):
+            if not isinstance(value, dict):
+                return value
+            result = dict(value)
+            for key in ("font_id", "language"):
+                if result.get(key) is None:
+                    result.pop(key, None)
+            if "font_id" in result:
+                result["font_id"] = str(result["font_id"])
+            return result
+
+        normalized = []
+        for box in boxes:
+            if not isinstance(box, dict):
+                normalized.append(box)
+                continue
+            item = dict(box)
+            if "style" in item:
+                item["style"] = typography(item["style"])
+            if isinstance(item.get("spans"), list):
+                item["spans"] = [typography(span) for span in item["spans"]]
+            normalized.append(item)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_add_text_boxes_json(
+            self._handle, document_index,
+            _utf8(json.dumps({**options, "boxes": normalized}, allow_nan=False)), output,
         ))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))

@@ -326,6 +326,7 @@ type nativeAPI struct {
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addTextBoxes                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureFlowedSpans              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
@@ -696,6 +697,7 @@ func loadAPI() error {
 			{"ofd_add_flowed_spans_json", &api.addFlowedSpans},
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
+			{"ofd_add_text_boxes_json", &api.addTextBoxes},
 			{"ofd_measure_flowed_spans_json", &api.measureFlowedSpans},
 			{"ofd_append_text_page_with_font", &api.appendTextWithFont},
 			{"ofd_append_path_page", &api.appendPathPage},
@@ -10211,6 +10213,59 @@ func (doc *Document) AddFlowBlocks(documentIndex int, blocks []FlowBlock, style 
 	return result, nil
 }
 
+// AddTextBoxes measures, paginates and draws styled text boxes atomically.
+// It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
+// Invalid later input leaves the document unchanged.
+func (doc *Document) AddTextBoxes(documentIndex int, boxes []TextBox, style BoxLayoutStyle) (BoxLayoutResult, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return BoxLayoutResult{}, err
+	}
+	if documentIndex < 0 {
+		return BoxLayoutResult{}, errors.New("negative document index")
+	}
+	if style == (BoxLayoutStyle{}) {
+		style = DefaultBoxLayoutStyle()
+	}
+	boxes = append([]TextBox(nil), boxes...)
+	if boxes == nil {
+		boxes = []TextBox{}
+	}
+	for i := range boxes {
+		if boxes[i].Style == (FlowTextStyle{}) {
+			boxes[i].Style = DefaultFlowTextStyle()
+		}
+	}
+	payload, err := json.Marshal(struct {
+		Boxes []TextBox `json:"boxes"`
+		BoxLayoutStyle
+	}{Boxes: boxes, BoxLayoutStyle: style})
+	if err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("encode text boxes: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addTextBoxes(doc.handle, uintptr(documentIndex), &payloadBytes[0], &buffer)); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("add text boxes: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	var result BoxLayoutResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("decode text boxes result: %w", err)
+	}
+	return result, nil
+}
+
 // AddBoxLayout arranges measured boxes in floating rows and paints their decorations.
 // It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
 // Invalid later input leaves the document unchanged.
@@ -10868,4 +10923,11 @@ func (doc *Document) ToBytes() ([]byte, error) {
 	}
 	defer api.bufferFree(buffer)
 	return bytesAt(buffer)
+}
+
+// TextBox measures its content height and preserves whole lines across pages.
+type TextBox struct {
+	Layout LayoutBox     `json:"layout"`
+	Spans  []FlowSpan    `json:"spans"`
+	Style  FlowTextStyle `json:"style"`
 }

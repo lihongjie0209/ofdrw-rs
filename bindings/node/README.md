@@ -464,3 +464,27 @@ try {
   fs.writeFileSync('picture.ofd', doc.toBytes());
 } finally { doc.close(); }
 ```
+
+### Automatic text boxes (unreleased source API)
+
+```javascript
+const fs = require('node:fs');
+const { Document } = require('ofdrw-rs');
+const doc = Document.create();
+try {
+  const result = doc.addTextBoxes(0, [{
+    layout: {size: [40, 0], padding: [2, 2, 2, 2], border: [0.2, 0.2, 0.2, 0.2]},
+    spans: [{text: 'Text wraps and grows this decorated box.'}],
+    style: {font_size: 4, line_height: 5},
+  }]);
+  fs.writeFileSync('text-box.ofd', doc.toBytes());
+} finally { doc.close(); }
+```
+
+Content height replaces `layout.size[1]` / `Layout.Size[1]` automatically.
+Width is clamped before wrapping, and complete lines move to the next page.
+Typography can enable shaped text or paragraph keep rules; page geometry and
+continuation come from the shared box options. The result contains all
+fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
+General nested child containers remain separate work. This API is available
+from the development source and is not included in published version 0.3.0.

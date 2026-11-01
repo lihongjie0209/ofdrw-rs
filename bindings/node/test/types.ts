@@ -9,6 +9,11 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  document.addTextBoxes(0, [{layout: {size: [20, 0], padding: [1, 1, 1, 1]}, spans: [{text: 'Hi'}], style: {shape: true}}]);
+  // @ts-expect-error text boxes require span children
+  document.addTextBoxes(0, [{layout: {size: [20, 0]}}]);
+  // @ts-expect-error shared page geometry uses numeric dimensions
+  document.addTextBoxes(0, [], {page_size: ['20', 30]});
   const measured: FlowTextMetrics = document.measureFlowedSpans(0, [{text: 'Hello'}], 40, {font_size: 5});
   const firstMeasured: FlowLineMetrics | undefined = measured.lines[0];
   if (firstMeasured) void [firstMeasured.x, firstMeasured.y, firstMeasured.baseline, firstMeasured.paragraph_start];
