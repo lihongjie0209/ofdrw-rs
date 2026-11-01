@@ -4274,3 +4274,40 @@ test('archival preparation removes audio and video from document and page resour
     assert.equal(source.pageMultimediaResources(0).length, 2);
   } finally { source.close(); }
 });
+
+test('continue plain, styled and shaped flow on an existing page', () => {
+  const font = fs.readFileSync(fixture('dejavu-serif.ttf'));
+  for (const shape of [false, true]) {
+    for (const styled of [false, true]) {
+      const document = Document.create();
+      try {
+        document.addTextPage('seed', 20, 20);
+        const fontId = document.addEmbeddedFont('DejaVu Serif', font);
+        const options = {page_size: [20, 20], margins: [2, 2, 2, 2], font_size: 2,
+          line_height: 3, font_id: fontId, shape, start: {page_index: 0, y: 10}};
+        const write = () => styled
+          ? document.addFlowedSpans(0, [{text: 'A\nB\nC\nD'}], options)
+          : document.addFlowedText(0, 'A\nB\nC\nD', options);
+        assert.deepEqual(write(), [0, 1]);
+        assert.deepEqual(document.pageText(0), ['seed', 'A', 'B']);
+        assert.deepEqual(document.pageText(1), ['C', 'D']);
+        assert.deepEqual(document.pageTextObjects(0)[1].boundary.slice(0, 2), [2, 10]);
+        assert.deepEqual(document.pageTextObjects(1)[0].boundary.slice(0, 2), [2, 2]);
+        const before = document.toBytes();
+        options.start.y = 19;
+        assert.throws(write, OfdError);
+        assert.deepEqual(document.toBytes(), before);
+        const reopened = Document.fromBytes(before);
+        try {
+          assert.deepEqual(reopened.pageText(0), ['seed', 'A', 'B']);
+          assert.deepEqual(reopened.validateReferences(), []);
+          assert.deepEqual(reopened.pagePng(0, 72), document.pagePng(0, 72));
+        } finally {
+          reopened.close();
+        }
+      } finally {
+        document.close();
+      }
+    }
+  }
+});

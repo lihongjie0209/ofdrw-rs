@@ -4092,8 +4092,9 @@ class Document:
         indent_each_paragraph: bool = False,
         language: str | None = None,
         rest_line_indent: float = 0,
+        start: dict | None = None,
     ) -> list[int]:
-        """Wrap plain text into new pages; shape with an embedded font when requested."""
+        """Flow plain text, optionally starting on an existing page."""
         self._require_open()
         if document_index < 0:
             raise IndexError(document_index)
@@ -4114,6 +4115,8 @@ class Document:
             "indent_each_paragraph": indent_each_paragraph,
             "shape": shape,
         }
+        if start is not None:
+            payload["start"] = start
         if font_id is not None:
             payload["font_id"] = str(font_id)
         if language is not None:
@@ -4271,8 +4274,9 @@ class Document:
         indent_each_paragraph: bool = False,
         language: str | None = None,
         rest_line_indent: float = 0,
+        start: dict | None = None,
     ) -> list[int]:
-        """Flow styled spans into new pages, sizing each line by its tallest font."""
+        """Flow styled spans, optionally starting on an existing page."""
         self._require_open()
         if document_index < 0:
             raise IndexError(document_index)
@@ -4299,6 +4303,8 @@ class Document:
             "indent_each_paragraph": indent_each_paragraph,
             "shape": shape,
         }
+        if start is not None:
+            payload["start"] = start
         if font_id is not None:
             payload["font_id"] = str(font_id)
         if language is not None:

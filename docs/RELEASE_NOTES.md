@@ -1,5 +1,8 @@
 # Unreleased
 
+- Add optional existing-page continuation to plain, styled and shaped text flow,
+  with canvas-origin handling, normal continuation margins and atomic validation.
+
 - Bake mapped TrueType font scaling into glyph geometry so it does not scale
   stroke widths or paint coordinates. Text rendering also retains inherited
   cap/join/miter and dash parameters. Independent PDF rasters cover filled,

@@ -16764,6 +16764,7 @@ fn flowed_text_aligns_lines_and_indents_only_first_line() {
     let mut document = OfdDocument::new();
     let font_id = document.add_embedded_font("SimHei", &font).unwrap();
     let style = ofdrw::FlowTextStyle {
+        start: None,
         page_size: [30.0, 22.0],
         margins: [5.0; 4],
         font_size: 5.0,
@@ -17234,6 +17235,7 @@ fn flowed_spans_preserve_styles_and_baselines_across_pages() {
     blue.fill_color = Some([0, 0, 255]);
     blue.italic = true;
     let style = ofdrw::FlowTextStyle {
+        start: None,
         page_size: [25.0, 16.0],
         margins: [5.0; 4],
         font_size: 5.0,

@@ -1046,9 +1046,16 @@ type PageArea struct {
 	BleedBox       *[4]float64 `json:"bleed_box,omitempty"`
 }
 
+// FlowStart selects an existing page and a position measured from its canvas top.
+type FlowStart struct {
+	PageIndex int     `json:"page_index"`
+	Y         float64 `json:"y"`
+}
+
 // FlowTextStyle controls wrapping and pagination in millimeters. Styled lines
 // use their largest font size plus LineHeight minus FontSize as their height.
 type FlowTextStyle struct {
+	Start                  *FlowStart `json:"start,omitempty"`
 	PageSize               [2]float64 `json:"page_size"`
 	Margins                [4]float64 `json:"margins"`
 	FontSize               float64    `json:"font_size"`

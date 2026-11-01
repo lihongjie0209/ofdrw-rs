@@ -1,8 +1,14 @@
-import { Document, createSesSeal, type ActionInfo, type ArchiveViolation, type AttachmentInfo, type AttachmentMetadata, type ColorSpaceInfo, type ColorSpaceSpec, type CustomTagInfo, type DocumentPermissions, type DrawParamInfo, type DrawParamStyle, type ExtensionInfo, type FlowSpan, type FlowTextOptions, type FontInfo, type KeywordPosition, type MediaActionRequest, type MultimediaResourceInfo, type OutlineInfo, type PageArea, type PageInfo, type PageLayerInfo, type PageObjectClipsInfo, type PageObjectInfo, type PageObjectPaintInfo, type PageObjectStrokeStyleInfo, type PathStrokeStyle, type SesSealSpec, type TableBlock, type TableCell, type TableOptions, type TextCodeLayout, type TextObjectOptions, type TextTypographyStyle, type VersionInfo, type ViewPreferences } from '../index';
+import { Document, createSesSeal, type ActionInfo, type ArchiveViolation, type AttachmentInfo, type AttachmentMetadata, type ColorSpaceInfo, type ColorSpaceSpec, type CustomTagInfo, type DocumentPermissions, type DrawParamInfo, type DrawParamStyle, type ExtensionInfo, type FlowSpan, type FlowStart, type FlowTextOptions, type FontInfo, type KeywordPosition, type MediaActionRequest, type MultimediaResourceInfo, type OutlineInfo, type PageArea, type PageInfo, type PageLayerInfo, type PageObjectClipsInfo, type PageObjectInfo, type PageObjectPaintInfo, type PageObjectStrokeStyleInfo, type PathStrokeStyle, type SesSealSpec, type TableBlock, type TableCell, type TableOptions, type TextCodeLayout, type TextObjectOptions, type TextTypographyStyle, type VersionInfo, type ViewPreferences } from '../index';
 import type { IntegrityTrustedVerificationInfo, SignatureChainVerificationInfo, SignatureDirectTrustVerificationInfo, SignatureTrustVerificationInfo } from '../index';
 import type { GradientPaintStyle, GouraudPaintStyle, ImageBorderStyle, PatternPaintStyle, SolidPaintStyle } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const continuation: FlowStart = {page_index: 0, y: 40};
+  document.addFlowedText(0, 'continued', {start: continuation});
+  document.addFlowedSpans(0, [{text: 'continued'}], {start: continuation});
+  // @ts-expect-error flow start requires a numeric coordinate
+  document.addFlowedText(0, 'bad', {start: {page_index: 0, y: '40'}});
+
   const shapedTextOptions: TextObjectOptions = {
     shape: true, font_id: 12, language: 'en', fill_color: [0, 0, 255], size: 6,
   };

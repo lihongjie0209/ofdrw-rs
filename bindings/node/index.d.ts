@@ -354,7 +354,14 @@ export interface PageArea {
   bleed_box?: [number, number, number, number] | null;
 }
 
+export interface FlowStart {
+  page_index: number;
+  /** Millimeters from the page canvas top. */
+  y: number;
+}
+
 export interface FlowTextOptions {
+  start?: FlowStart;
   page_size?: [number, number];
   margins?: [number, number, number, number];
   font_size?: number;

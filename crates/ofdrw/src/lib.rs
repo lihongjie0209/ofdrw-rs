@@ -1730,11 +1730,20 @@ pub enum FlowTextAlign {
     Right,
 }
 
+/// Continue flowing text on an existing page. `y` is measured from the canvas top.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlowStart {
+    pub page_index: usize,
+    pub y: f64,
+}
+
 /// Page and type settings for basic flowing text.
 ///
 /// Measurements are millimeters. Margins are top, right, bottom, left.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowTextStyle {
+    /// Optional existing page and vertical starting position. Continuation pages use normal margins.
+    pub start: Option<FlowStart>,
     pub page_size: [f64; 2],
     pub margins: [f64; 4],
     pub font_size: f64,
@@ -1931,6 +1940,7 @@ impl FlowSpan {
 impl Default for FlowTextStyle {
     fn default() -> Self {
         Self {
+            start: None,
             page_size: [210.0, 297.0],
             margins: [25.4, 31.7, 25.4, 31.7],
             font_size: 5.0,
@@ -1946,6 +1956,97 @@ impl Default for FlowTextStyle {
             shape: false,
             language: None,
         }
+    }
+}
+
+struct FlowPageCursor {
+    page: Option<usize>,
+    origin: [f64; 2],
+    y: f64,
+}
+
+impl FlowPageCursor {
+    fn new(
+        document: &OfdDocument,
+        document_index: usize,
+        style: &FlowTextStyle,
+    ) -> Result<Self, OfdError> {
+        let Some(start) = style.start else {
+            return Ok(Self {
+                page: None,
+                origin: [0., 0.],
+                y: style.margins[0],
+            });
+        };
+        let pages = document.pages()?;
+        let page = pages
+            .get(start.page_index)
+            .ok_or_else(|| OfdError::Invalid("flow start page is out of bounds".into()))?;
+        if page.document_index != document_index {
+            return Err(OfdError::Invalid(
+                "flow start page belongs to another document".into(),
+            ));
+        }
+        let [x, y, width, height] = page
+            .physical_box
+            .ok_or_else(|| OfdError::Invalid("flow start page has no canvas".into()))?;
+        if (width - style.page_size[0]).abs() > 1e-9 || (height - style.page_size[1]).abs() > 1e-9 {
+            return Err(OfdError::Invalid(
+                "flow start canvas size must match page_size".into(),
+            ));
+        }
+        if !start.y.is_finite()
+            || start.y < style.margins[0]
+            || start.y > height - style.margins[2]
+            || ![x + width, y + height, y + start.y]
+                .iter()
+                .all(|v| v.is_finite())
+        {
+            return Err(OfdError::Invalid(
+                "flow start position is outside the content area".into(),
+            ));
+        }
+        Ok(Self {
+            page: Some(start.page_index),
+            origin: [x, y],
+            y: y + start.y,
+        })
+    }
+
+    fn place(
+        &mut self,
+        document: &mut OfdDocument,
+        document_index: usize,
+        style: &FlowTextStyle,
+        required: f64,
+        gap: f64,
+        indexes: &mut Vec<usize>,
+    ) -> Result<(usize, f64, f64), OfdError> {
+        if self.page.is_none()
+            || self.y + gap + required
+                > self.origin[1] + style.page_size[1] - style.margins[2] + 1e-9
+        {
+            document.append_blank_page(document_index, style.page_size[0], style.page_size[1])?;
+            self.page = Some(
+                document
+                    .pages()?
+                    .into_iter()
+                    .rfind(|page| page.document_index == document_index)
+                    .ok_or_else(|| OfdError::Invalid("new page is missing".into()))?
+                    .index,
+            );
+            self.origin = [0., 0.];
+            self.y = style.margins[0];
+        } else {
+            self.y += gap;
+        }
+        let page = self
+            .page
+            .ok_or_else(|| OfdError::Invalid("flow page is missing".into()))?;
+        if indexes.last() != Some(&page) {
+            indexes.push(page);
+        }
+        Ok((page, self.origin[0], self.y))
     }
 }
 
@@ -26333,7 +26434,8 @@ impl OfdDocument {
         Ok(start + position)
     }
 
-    /// Flow plain text into newly appended pages of one document body.
+    /// Flow plain text in one document body, optionally starting on an existing page.
+    /// Returns indexes of pages that receive lines, in placement order.
     ///
     /// The selected font's horizontal advances determine line breaks when an
     /// embedded or system font face is available. Existing content is retained.
@@ -26459,10 +26561,9 @@ impl OfdDocument {
         };
         let mut staged = self.clone();
         let mut indexes = Vec::new();
-        let mut current_page = None;
-        let mut y = top;
+        let mut cursor = FlowPageCursor::new(self, document_index, &style)?;
         for (line_index, line) in lines.iter().enumerate() {
-            let gap = if line.paragraph_start && current_page.is_some() {
+            let gap = if line.paragraph_start && line_index != 0 {
                 style.paragraph_gap
             } else {
                 0.0
@@ -26473,21 +26574,14 @@ impl OfdDocument {
                 } else {
                     style.line_height
                 };
-            if current_page.is_none() || y + gap + required > page_height - bottom + 1e-9 {
-                staged.append_blank_page(document_index, page_width, page_height)?;
-                let page_index = staged
-                    .pages()?
-                    .into_iter()
-                    .rfind(|page| page.document_index == document_index)
-                    .ok_or_else(|| OfdError::Invalid("new page is missing".into()))?
-                    .index;
-                indexes.push(page_index);
-                current_page = Some(page_index);
-                y = top;
-            } else {
-                y += gap;
-            }
-            let page_index = current_page.expect("page is appended before writing a line");
+            let (page_index, origin_x, y) = cursor.place(
+                &mut staged,
+                document_index,
+                &style,
+                required,
+                gap,
+                &mut indexes,
+            )?;
             if !line.text.is_empty() {
                 let available = content_width - line.indent * style.font_size;
                 let rendered_width = line.width * style.font_size;
@@ -26497,7 +26591,7 @@ impl OfdDocument {
                     FlowTextAlign::Center => free / 2.0,
                     FlowTextAlign::Right => free,
                 };
-                let x = left + line.indent * style.font_size + align_offset;
+                let x = origin_x + left + line.indent * style.font_size + align_offset;
                 if style.shape {
                     staged.add_shaped_text_object_with_style(
                         page_index,
@@ -26535,13 +26629,14 @@ impl OfdDocument {
                         })?;
                 }
             }
-            y += style.line_height;
+            cursor.y += style.line_height;
         }
         *self = staged;
         Ok(indexes)
     }
 
-    /// Flow styled text segments into newly appended pages.
+    /// Flow styled text segments, optionally starting on an existing page.
+    /// Returns indexes of pages that receive lines, in placement order.
     ///
     /// Newline characters force a new line in the same paragraph block. The
     /// page style supplies the default font and size; each span can override
@@ -26736,8 +26831,7 @@ impl OfdDocument {
         };
         let mut staged = self.clone();
         let mut indexes = Vec::new();
-        let mut current_page = None;
-        let mut y = top;
+        let mut cursor = FlowPageCursor::new(self, document_index, &style)?;
         for (line_index, line) in lines.iter().enumerate() {
             let baseline = if line.glyphs.is_empty() {
                 style.font_size
@@ -26753,7 +26847,7 @@ impl OfdDocument {
                     "flowed span line exceeds available page height".into(),
                 ));
             }
-            let gap = if line.paragraph_start && current_page.is_some() {
+            let gap = if line.paragraph_start && line_index != 0 {
                 style.paragraph_gap
             } else {
                 0.0
@@ -26764,21 +26858,14 @@ impl OfdDocument {
                 } else {
                     line_height
                 };
-            if current_page.is_none() || y + gap + required > page_height - bottom + 1e-9 {
-                staged.append_blank_page(document_index, page_width, page_height)?;
-                let page_index = staged
-                    .pages()?
-                    .into_iter()
-                    .rfind(|page| page.document_index == document_index)
-                    .ok_or_else(|| OfdError::Invalid("new page is missing".into()))?
-                    .index;
-                indexes.push(page_index);
-                current_page = Some(page_index);
-                y = top;
-            } else {
-                y += gap;
-            }
-            let page_index = current_page.expect("page is appended before writing a line");
+            let (page_index, origin_x, y) = cursor.place(
+                &mut staged,
+                document_index,
+                &style,
+                required,
+                gap,
+                &mut indexes,
+            )?;
             let available = page_width - left - right - line.indent;
             let free = (available - line.width).max(0.0);
             let align_offset = match style.align {
@@ -26786,7 +26873,7 @@ impl OfdDocument {
                 FlowTextAlign::Center => free / 2.0,
                 FlowTextAlign::Right => free,
             };
-            let mut x = left + line.indent + align_offset;
+            let mut x = origin_x + left + line.indent + align_offset;
             for group in line.glyphs.chunk_by(|a, b| a.span_index == b.span_index) {
                 let span = &prepared[group[0].span_index];
                 let text: String = group.iter().map(|glyph| glyph.ch).collect();
@@ -26819,7 +26906,7 @@ impl OfdDocument {
                 }
                 x += width;
             }
-            y += line_height;
+            cursor.y += line_height;
         }
         *self = staged;
         Ok(indexes)
@@ -27614,8 +27701,7 @@ impl OfdDocument {
         };
         let mut staged = self.clone();
         let mut indexes = Vec::new();
-        let mut current_page = None;
-        let mut y = top;
+        let mut cursor = FlowPageCursor::new(self, document_index, &style)?;
         for (line_index, line) in lines.iter().enumerate() {
             let baseline = if line.units.is_empty() {
                 style.font_size
@@ -27631,7 +27717,7 @@ impl OfdDocument {
                     "flowed span line exceeds available page height".into(),
                 ));
             }
-            let gap = if line.paragraph_start && current_page.is_some() {
+            let gap = if line.paragraph_start && line_index != 0 {
                 style.paragraph_gap
             } else {
                 0.0
@@ -27642,21 +27728,14 @@ impl OfdDocument {
                 } else {
                     line_height
                 };
-            if current_page.is_none() || y + gap + required > page_height - bottom + 1e-9 {
-                staged.append_blank_page(document_index, page_width, page_height)?;
-                let page_index = staged
-                    .pages()?
-                    .into_iter()
-                    .rfind(|page| page.document_index == document_index)
-                    .ok_or_else(|| OfdError::Invalid("new page is missing".into()))?
-                    .index;
-                indexes.push(page_index);
-                current_page = Some(page_index);
-                y = top;
-            } else {
-                y += gap;
-            }
-            let page_index = current_page.expect("page exists");
+            let (page_index, origin_x, y) = cursor.place(
+                &mut staged,
+                document_index,
+                &style,
+                required,
+                gap,
+                &mut indexes,
+            )?;
             let available = content_width - line.indent;
             let free = (available - line.width).max(0.0);
             let offset = match style.align {
@@ -27664,7 +27743,7 @@ impl OfdDocument {
                 FlowTextAlign::Center => free / 2.0,
                 FlowTextAlign::Right => free,
             };
-            let mut x = left + line.indent + offset;
+            let mut x = origin_x + left + line.indent + offset;
             for group in line.units.chunk_by(|a, b| a.span_index == b.span_index) {
                 let span = &prepared[group[0].span_index];
                 let text = group
@@ -27703,7 +27782,7 @@ impl OfdDocument {
                 }
                 x += width;
             }
-            y += line_height;
+            cursor.y += line_height;
         }
         *self = staged;
         Ok(indexes)

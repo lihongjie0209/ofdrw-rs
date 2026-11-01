@@ -10331,6 +10331,20 @@ pub unsafe extern "C" fn ofd_insert_blank_page(
 
 fn parse_flow_style(input: &serde_json::Value) -> Result<FlowTextStyle, String> {
     let mut style = FlowTextStyle::default();
+    if let Some(start) = input.get("start").filter(|value| !value.is_null()) {
+        let start = start.as_object().ok_or("start must be an object")?;
+        let page_index = start
+            .get("page_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("start.page_index must be a nonnegative integer")?;
+        let y = start
+            .get("y")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or("start.y must be a number")?;
+        style.start = Some(ofdrw::FlowStart { page_index, y });
+    }
+
     if let Some(value) = input.get("page_size") {
         style.page_size = serde_json::from_value(value.clone())
             .map_err(|_| "page_size must contain two numbers")?;
@@ -11475,6 +11489,34 @@ pub unsafe extern "C" fn ofd_buffer_free_parts(data: *mut u8, len: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flow_start_options_validate_page_indexes_and_coordinates() {
+        let style =
+            super::parse_flow_style(&serde_json::json!({"start":{"page_index":2,"y":12.5}}))
+                .unwrap();
+        assert_eq!(
+            style.start,
+            Some(ofdrw::FlowStart {
+                page_index: 2,
+                y: 12.5
+            })
+        );
+        assert!(super::parse_flow_style(&serde_json::json!({"start":null}))
+            .unwrap()
+            .start
+            .is_none());
+        for start in [
+            serde_json::json!(false),
+            serde_json::json!({}),
+            serde_json::json!({"page_index":-1,"y":2}),
+            serde_json::json!({"page_index":1.5,"y":2}),
+            serde_json::json!({"page_index":0,"y":"2"}),
+            serde_json::json!({"page_index":0}),
+        ] {
+            assert!(super::parse_flow_style(&serde_json::json!({"start":start})).is_err());
+        }
+    }
+
     use super::*;
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};

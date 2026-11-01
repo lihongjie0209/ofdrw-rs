@@ -711,6 +711,19 @@ receive blank pages without requiring a font resource.
 
 ## 文本流式布局
 
+**Unreleased:** `FlowTextStyle.start = Some(FlowStart { page_index, y })` starts
+plain, styled or shaped flow on an existing page instead of always appending a
+new one. Python uses `start={"page_index": 0, "y": 40}`, Go uses
+`Start: &FlowStart{PageIndex: 0, Y: 40}`, and Node.js/C JSON accepts the same
+`start` object. `page_index` is global and must belong to the selected document.
+Its canvas dimensions must match `page_size`; `y` is measured from the canvas
+top and must lie within the vertical margins. Nonzero canvas origins are
+preserved. Overflow pages start at the normal top margin. Returned indexes
+include the existing page only if it receives a line. Existing graphics remain
+in place; callers choose a free starting position. Invalid requests leave the
+source unchanged. Omitting `start` retains the existing new-page behavior.
+
+
 `add_flowed_text()` (Rust/Python), `AddFlowedText()` (Go), and
 `ofd_add_flowed_text_json()` (C) wrap plain text within page margins and append
 as many pages as needed. Embedded or available system font advances guide line
