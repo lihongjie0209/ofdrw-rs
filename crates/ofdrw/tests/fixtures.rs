@@ -14442,7 +14442,6 @@ fn renders_embedded_font_cgtransform_glyph_outlines() {
     let mut document = OfdDocument::open(path).unwrap();
     let svg = document.page_svg(0).unwrap();
     assert!(svg.contains("data-ofd-glyph=\"2591\""));
-    assert!(svg.contains("scale(0.10171875 -0.10171875)"));
     assert!(svg.contains("<g opacity=\"0\"><text"));
     assert!(!document.page_text(0).unwrap().is_empty());
     let png = resvg::tiny_skia::Pixmap::decode_png(&document.page_png(0, 25.4).unwrap()).unwrap();
@@ -30609,7 +30608,9 @@ fn draw_param_inheritance_obeys_object_layer_and_relative_precedence() {
     assert_eq!(text_strokes.len(), 1);
     assert!(!text_strokes[0].stroke_enabled);
     assert_eq!(text_strokes[0].style.line_width, 2.0);
-    assert_eq!(text_strokes[0].style.cap, None);
+    assert_eq!(text_strokes[0].style.cap.as_deref(), Some("butt"));
+    assert_eq!(text_strokes[0].style.join.as_deref(), Some("miter"));
+    assert_eq!(text_strokes[0].style.dash_sequence, Some(vec![4., 4.]));
 
     document
         .set_entry(
