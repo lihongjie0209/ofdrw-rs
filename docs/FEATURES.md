@@ -13,6 +13,7 @@
 - [批注与图章](#批注与图章)
 - [多媒体资源与动作](#多媒体资源与动作)
 - [页面对象与文字编辑](#页面对象与文字编辑)
+- [有状态向量画布](#有状态向量画布)
 - [文本流式布局](#文本流式布局)
 - [文本自动测量](#文本自动测量)
 - [行内占位符](#行内占位符)
@@ -716,6 +717,34 @@ wrappers.
 `AddBlankPage()` and `AppendBlankPage()` (Go), and matching C functions create
 empty pages without a placeholder text object. Existing document bodies can
 receive blank pages without requiring a font resource.
+
+## 有状态向量画布
+
+**后续版本，尚未发布。**
+
+Rust 的 `draw_canvas(page_index, boundary, &[CanvasCommand])` 在已有全局页号上
+按顺序执行路径绘图，返回绘制对象 ID。整个批次原子提交；任何参数、资源或绘制失败
+都会回滚对象、公共资源和 ID 分配。每次调用从独立状态开始，最多 10,000 条命令，
+保存状态最多 256 层，路径与保存路径另有内存上限。
+
+支持移动、直线、二次/三次贝塞尔、端点椭圆弧、圆心圆弧、矩形、闭合、描边、填充，
+以及平移、缩放、角度旋转、累积/替换 CTM、全局透明度和裁剪。
+`SetDrawParam` 可使用现有的实色、渐变、网格和图案绘制参数。
+与 Java DrawContext 一样，路径在绘制时应用 CTM；保存状态包括当前路径，
+矩形绘制助手不改动当前路径。`Fill` 保留 Java 的零线宽轮廓，`FillRect`
+沿用当前描边。裁剪替换此前裁剪，并保存当时的路径和 CTM。
+未指定线宽的读取默认值已修正为 OFD 的 0.353 mm；显式写入线宽保持原值。
+
+独立 Java 生成器见 `scripts/generate_canvas_reference.py`。
+五组原始 OFD 样本覆盖路径保存、矩形助手、延后变换、曲线、透明度和裁剪。
+`frozen-clip-transflag.ofd` 只补写原始 Java 文件缺失的 `Clips TransFlag=true`，
+保留其全部路径与逆 CTM；JSON 记录此修正，原始文件同时保留。
+另外，Rust 的 restore 正确保留绘制参数，不复制 Java CanvasState.clone
+把参数克隆写回原对象的缺陷。
+
+此项尚未包含在 v0.4.0。Canvas 专用的 C/Python/Go/Node.js 批量接口、文字、图片裁剪、
+CSS 字体/颜色解析与像素单位助手仍待实现。复杂变换裁剪的 Java 像素一致性尚未证明；
+Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
 
 ## 文本流式布局
 

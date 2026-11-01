@@ -222,10 +222,11 @@ def test_prepare_archive_flattens_annotation_appearance_blocks_across_python_bin
             1,
         )
         source.set_entry(path, annotation)
-        before = source.page_svg(0)
+        # Archive normalization can remove metadata for disabled strokes.
+        before = source.page_png(0, 101.6)
         with source.prepare_archive() as prepared:
             assert b"PageBlock" not in prepared.entry(path)
-            assert prepared.page_svg(0) == before
+            assert prepared.page_png(0, 101.6) == before
             assert prepared.validate_references() == []
             assert all(issue["rule"] != "ANNOTATION"
                        for issue in prepared.archive_violations())

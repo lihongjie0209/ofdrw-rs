@@ -11,6 +11,8 @@ pub use box_layout::{
     BoxClear, BoxContentRanges, BoxFloat, BoxLayer, BoxLayoutItem, BoxLayoutResult, BoxLayoutStyle,
     BoxPlacement, LayoutBox,
 };
+mod canvas;
+pub use canvas::CanvasCommand;
 mod encryption;
 mod flow_container;
 pub use flow_container::{FixedContainer, FlowContainer, FlowContainerChild};
@@ -32977,7 +32979,7 @@ fn resolved_stroke_style(
             .or_else(|| draw_style.attrs.get(name).map(String::as_str))
     };
     let text = is_element(object, "TextObject");
-    let line_width = svg_number(attribute("LineWidth"), if text { 0.353 } else { 0.4 })?;
+    let line_width = svg_number(attribute("LineWidth"), 0.353)?;
     if text && line_width <= 0.0 {
         return Err(OfdError::Invalid("text LineWidth must be positive".into()));
     }
