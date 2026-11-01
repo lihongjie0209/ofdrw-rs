@@ -124,3 +124,14 @@ git push origin refs/tags/bindings/go/vX.Y.Z
 
 macOS wheel 的架构标记取自内含 Rust 动态库的 Mach-O 头；
 每个平台单独构建的动态库不得标为 `universal2`。发布工具也会校验或修复历史产物的标记。
+
+## CI 构建缓存
+
+六个平台的原生测试任务在选择 Rust 1.96.0 后恢复依赖缓存，工作区映射为
+`ofdrw-rs -> target`。缓存键包含平台、Rust 编译器、Cargo 清单和锁文件及编译环境。
+工作区 crate 和测试结果不进入缓存；测试、覆盖率、打包和分发校验仍按原流程运行。
+仅成功的 main 任务保存缓存，PR 任务只读取可用缓存。首次 main 构建仍需填充缓存。
+
+配置使用固定提交的 [rust-cache v2.9.3](https://github.com/Swatinem/rust-cache/tree/v2.9.3)。
+实际命中率及耗时应从后续 main 工作流的恢复和保存步骤观察，不能把配置通过检查
+视为已经验证构建提速。覆盖率的插桩产物使用独立流程，不与原生构建缓存混用。
