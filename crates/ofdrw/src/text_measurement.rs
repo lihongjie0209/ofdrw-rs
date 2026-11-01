@@ -8,6 +8,7 @@ pub struct FlowLineMetrics {
     pub x: f64,
     pub y: f64,
     /// Logical advance width; this is not a glyph ink bounding box.
+    /// Natural zero-advance glyphs can produce zero width without empty text.
     pub width: f64,
     pub height: f64,
     /// Baseline position measured from the paragraph's top.
@@ -294,8 +295,11 @@ impl OfdDocument {
                     .chars()
                     .filter(|ch| !is_flow_hard_break(*ch))
                     .any(|ch| {
-                        let width = metrics.advance(ch) * font_size + span.letter_spacing;
-                        !width.is_finite() || width <= 0.0
+                        let advance = metrics.advance(ch);
+                        let width = advance * font_size + span.letter_spacing;
+                        // Combining glyphs may have zero advance; tracking must not
+                        // cancel the advance of an otherwise advancing glyph.
+                        !width.is_finite() || width < 0.0 || (width == 0.0 && advance != 0.0)
                     })
             {
                 return Err(OfdError::Invalid(

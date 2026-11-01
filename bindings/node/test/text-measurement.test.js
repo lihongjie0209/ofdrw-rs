@@ -65,3 +65,24 @@ test('measurement rejects invalid input without creating pages or changing resou
   } finally { doc.close(); }
   assert.throws(() => doc.measureFlowedSpans(0, [{ text: 'A' }], 20));
 });
+
+
+test('natural zero glyph advances remain zero through measurement JSON and flow', () => {
+  const doc = Document.create();
+  try {
+    const font = doc.addEmbeddedFont('DejaVu Sans', fs.readFileSync(path.join(fixtures, 'dejavu-sans.ttf')));
+    const options = {font_id: String(font), font_size: 2, line_height: 3};
+    const spans = [{text: '\u0301'}];
+    const before = doc.toBytes();
+    const measured = doc.measureFlowedSpans(0, spans, 20, options);
+    assert.equal(measured.width, 0);
+    assert.equal(measured.height, 3);
+    assert.equal(measured.lines[0].text, '\u0301');
+    assert.deepEqual(doc.toBytes(), before);
+    assert.throws(() => doc.measureFlowedSpans(0, [{text: '\u0301', letter_spacing: -0.1}], 20, options));
+    assert.deepEqual(doc.toBytes(), before);
+    assert.deepEqual(doc.addFlowedSpans(0, spans, options), [0]);
+    assert.deepEqual(doc.pageText(0), ['\u0301']);
+    assert.ok(doc.pagePng(0, 30).length);
+  } finally { doc.close(); }
+});

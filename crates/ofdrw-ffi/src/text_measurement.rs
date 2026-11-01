@@ -48,6 +48,77 @@ mod tests {
     use super::super::*;
 
     #[test]
+    fn ffi_preserves_natural_zero_advance_metrics_and_writes_the_mark() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        let font = unsafe {
+            document_mut(handle)
+                .unwrap()
+                .add_embedded_font(
+                    "DejaVu Sans",
+                    include_bytes!("../../ofdrw/tests/fixtures/dejavu-sans.ttf"),
+                )
+                .unwrap()
+        };
+        let request = serde_json::json!({"content_width":20,"font_id":font.to_string(),
+            "font_size":2,"line_height":3,"spans":[{"text":"\u{301}"}]});
+        let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+        let input = CString::new(request.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_eq!(
+            unsafe { ofd_measure_flowed_spans_json(handle, 0, input.as_ptr(), &mut output) },
+            0
+        );
+        let measured: serde_json::Value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(output.data, output.len) })
+                .unwrap();
+        assert_eq!(measured["width"], 0.);
+        assert_eq!(measured["height"], 3.);
+        assert_eq!(measured["lines"][0]["text"], "\u{301}");
+        unsafe { ofd_buffer_free(output) };
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+            before
+        );
+        let mut invalid = request.clone();
+        invalid["spans"][0]["letter_spacing"] = serde_json::json!(-0.1);
+        let input = CString::new(invalid.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_ne!(
+            unsafe { ofd_measure_flowed_spans_json(handle, 0, input.as_ptr(), &mut output) },
+            0
+        );
+        assert!(output.data.is_null());
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+            before
+        );
+        let mut draw = request;
+        draw.as_object_mut().unwrap().remove("content_width");
+        let input = CString::new(draw.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_eq!(
+            unsafe { ofd_add_flowed_spans_json(handle, 0, input.as_ptr(), &mut output) },
+            0
+        );
+        unsafe { ofd_buffer_free(output) };
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap().page_text(0).unwrap() },
+            ["\u{301}"]
+        );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
     fn ffi_measurement_matches_font_table_reference_and_does_not_change_the_document() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../ofdrw/tests/fixtures/text-measurement.json"
