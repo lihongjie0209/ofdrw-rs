@@ -15,6 +15,7 @@
 - [页面对象与文字编辑](#页面对象与文字编辑)
 - [文本流式布局](#文本流式布局)
 - [文本自动测量](#文本自动测量)
+- [行内占位符](#行内占位符)
 - [图片自动尺寸](#图片自动尺寸)
 - [混合流布局](#混合流布局)
 - [盒模型与浮动分段](#盒模型与浮动分段)
@@ -853,6 +854,37 @@ font advances and preserve graphemes across wrapping and styled spans;
 tracking cannot cancel an otherwise advancing glyph or create negative
 advances. The shared rule also applies to automatic boxes and containers in
 all language bindings.
+
+## 行内占位符
+
+**未发布，Rust 接口：** `FlowSpan::placeholder(width, height)` reserves an
+indivisible inline rectangle, and `placeholder_characters(count, font_size,
+letter_spacing)` reserves `count * (font_size + letter_spacing)` millimeters.
+`placeholder_width: Some(width)` requires empty text. Zero width is allowed;
+height must be positive and both dimensions finite. A placeholder must fit a
+complete line. An oversized placeholder is rejected atomically rather than
+silently discarded. Adjacent text uses its reserved advance and the shared
+maximum line height. No text object, glyph, font resource, underline or stroke
+is emitted for it, even when its style requests decoration. An all-placeholder
+paragraph still participates in pagination, including with shaping enabled
+and no embedded font.
+
+Placeholder spans work with read-only measurement, styled flow, automatic
+text boxes, mixed flow containers and fixed-page containers. Measured line
+text omits placeholders while width and height include their reserved space.
+A leading placeholder is resized by a positive first-line indent or character
+indent, matching Java `PlaceholderSpan`; the indent is not added twice.
+Subsequent paragraph indentation retains its existing rules. Placeholders
+form grapheme boundaries so neighboring combining marks remain real text;
+actual U+FFFC characters in text are preserved. Shaped natural zero-advance
+marks also retain logical width zero and visible ink bounds, including stroke,
+bold and italic, while tracking that cancels a positive advance remains invalid.
+
+Seven independent Java line-metric fixtures cover wrapping, mixed heights,
+zero widths, character counts and leading-indent replacement. Core tests also
+cover blank-page pagination, independent pixel comparison, grapheme boundaries,
+tracking errors, rollback and the shared box/container writers. This new input
+is currently Rust-only; C/Python/Go/Node.js span fields follow separately.
 
 ## 图片自动尺寸
 

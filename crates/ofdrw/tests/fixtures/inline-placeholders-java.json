@@ -1,0 +1,248 @@
+{
+  "java_revision": "84e9eb260ba6fd351ecccf08a01a40305d4af635",
+  "cases": [
+    {
+      "name": "mixed-heights",
+      "content_width": 20,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 0
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 3,
+          "font_size": 2
+        },
+        {
+          "text": "",
+          "placeholder_width": 2,
+          "font_size": 5
+        },
+        {
+          "text": "",
+          "placeholder_width": 4,
+          "font_size": 3
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 9.0,
+          "height": 6.0,
+          "baseline": 5.0,
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "name": "wrap",
+      "content_width": 6,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 0
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 3,
+          "font_size": 2
+        },
+        {
+          "text": "",
+          "placeholder_width": 4,
+          "font_size": 3
+        },
+        {
+          "text": "",
+          "placeholder_width": 2,
+          "font_size": 2
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 3.0,
+          "height": 3.0,
+          "baseline": 2.0,
+          "x": 0,
+          "y": 0
+        },
+        {
+          "text": "",
+          "width": 6.0,
+          "height": 4.0,
+          "baseline": 6.0,
+          "x": 0,
+          "y": 3.0
+        }
+      ]
+    },
+    {
+      "name": "zero-tall",
+      "content_width": 20,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 0
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 0,
+          "font_size": 7
+        },
+        {
+          "text": "",
+          "placeholder_width": 2,
+          "font_size": 2
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 2.0,
+          "height": 8.0,
+          "baseline": 7.0,
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "name": "replace-leading-indent",
+      "content_width": 20,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 4
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 3,
+          "font_size": 2
+        },
+        {
+          "text": "",
+          "placeholder_width": 2,
+          "font_size": 3
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 6.0,
+          "height": 4.0,
+          "baseline": 3.0,
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "name": "character-count",
+      "content_width": 20,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 0
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 7.5,
+          "font_size": 2
+        },
+        {
+          "text": "",
+          "placeholder_width": 1,
+          "font_size": 4
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 8.5,
+          "height": 5.0,
+          "baseline": 4.0,
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "name": "tight-wrap",
+      "content_width": 4,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 0
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 3,
+          "font_size": 2
+        },
+        {
+          "text": "",
+          "placeholder_width": 2,
+          "font_size": 2
+        },
+        {
+          "text": "",
+          "placeholder_width": 2,
+          "font_size": 4
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 3.0,
+          "height": 3.0,
+          "baseline": 2.0,
+          "x": 0,
+          "y": 0
+        },
+        {
+          "text": "",
+          "width": 4.0,
+          "height": 5.0,
+          "baseline": 7.0,
+          "x": 0,
+          "y": 3.0
+        }
+      ]
+    },
+    {
+      "name": "zero-only",
+      "content_width": 20,
+      "style": {
+        "font_size": 2,
+        "line_height": 3,
+        "first_line_indent": 0
+      },
+      "spans": [
+        {
+          "text": "",
+          "placeholder_width": 0,
+          "font_size": 2
+        }
+      ],
+      "lines": [
+        {
+          "text": "",
+          "width": 0.0,
+          "height": 3.0,
+          "baseline": 2.0,
+          "x": 0,
+          "y": 0
+        }
+      ]
+    }
+  ]
+}
