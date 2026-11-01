@@ -64,6 +64,7 @@ pub(super) fn needs_dynamic(b: &PreparedContainer<'_>) -> bool {
             nested.layout.clear != BoxClear::Both || needs_dynamic(nested)
         }
         PreparedChild::Table { style, .. } => style.repeat_header,
+        PreparedChild::LineBreak | PreparedChild::PageAreaFill => true,
         _ => false,
     })
 }
@@ -85,6 +86,13 @@ fn rows(b: &PreparedContainer<'_>) -> Vec<Vec<usize>> {
     let mut row = Vec::new();
     let mut layouts = Vec::new();
     for (index, child) in b.children.iter().enumerate() {
+        if matches!(child.node, PreparedChild::LineBreak) {
+            if !row.is_empty() {
+                result.push(std::mem::take(&mut row));
+                layouts.clear();
+            }
+            continue;
+        }
         if let PreparedChild::Container(nested) = &child.node {
             if !row.is_empty()
                 && (layouts.len() != row.len()
@@ -110,23 +118,30 @@ fn rows(b: &PreparedContainer<'_>) -> Vec<Vec<usize>> {
 }
 
 fn intrinsic_height(b: &PreparedContainer<'_>) -> f64 {
-    let rows = rows(b);
-    let content: f64 = rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|index| match &b.children[*index].node {
-                    PreparedChild::Container(nested) => intrinsic_height(nested),
-                    PreparedChild::Text(flow) => flow.metrics.height,
-                    PreparedChild::Image(image) => image.height,
-                    PreparedChild::Spacer(height) => *height,
-                    PreparedChild::Table { prepared, .. } => prepared.height,
-                })
-                .fold(0., f64::max)
-        })
-        .sum();
+    let mut content = 0.;
+    let mut gap_pending = false;
+    for row in rows(b) {
+        if matches!(b.children[row[0]].node, PreparedChild::PageAreaFill) {
+            gap_pending = false;
+            continue;
+        }
+        if gap_pending {
+            content += b.gap;
+        }
+        gap_pending = true;
+        content += row
+            .iter()
+            .map(|index| match &b.children[*index].node {
+                PreparedChild::Container(nested) => intrinsic_height(nested),
+                PreparedChild::Text(flow) => flow.metrics.height,
+                PreparedChild::Image(image) => image.height,
+                PreparedChild::Spacer(height) => *height,
+                PreparedChild::LineBreak | PreparedChild::PageAreaFill => 0.,
+                PreparedChild::Table { prepared, .. } => prepared.height,
+            })
+            .fold(0., f64::max);
+    }
     content
-        + rows.len().saturating_sub(1) as f64 * b.gap
         + b.layout.margin[0]
         + b.layout.margin[2]
         + b.layout.border[0]
@@ -221,10 +236,13 @@ impl Planner {
             &mut spans,
         )?;
         let content_x = x + b.layout.margin[3] + b.layout.border[3] + b.layout.padding[3];
-        for (row_index, row) in rows(b).iter().enumerate() {
-            if row_index != 0 {
+        let mut gap_pending = false;
+        for row in rows(b) {
+            let fill = matches!(b.children[row[0]].node, PreparedChild::PageAreaFill);
+            if gap_pending && !fill {
                 self.space(&mut at, b.gap, &mut spans)?;
             }
+            gap_pending = !fill;
             let row_start = at;
             let mut end = at;
             let mut row_spans = BTreeMap::new();
@@ -257,6 +275,14 @@ impl Planner {
                         }
                         cursor = plan.end;
                         steps.push(Step::Node(Box::new(plan)));
+                    }
+                    PreparedChild::LineBreak => {}
+                    PreparedChild::PageAreaFill => {
+                        if cursor.y >= self.bottom {
+                            self.advance(&mut cursor)?;
+                        }
+                        let remaining = (self.bottom - cursor.y).max(0.);
+                        self.space(&mut cursor, remaining, &mut row_spans)?;
                     }
                     PreparedChild::Spacer(height) => {
                         self.space(&mut cursor, *height, &mut row_spans)?
@@ -388,6 +414,11 @@ impl Planner {
                 height: end - y,
             })
             .collect::<Vec<_>>();
+        if b.layout.integrity && fragments.len() > 1 {
+            return Err(OfdError::Invalid(
+                "complete container would span multiple pages".into(),
+            ));
+        }
         self.fragments += fragments.len();
         if self.fragments > 100_000 {
             return Err(OfdError::Limit(

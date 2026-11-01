@@ -188,3 +188,75 @@ func TestFlowContainersValidationAndDefaults(t *testing.T) {
 		t.Fatal("closed document accepted")
 	}
 }
+
+func TestFlowContainerControlsPreserveBlankPages(t *testing.T) {
+	for _, mode := range []struct {
+		name  string
+		shape bool
+	}{{"plain", false}, {"shaped", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			fixtures := filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures")
+			data, err := os.ReadFile(filepath.Join(fixtures, "container-controls.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fixture struct {
+				Request struct {
+					Containers []FlowContainer `json:"containers"`
+					BoxLayoutStyle
+				} `json:"request"`
+				Expected BoxLayoutResult `json:"expected"`
+				Text     [][]string      `json:"text"`
+			}
+			if err := json.Unmarshal(data, &fixture); err != nil {
+				t.Fatal(err)
+			}
+			doc, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			font, err := os.ReadFile(filepath.Join(fixtures, "dejavu-sans.ttf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := doc.AddEmbeddedFont("DejaVu Sans", font)
+			if err != nil {
+				t.Fatal(err)
+			}
+			containerTypography(&fixture.Request.Containers[0], strconv.Itoa(id), mode.shape)
+			result, err := doc.AddFlowContainers(0, fixture.Request.Containers, fixture.Request.BoxLayoutStyle)
+			if err != nil || !reflect.DeepEqual(result, fixture.Expected) {
+				t.Fatalf("layout: %+v, %v", result, err)
+			}
+			encoded, err := doc.ToBytes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := FromBytes(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			for page, expected := range fixture.Text {
+				actual, err := reopened.PageText(page)
+				if err != nil || !reflect.DeepEqual(actual, expected) {
+					t.Fatalf("page %d: %v, %v", page, actual, err)
+				}
+			}
+			for _, kind := range []string{"line_break", "page_area_fill"} {
+				invalid := FlowContainer{
+					Layout:   LayoutBox{Size: [2]float64{16, 0}},
+					Children: []FlowContainerChild{{Type: kind, Height: 1}},
+				}
+				if _, err := doc.AddFlowContainers(0, []FlowContainer{invalid}, fixture.Request.BoxLayoutStyle); err == nil {
+					t.Fatal("control height accepted")
+				}
+				after, err := doc.ToBytes()
+				if err != nil || !bytes.Equal(encoded, after) {
+					t.Fatalf("mutation: %v", err)
+				}
+			}
+		})
+	}
+}

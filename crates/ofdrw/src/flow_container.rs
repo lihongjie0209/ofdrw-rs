@@ -36,6 +36,11 @@ pub enum FlowContainerChild {
     Spacer {
         height: f64,
     },
+    /// Finish a nonempty floating row; an empty row is ignored, like Java BR.
+    LineBreak,
+    /// Exhaust this page's remaining work area, like Java PageAreaFiller.
+    /// The next content starts on a new page; trailing fills do not append one.
+    PageAreaFill,
 }
 
 struct PreparedContainer<'a> {
@@ -57,6 +62,8 @@ enum PreparedChild<'a> {
     Text(text_measurement::PreparedFlowText),
     Image(&'a TableCellImage),
     Spacer(f64),
+    LineBreak,
+    PageAreaFill,
     Table {
         prepared: Box<PreparedNestedTable<'a>>,
         style: &'a TableStyle,
@@ -80,7 +87,7 @@ fn expected_units(b: &PreparedContainer<'_>) -> usize {
         .map(|child| match &child.node {
             PreparedChild::Text(flow) => flow.metrics.lines.len(),
             PreparedChild::Image(_) => 1,
-            PreparedChild::Spacer(_) => 0,
+            PreparedChild::Spacer(_) | PreparedChild::LineBreak | PreparedChild::PageAreaFill => 0,
             PreparedChild::Table { groups, .. } => groups.len(),
             PreparedChild::Container(nested) => expected_units(nested),
         })
@@ -225,13 +232,23 @@ impl OfdDocument {
         let mut children = Vec::new();
         let mut ranges = Vec::new();
         let mut y = 0.;
-        for (index, child) in b.children.iter().enumerate() {
+        let mut gap_pending = false;
+        for child in &b.children {
             *count += 1;
             if *count > 10_000 {
                 return Err(OfdError::Limit("too many flow container children".into()));
             }
-            if index != 0 {
+            let control = matches!(
+                child,
+                FlowContainerChild::LineBreak | FlowContainerChild::PageAreaFill
+            );
+            if gap_pending && !control {
                 y += b.gap;
+            }
+            if matches!(child, FlowContainerChild::PageAreaFill) {
+                gap_pending = false;
+            } else if !control {
+                gap_pending = true;
             }
             let id = *count;
             let keep_paragraphs = matches!(child, FlowContainerChild::Paragraph { style, .. } if style.keep_paragraphs_together);
@@ -360,6 +377,12 @@ impl OfdDocument {
                         Some(PreparedChild::Container(Box::new(prepared))),
                         protected,
                     )
+                }
+                FlowContainerChild::LineBreak => {
+                    (0., 0., Some(PreparedChild::LineBreak), Vec::new())
+                }
+                FlowContainerChild::PageAreaFill => {
+                    (0., 0., Some(PreparedChild::PageAreaFill), Vec::new())
                 }
                 FlowContainerChild::Spacer { height } => {
                     if !height.is_finite() || *height < 0. {
@@ -505,7 +528,9 @@ impl OfdDocument {
                         }
                     }
                 }
-                PreparedChild::Spacer(_) => {}
+                PreparedChild::Spacer(_)
+                | PreparedChild::LineBreak
+                | PreparedChild::PageAreaFill => {}
                 PreparedChild::Image(image) => {
                     if child.y >= start && child.y + image.height <= end + 1e-9 {
                         if !drawn.insert((child.id, 0)) {

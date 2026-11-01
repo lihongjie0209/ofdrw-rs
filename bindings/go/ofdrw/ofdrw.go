@@ -10989,7 +10989,8 @@ type FlowContainer struct {
 	Gap      float64              `json:"gap,omitempty"`
 }
 
-// FlowContainerChild selects paragraph, image, container, spacer, or table.
+// FlowContainerChild selects paragraph, image, container, spacer, table,
+// line_break or page_area_fill. Controls have no additional fields.
 // Paragraph Style pointers should use DefaultFlowTextStyle when supplied.
 // Table uses FlowTable so zero Padding remains explicit.
 type FlowContainerChild struct {

@@ -1,0 +1,27 @@
+# Java OFDRW revision 84e9eb260ba6fd351ecccf08a01a40305d4af635; generated independently of Rust.
+# P case page; B case page label x y
+P	row_break	0
+B	row_break	0	A	2.000000000	2.000000000
+B	row_break	0	B	13.000000000	5.000000000
+P	empty_breaks	0
+B	empty_breaks	0	A	2.000000000	2.000000000
+B	empty_breaks	0	B	13.000000000	5.000000000
+P	fills	0
+B	fills	0	A	2.000000000	2.000000000
+P	fills	1
+P	fills	2
+B	fills	2	C	2.000000000	2.000000000
+P	fills	3
+P	leading_fill	0
+P	leading_fill	1
+B	leading_fill	1	A	2.000000000	2.000000000
+P	trailing_fill	0
+B	trailing_fill	0	A	2.000000000	2.000000000
+P	full_fill	0
+B	full_fill	0	A	2.000000000	2.000000000
+P	full_fill	1
+P	fills_and_br	0
+B	fills_and_br	0	A	2.000000000	2.000000000
+B	fills_and_br	0	B	13.000000000	2.000000000
+P	fills_and_br	1
+B	fills_and_br	1	C	2.000000000	2.000000000
