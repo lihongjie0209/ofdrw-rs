@@ -326,6 +326,7 @@ type nativeAPI struct {
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addFlowContainers               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addTextBoxes                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureFlowedSpans              func(uintptr, uintptr, *byte, *nativeBuffer) int32
@@ -698,6 +699,7 @@ func loadAPI() error {
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
 			{"ofd_add_text_boxes_json", &api.addTextBoxes},
+			{"ofd_add_flow_containers_json", &api.addFlowContainers},
 			{"ofd_measure_flowed_spans_json", &api.measureFlowedSpans},
 			{"ofd_append_text_page_with_font", &api.appendTextWithFont},
 			{"ofd_append_path_page", &api.appendPathPage},
@@ -10213,6 +10215,53 @@ func (doc *Document) AddFlowBlocks(documentIndex int, blocks []FlowBlock, style 
 	return result, nil
 }
 
+// AddFlowContainers measures, paginates and draws mixed-content containers atomically.
+// It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
+// Invalid later input leaves the document unchanged.
+func (doc *Document) AddFlowContainers(documentIndex int, containers []FlowContainer, style BoxLayoutStyle) (BoxLayoutResult, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return BoxLayoutResult{}, err
+	}
+	if documentIndex < 0 {
+		return BoxLayoutResult{}, errors.New("negative document index")
+	}
+	if style == (BoxLayoutStyle{}) {
+		style = DefaultBoxLayoutStyle()
+	}
+	if containers == nil {
+		containers = []FlowContainer{}
+	}
+	payload, err := json.Marshal(struct {
+		Containers []FlowContainer `json:"containers"`
+		BoxLayoutStyle
+	}{Containers: containers, BoxLayoutStyle: style})
+	if err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("encode flow containers: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addFlowContainers(doc.handle, uintptr(documentIndex), &payloadBytes[0], &buffer)); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("add flow containers: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	var result BoxLayoutResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("decode flow containers result: %w", err)
+	}
+	return result, nil
+}
+
 // AddTextBoxes measures, paginates and draws styled text boxes atomically.
 // It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
 // Invalid later input leaves the document unchanged.
@@ -10930,4 +10979,40 @@ type TextBox struct {
 	Layout LayoutBox     `json:"layout"`
 	Spans  []FlowSpan    `json:"spans"`
 	Style  FlowTextStyle `json:"style"`
+}
+
+// FlowContainer is a vertical sequence of mixed children with measured height.
+// Nested float controls alignment and nested Clear must be both or omitted.
+type FlowContainer struct {
+	Layout   LayoutBox            `json:"layout"`
+	Children []FlowContainerChild `json:"children,omitempty"`
+	Gap      float64              `json:"gap,omitempty"`
+}
+
+// FlowContainerChild selects paragraph, image, container, spacer, or table.
+// Paragraph Style pointers should use DefaultFlowTextStyle when supplied.
+// Table uses FlowTable so zero Padding remains explicit.
+type FlowContainerChild struct {
+	Type          string                   `json:"type"`
+	Spans         []FlowSpan               `json:"spans,omitempty"`
+	Style         *FlowTextStyle           `json:"style,omitempty"`
+	Data          []byte                   `json:"data_base64,omitempty"`
+	Format        string                   `json:"format,omitempty"`
+	Width         float64                  `json:"width,omitempty"`
+	Height        float64                  `json:"height,omitempty"`
+	IntrinsicSize bool                     `json:"intrinsic_size,omitempty"`
+	FitWithin     *[2]float64              `json:"fit_within,omitempty"`
+	Align         string                   `json:"align,omitempty"`
+	Container     *FlowContainer           `json:"container,omitempty"`
+	Table         *FlowTable               `json:"table,omitempty"`
+	TableStyle    *FlowContainerTableStyle `json:"table_style,omitempty"`
+}
+
+// FlowContainerTableStyle supplies table typography; grid geometry belongs to Table.
+// Repeated headers inside containers are currently rejected.
+type FlowContainerTableStyle struct {
+	FontID       string  `json:"font_id,omitempty"`
+	FontSize     float64 `json:"font_size,omitempty"`
+	LineHeight   float64 `json:"line_height,omitempty"`
+	RepeatHeader bool    `json:"repeat_header,omitempty"`
 }

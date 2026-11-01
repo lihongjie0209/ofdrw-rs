@@ -150,3 +150,47 @@ continuation come from the shared box options. The result contains all
 fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
 General nested child containers remain separate work. This API is available
 from the development source and is not included in published version 0.3.0.
+
+### Nested mixed containers (unreleased source API)
+
+```go
+textStyle := ofdrw.DefaultFlowTextStyle()
+textStyle.FontSize, textStyle.LineHeight = 2, 3
+container := ofdrw.FlowContainer{
+    Layout: ofdrw.LayoutBox{Size: [2]float64{40, 0}, Padding: [4]float64{1, 1, 1, 1}},
+    Gap: 1,
+    Children: []ofdrw.FlowContainerChild{
+        {Type: "paragraph", Spans: []ofdrw.FlowSpan{{Text: "Heading"}}, Style: &textStyle},
+        {Type: "container", Container: &ofdrw.FlowContainer{
+            Layout: ofdrw.LayoutBox{Size: [2]float64{30, 0}, Border: [4]float64{0.2, 0.2, 0.2, 0.2}},
+            Children: []ofdrw.FlowContainerChild{
+                {Type: "paragraph", Spans: []ofdrw.FlowSpan{{Text: "Nested text"}}, Style: &textStyle},
+            },
+        }},
+    },
+}
+result, err := doc.AddFlowContainers(0, []ofdrw.FlowContainer{container}, ofdrw.DefaultBoxLayoutStyle())
+if err != nil {
+    return err
+}
+_ = result
+```
+
+Image children use `Data []byte`. Table children use `Table *FlowTable` so
+zero padding remains explicit; `TableStyle *FlowContainerTableStyle` supplies
+font size, line height and font ID. Supplied paragraph style pointers should
+start from `DefaultFlowTextStyle`; a nil pointer selects native defaults.
+
+Each container has `layout`, optional `gap`, and `children`. Supported child
+types are paragraph, image, container, spacer and table. A table child has a
+`table` grid and optional `table_style` (`font_size`, `line_height`, `font_id`,
+`repeat_header`). Images accept explicit dimensions or intrinsic sizing and
+fit bounds. Spacer height defaults to zero. Returned root fragments and
+`next` / `Next` support continuation with shared `start` / `Start` options.
+
+Root containers support floating rows. Nested children remain vertical;
+nested clear must be `both` or omitted. Internal floating rows and repeated
+table headers remain pending; requesting repeated headers returns an error.
+The whole call rolls back on invalid children. Limits are eight container
+levels and 10,000 container/child entries. This source API is not included in
+published version 0.3.0.

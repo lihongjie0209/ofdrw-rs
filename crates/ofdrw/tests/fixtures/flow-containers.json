@@ -1,0 +1,297 @@
+{
+  "reference": "Manual millimeter bands: A=3, nested B/C=7.5, image=4, three rows=12, spacer=1, Z=3. Root vertical edges total1.5. Each page has12mm available.",
+  "request": {
+    "containers": [
+      {
+        "layout": {
+          "size": [
+            12,
+            0
+          ],
+          "padding": [
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ],
+          "border": [
+            0.25,
+            0.25,
+            0.25,
+            0.25
+          ]
+        },
+        "children": [
+          {
+            "type": "paragraph",
+            "spans": [
+              {
+                "text": "A"
+              }
+            ],
+            "style": {
+              "font_size": 2,
+              "line_height": 3
+            }
+          },
+          {
+            "type": "container",
+            "container": {
+              "layout": {
+                "size": [
+                  10,
+                  0
+                ],
+                "padding": [
+                  0.5,
+                  0.5,
+                  0.5,
+                  0.5
+                ],
+                "border": [
+                  0.25,
+                  0.25,
+                  0.25,
+                  0.25
+                ],
+                "float": "right"
+              },
+              "children": [
+                {
+                  "type": "paragraph",
+                  "spans": [
+                    {
+                      "text": "B\nC"
+                    }
+                  ],
+                  "style": {
+                    "font_size": 2,
+                    "line_height": 3
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "image",
+            "data_base64": "iVBORw0KGgoAAAANSUhEUgAAADIAAAAZCAIAAAD8NuoTAAAAMUlEQVR4nO3OMQ0AAAgDMG5E4F8UYpDBjiYV0NrpQPU+0NLS0tLSyqClpZVAS0srwQGFKfXFsc8+wwAAAABJRU5ErkJggg==",
+            "format": "PNG",
+            "width": 4,
+            "height": 4,
+            "align": "right"
+          },
+          {
+            "type": "table",
+            "table": {
+              "row_count": 3,
+              "column_widths": [
+                10
+              ],
+              "row_height": 4,
+              "padding": 0,
+              "border_width": 0.2,
+              "cells": [
+                {
+                  "row": 0,
+                  "column": 0,
+                  "row_span": 1,
+                  "column_span": 1,
+                  "text": "R1"
+                },
+                {
+                  "row": 1,
+                  "column": 0,
+                  "row_span": 1,
+                  "column_span": 1,
+                  "text": "R2"
+                },
+                {
+                  "row": 2,
+                  "column": 0,
+                  "row_span": 1,
+                  "column_span": 1,
+                  "text": "R3"
+                }
+              ]
+            },
+            "table_style": {
+              "font_size": 2,
+              "line_height": 3
+            }
+          },
+          {
+            "type": "spacer",
+            "height": 1
+          },
+          {
+            "type": "paragraph",
+            "spans": [
+              {
+                "text": "Z"
+              }
+            ],
+            "style": {
+              "font_size": 2,
+              "line_height": 3
+            }
+          }
+        ]
+      }
+    ],
+    "page_size": [
+      20,
+      16
+    ],
+    "margins": [
+      2,
+      2,
+      2,
+      2
+    ]
+  },
+  "expected": {
+    "pages": [
+      0,
+      1,
+      2
+    ],
+    "placements": [
+      {
+        "source_index": 0,
+        "page_index": 0,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          11.25
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          11.25
+        ],
+        "padding_box": [
+          2.25,
+          2.25,
+          13.0,
+          11.0
+        ],
+        "content_box": [
+          2.75,
+          2.75,
+          12.0,
+          10.5
+        ],
+        "borders": [
+          0.25,
+          0.25,
+          0.0,
+          0.25
+        ],
+        "source_offset": 0.0,
+        "first": true,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 1,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          12.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          12.0
+        ],
+        "padding_box": [
+          2.25,
+          2.0,
+          13.0,
+          12.0
+        ],
+        "content_box": [
+          2.75,
+          2.0,
+          12.0,
+          12.0
+        ],
+        "borders": [
+          0.0,
+          0.25,
+          0.0,
+          0.25
+        ],
+        "source_offset": 11.25,
+        "first": false,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 2,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          8.75
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          8.75
+        ],
+        "padding_box": [
+          2.25,
+          2.0,
+          13.0,
+          8.5
+        ],
+        "content_box": [
+          2.75,
+          2.0,
+          12.0,
+          8.0
+        ],
+        "borders": [
+          0.0,
+          0.25,
+          0.25,
+          0.25
+        ],
+        "source_offset": 23.25,
+        "first": false,
+        "last": true
+      }
+    ],
+    "next": {
+      "page_index": 2,
+      "y": 10.75
+    }
+  },
+  "text": [
+    [
+      "A",
+      "B",
+      "C"
+    ],
+    [
+      "R1",
+      "R2"
+    ],
+    [
+      "R3",
+      "Z"
+    ]
+  ],
+  "image_boundary": [
+    10.75,
+    2.0,
+    4.0,
+    4.0
+  ]
+}

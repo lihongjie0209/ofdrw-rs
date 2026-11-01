@@ -7,20 +7,8 @@ pub(super) fn parse_box(value: &serde_json::Value) -> Result<ofdrw::TextBox, Str
             return Err(format!("unsupported text box field: {key}"));
         }
     }
-    let mut layout = value
-        .get("layout")
-        .and_then(serde_json::Value::as_object)
-        .ok_or("text box layout must be an object")?
-        .clone();
-    if layout.contains_key("type") {
-        return Err("text box layout has no type field".into());
-    }
-    layout.insert("type".into(), serde_json::json!("box"));
-    let ofdrw::BoxLayoutItem::Box(layout) =
-        box_layout::parse_item(&serde_json::Value::Object(layout))?
-    else {
-        return Err("text box requires a box layout".into());
-    };
+    let layout =
+        box_layout::parse_layout(value.get("layout").ok_or("text box layout is required")?)?;
     let spans = parse_flow_spans(value)?;
     let style = match value.get("style") {
         Some(style) if style.is_object() => parse_flow_style(style)?,

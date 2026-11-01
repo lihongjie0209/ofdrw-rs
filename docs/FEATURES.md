@@ -1036,7 +1036,24 @@ headers inside containers remain pending and `repeat_header: true` is rejected.
 Tests compare container-table raster output with the existing table API and
 cover merged rows, fractional geometry and rollback of malformed tables.
 
-Binding convenience methods for these mixed containers remain pending.
+Python exposes `Document.add_flow_containers(document_index, containers, **options)`,
+Go uses `Document.AddFlowContainers(documentIndex, containers, style)`, Node.js
+uses `Document.addFlowContainers(documentIndex, containers, options)`, and C
+provides `ofd_add_flow_containers_json()`. JSON requests contain `containers`
+and shared `page_size`, `margins`, `start`. Container fields are `layout`,
+optional `gap`, and optional `children`. Children select a `type`: paragraph
+(`spans`, optional `style`), image (the ordinary image fields), table (`table`,
+optional `table_style` and `align`), container (`container`), or spacer
+(optional `height`, default zero). Table style supplies only typography and
+optional `repeat_header`; grid geometry belongs to `table`.
+
+Native validation is shared across languages. Python accepts nested image
+bytes and normalizes font IDs without changing caller data. Go uses `FlowTable`
+for table children so zero padding remains explicit, and JSON encoding rejects
+cycles. Node.js validates finite request numbers and includes TypeScript models.
+The shared fixture manually derives all root fragment fields for mixed shaped
+and ordinary text, nested decoration, image and table pagination. Tests also
+verify output text, image bounds, round trips, continuation and atomic errors.
 
 ## 表格与嵌套布局
 

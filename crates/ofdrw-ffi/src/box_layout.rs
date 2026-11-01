@@ -86,6 +86,18 @@ pub(super) fn parse_item(value: &serde_json::Value) -> Result<BoxLayoutItem, Str
     })
 }
 
+pub(super) fn parse_layout(value: &serde_json::Value) -> Result<LayoutBox, String> {
+    let mut layout = value.as_object().ok_or("layout must be an object")?.clone();
+    if layout.contains_key("type") {
+        return Err("layout has no type field".into());
+    }
+    layout.insert("type".into(), serde_json::json!("box"));
+    let BoxLayoutItem::Box(layout) = parse_item(&serde_json::Value::Object(layout))? else {
+        return Err("layout must describe a box".into());
+    };
+    Ok(layout)
+}
+
 #[derive(Serialize)]
 pub(super) struct StartResponse {
     page_index: usize,
