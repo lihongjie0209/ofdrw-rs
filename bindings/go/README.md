@@ -39,3 +39,24 @@ func main() {
 `Open`, `FromBytes` and `FromPDF` read documents; `PageSVG`, `PagePNG` and
 `ToPDF` export content. Page indexes start at zero and coordinates use millimeters.
 The release workflow publishes the Go module tag `bindings/go/v0.3.0`.
+
+## 混合流布局（源码开发功能，尚未发布）
+
+```go
+style := ofdrw.FlowDocumentStyle{BlockGap: 2}
+result, err := document.AddFlowBlocks(0, []ofdrw.FlowBlock{
+    {Type: "paragraph", Spans: []ofdrw.FlowSpan{{Text: "First paragraph"}}},
+    {Type: "spacer", Height: 4},
+    {Type: "paragraph", Spans: []ofdrw.FlowSpan{{Text: "Second paragraph", Bold: true}}},
+}, style)
+if err != nil { log.Fatal(err) }
+style.Start = result.Next
+_, err = document.AddFlowBlocks(0,
+    []ofdrw.FlowBlock{{Type: "paragraph", Spans: []ofdrw.FlowSpan{{Text: "Continued"}}}}, style)
+if err != nil { log.Fatal(err) }
+```
+
+`FlowTable` 是流中的顶层跨页表格，`Padding: 0` 明确表示无内边距；
+单元格中的 `NestedTable` 保留既有默认行为。图片使用 `Data` 字节，自动编码。
+`result.Next` 可传给下一次布局的 `Start`，整次调用失败时回滚。
+详见[混合流布局](../../docs/FEATURES.md#混合流布局)。

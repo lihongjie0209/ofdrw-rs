@@ -317,6 +317,7 @@ _ffi.cdef(
     int ofd_add_flowed_text_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_table_json(OfdDocument *handle, size_t document_index, const char *table_json, OfdBuffer *output);
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
+    int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
     int ofd_append_path_page(OfdDocument *handle, size_t document_index, const char *commands, double x, double y, double width, double height, double page_width, double page_height, int fill, int stroke);
     int ofd_append_image_page(OfdDocument *handle, size_t document_index, const unsigned char *data, size_t len, const char *format, double width_mm, double height_mm);
@@ -4254,6 +4255,50 @@ class Document:
             payload["font_id"] = str(font_id)
         output = _ffi.new("OfdBuffer *")
         _check(_lib.ofd_add_table_json(
+            self._handle, document_index,
+            _utf8(json.dumps(payload, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def add_flow_blocks(self, document_index: int, blocks: list[dict], **options) -> dict:
+        """Lay out ordered paragraph/image/table/spacer/page_break blocks atomically.
+
+        Options match add_flowed_spans, with an additional block_gap in mm.
+        Returns {"pages": [...], "next": {"page_index": ..., "y": ...} | None}.
+        Image dictionaries accept bytes in data or a data_base64 string.
+        Paragraphs accept text or spans, plus optional style overrides.
+        """
+        self._require_open()
+        if document_index < 0:
+            raise IndexError(document_index)
+        if not isinstance(blocks, list):
+            raise TypeError("blocks must be a list")
+
+        def serialize(value, depth=0):
+            if depth > 64:
+                raise ValueError("flow content nesting is too deep")
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    if key in ("font_id", "language") and item is None:
+                        continue
+                    if key == "data" and isinstance(item, (bytes, bytearray, memoryview)):
+                        result["data_base64"] = base64.b64encode(item).decode("ascii")
+                    elif key == "font_id" and item is not None:
+                        result[key] = str(item)
+                    else:
+                        result[key] = serialize(item, depth + 1)
+                return result
+            if isinstance(value, (list, tuple)):
+                return [serialize(item, depth + 1) for item in value]
+            return value
+
+        payload = serialize({**options, "blocks": blocks})
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_add_flow_blocks_json(
             self._handle, document_index,
             _utf8(json.dumps(payload, allow_nan=False)), output,
         ))

@@ -1,3 +1,14 @@
+# Unreleased
+
+- Add atomic mixed vertical flow for paragraphs, images, paginated tables,
+  spacers and explicit page breaks. Return used global page indexes and a
+  reusable continuation position; preserve blank lines, canvas origins,
+  merged rows and repeated headers. Paragraph typography overrides inherit
+  shared page geometry. Rust, C, Python, Go and Node.js expose the operation.
+- Add mixed-flow API examples, cross-language fixtures, rollback tests,
+  TypeScript checks and explicit Node.js CI test inclusion. General floating
+  elements and container layout remain pending.
+
 # v0.3.0
 
 ## Upgrade notes

@@ -2,7 +2,25 @@ import { Document, createSesSeal, type ActionInfo, type ArchiveViolation, type A
 import type { IntegrityTrustedVerificationInfo, SignatureChainVerificationInfo, SignatureDirectTrustVerificationInfo, SignatureTrustVerificationInfo } from '../index';
 import type { GradientPaintStyle, GouraudPaintStyle, ImageBorderStyle, PatternPaintStyle, SolidPaintStyle } from '../index';
 
+import type { FlowBlock, FlowDocumentOptions, FlowLayoutResult } from '../index';
+
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const mixedBlocks: FlowBlock[] = [
+    {type: 'paragraph', text: 'A', style: {font_size: 4, shape: false}},
+    {type: 'image', data_base64: '', format: 'PNG', width: 10, height: 5},
+    {type: 'table', table: {row_count: 1, column_widths: [20], cells: [{row: 0, column: 0, text: 'B'}]}},
+    {type: 'spacer', height: 2}, {type: 'page_break'},
+  ];
+  const mixedOptions: FlowDocumentOptions = {block_gap: 2};
+  const mixedResult: FlowLayoutResult = document.addFlowBlocks(0, mixedBlocks, mixedOptions);
+  if (mixedResult.next) document.addFlowBlocks(0, [], {start: mixedResult.next});
+  // @ts-expect-error paragraph geometry belongs to the shared document style
+  document.addFlowBlocks(0, [{type: 'paragraph', text: 'x', style: {page_size: [20, 20]}}]);
+  // @ts-expect-error a paragraph must choose either text or spans
+  document.addFlowBlocks(0, [{type: 'paragraph', text: 'x', spans: []}]);
+  // @ts-expect-error mixed flow returns a result object with a continuation
+  const wrongMixedResult: number[] = document.addFlowBlocks(0, []);
+  void wrongMixedResult;
   const continuation: FlowStart = {page_index: 0, y: 40};
   document.addFlowedText(0, 'continued', {start: continuation});
   document.addFlowedSpans(0, [{text: 'continued'}], {start: continuation});
