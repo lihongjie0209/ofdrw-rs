@@ -45,6 +45,11 @@
   complete fragment geometry and continuation. Add shared reference fixtures,
   shaped/plain rendering tests, rollback checks, TypeScript and usage examples.
 
+- Add Rust vertical mixed flow containers with recursive decorated children,
+  paragraph and image children, safe content page cuts, gap/spacing and
+  atomic validation. Root boxes retain floating rows; internal floating rows
+  and table children remain pending.
+
 # v0.3.0
 
 ## Upgrade notes

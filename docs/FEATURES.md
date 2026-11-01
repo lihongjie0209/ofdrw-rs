@@ -19,6 +19,7 @@
 - [混合流布局](#混合流布局)
 - [盒模型与浮动分段](#盒模型与浮动分段)
 - [自动文字盒](#自动文字盒)
+- [嵌套混合流容器](#嵌套混合流容器)
 - [表格与嵌套布局](#表格与嵌套布局)
 - [页面顺序与对象分组](#页面顺序与对象分组)
 - [SVG 预览](#svg-预览)
@@ -1002,6 +1003,31 @@ the ordinary box layout result, including full fragments and `next`.
 
 This provides text children inside automatically sized boxes. General nested
 child containers and mixed child kinds remain pending.
+
+## 嵌套混合流容器
+
+**未发布，Rust 接口：** `OfdDocument::add_flow_containers()` lays out vertical
+`FlowContainer` sequences containing paragraphs, images, spacing and recursively
+nested decorated containers. Each container measures its own content height,
+clamps width before text wrapping, and adds its margin, padding and border
+bands. Paragraphs share the ordinary/shaped text preparation and drawing code.
+Images remain indivisible; protected lines, paragraphs and complete nested
+containers move intact across pages. Nested decorations consume top/bottom
+bands only once, and parent decoration is painted before child content.
+
+Root containers support shared floating rows through the measured-box engine.
+Within a container, children form a vertical sequence separated by `gap`;
+nested float direction controls horizontal alignment and nested clear must be
+`Both`. Child floating rows, table children and arbitrary DOM layout remain
+pending. The API accepts eight container levels and 10,000 container/child
+entries. Invalid later content or overflowing nested coordinates rolls back
+the whole call. Placeholders reserve measured space without painting children.
+Returned placements describe roots; child objects use nested content positions.
+
+Tests cover mixed text/image/decorated-child pagination, complete child boxes,
+spacing and alignment, shaped Arabic and combining text, floating roots,
+placeholders, geometry overflow, structural limits and OFD round trips.
+Binding convenience methods for these mixed containers remain pending.
 
 ## 表格与嵌套布局
 
