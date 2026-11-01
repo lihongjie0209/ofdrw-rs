@@ -15,6 +15,7 @@
 - [页面对象与文字编辑](#页面对象与文字编辑)
 - [文本流式布局](#文本流式布局)
 - [混合流布局](#混合流布局)
+- [盒模型与浮动分段](#盒模型与浮动分段)
 - [表格与嵌套布局](#表格与嵌套布局)
 - [页面顺序与对象分组](#页面顺序与对象分组)
 - [SVG 预览](#svg-预览)
@@ -837,8 +838,39 @@ add `block_gap` and `blocks`. Paragraph blocks require exactly one of `text` or
 Go uses `FlowTable` for top-level paginated grids: its `Padding` zero is explicit;
 existing `NestedTable` defaults inside cells are preserved.
 
-This is vertical block composition. Java-style floating elements, general
-containers, and other DOM layout behavior remain pending.
+This is vertical block composition. Measured floating boxes are supported
+separately below; automatic content measurement, general child containers, and
+other DOM layout behavior remain pending.
+
+## 盒模型与浮动分段
+
+**未发布，当前仅 Rust 核心：** `OfdDocument::add_box_layout()` places measured
+`LayoutBox` elements into Java-style rows and draws their backgrounds and
+borders. `BoxLayoutStyle` supplies page size, margins, and an optional existing
+page start. Boxes include content size, four independent margin/border/padding
+edges, alpha, relative drawing offset, and an optional nondrawing placeholder.
+`BoxFloat` supports left, right, and centered groups; `BoxClear` controls row
+sharing. Each row occupies its maximum outer height. Oversized content widths
+are reduced before row grouping. Line breaks flush existing rows; page breaks
+explicitly retain blank pages.
+
+Splittable boxes retain their column positions across pages. Margin, padding,
+content, and border bands are consumed once at cuts, including cuts inside an
+edge. Complete boxes move intact; an oversized complete box is rejected.
+Invalid later geometry or coordinate overflow rolls back the whole call.
+`BoxLayoutResult.placements` returns the source index, global page index,
+allocated space, border/padding/content rectangles, source offset, and fragment
+flags. Drawing rectangles include relative offsets and the canvas origin;
+allocated space is unaffected by relative positioning. Place text or images
+using existing object APIs and the returned `content_box`.
+
+Java-generated coordinates cover left/right and centered rows, clear rules,
+plain splitting, and decorated splitting. Regenerate the independent fixture
+with `python3 scripts/generate_box_layout_reference.py` after building the
+pinned sibling Java layout module. This generator never calls Rust.
+
+Automatic text/image measurement within boxes, general nested child containers,
+and C/Python/Go/Node.js interfaces for this new operation remain pending.
 
 ## 表格与嵌套布局
 
