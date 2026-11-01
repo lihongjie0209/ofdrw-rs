@@ -420,7 +420,7 @@ try {
 
 提供 `LayoutBox`、`BoxLayoutItem`、`BoxLayoutOptions`、`BoxPlacement` 和
 `BoxLayoutResult` TypeScript 类型。`next` 可传给下次调用的 `start`。
-接口布局已测量尺寸的盒子；自动内容测量和一般子容器仍待实现。
+自动测量文本盒与嵌套混合容器见下文的源码开发接口。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
 ## 文本自动测量（源码开发功能，尚未发布）
@@ -438,7 +438,7 @@ try {
 
 提供 `FlowTextMetrics` 和 `FlowLineMetrics` 类型。测量不增加页面或资源，
 页面几何和 `start` 被忽略；逐行位置和逻辑基线相对段落原点。
-测得高度可用于盒模型；一般子容器及按行拆分的容器绘制仍待实现。
+测得高度可用于盒模型；按行拆分的文本盒与一般嵌套容器见下文的源码开发接口。
 
 ### Intrinsic image sizes (unreleased source API)
 
@@ -486,7 +486,7 @@ Width is clamped before wrapping, and complete lines move to the next page.
 Typography can enable shaped text or paragraph keep rules; page geometry and
 continuation come from the shared box options. The result contains all
 fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
-General nested child containers remain separate work. This API is available
+General nested child containers use the mixed container API below. This API is available
 from the development source and is not included in published version 0.3.0.
 
 ### Nested mixed containers (unreleased source API)
@@ -515,7 +515,7 @@ Image children use `data_base64`; font IDs in nested styles are strings.
 TypeScript exports `FlowContainer` and the `FlowContainerChild` union.
 
 Each container has `layout`, optional `gap`, and `children`. Supported child
-types are paragraph, image, container, spacer and table. A table child has a
+types are paragraph, image, container, spacer, table, line_break and page_area_fill. A table child has a
 `table` grid and optional `table_style` (`font_size`, `line_height`, `font_id`,
 `repeat_header`). Images accept explicit dimensions or intrinsic sizing and
 fit bounds. Spacer height defaults to zero. Returned root fragments and
@@ -531,3 +531,16 @@ continuing floating columns.
 The whole call rolls back on invalid children. Limits are eight container
 levels and 10,000 container/child entries. This source API is not included in
 published version 0.3.0.
+
+
+`line_break` ends the current nonempty floating row; leading, repeated and
+trailing empty breaks are ignored. `page_area_fill` consumes the current page's
+remaining content area. If that area is already full, it starts and fills the
+next page, so consecutive fills preserve explicit blank pages. A trailing fill
+does not append another page. Fills reset row gaps and affect only their own
+floating column. Both controls accept only `type`; a complete (`integrity`)
+container that would span pages fails atomically.
+
+```json
+{"children": [{"type": "line_break"}, {"type": "page_area_fill"}]}
+```

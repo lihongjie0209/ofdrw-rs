@@ -1165,5 +1165,7 @@ export type FlowContainerChild =
   | ({type: 'image'; align?: 'left' | 'center' | 'right'} & TableImage)
   | {type: 'container'; container: FlowContainer}
   | {type: 'spacer'; height?: number}
+  | {type: 'line_break'}
+  | {type: 'page_area_fill'}
   | {type: 'table'; table: NestedTable; align?: 'left' | 'center' | 'right';
       table_style?: {font_size?: number; line_height?: number; font_id?: string; repeat_header?: boolean}};

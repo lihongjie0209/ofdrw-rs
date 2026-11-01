@@ -1,5 +1,11 @@
 # Unreleased
 
+- Add Java-compatible `BR` and `PageAreaFiller` controls to mixed containers
+  in Rust, C, Python, Go and Node.js. Preserve explicit blank pages, ignore
+  empty row breaks, reset row gaps after fills, and reject page-splitting
+  complete containers atomically. Independent Java and shared language fixtures
+  cover leading, trailing, consecutive and nested controls.
+
 - Add atomic mixed vertical flow for paragraphs, images, paginated tables,
   spacers and explicit page breaks. Return used global page indexes and a
   reusable continuation position; preserve blank lines, canvas origins,

@@ -432,6 +432,11 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
   encrypted.close();
   void [pageBox, area, actions, tag, tagBytes, extensions, outlines, snapshot, versions, clips, paints, strokes, objectActions, words, positions, violations, attachments, compositeId, bookmarkId, svg, png, pdf, flowedPages, tablePages, fontId, fonts, fontData, pageFonts, pageFontData, layers, objects, spaces, pageSpaces, defaultColor, drawId];
 
+  document.addFlowContainers(0, [{layout: {size: [16, 0]}, children: [
+    {type: 'line_break'}, {type: 'page_area_fill'},
+  ]}]);
+  // @ts-expect-error controls do not accept a height
+  document.addFlowContainers(0, [{layout: {size: [16, 0]}, children: [{type: 'page_area_fill', height: 1}]}]);
   // @ts-expect-error password recipients need a password
   document.encryptWithPasswords([{ username: 'alice' }]);
   // @ts-expect-error certificate recipients need DER bytes

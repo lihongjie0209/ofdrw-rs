@@ -117,6 +117,8 @@ pub(super) fn parse_container(
                         count,
                     )?))
                 }
+                "line_break" => { fields(child, &["type"])?; FlowContainerChild::LineBreak }
+                "page_area_fill" => { fields(child, &["type"])?; FlowContainerChild::PageAreaFill }
                 "spacer" => {
                     fields(child, &["type", "height"])?;
                     FlowContainerChild::Spacer {
@@ -129,7 +131,7 @@ pub(super) fn parse_container(
                 }
                 _ => {
                     return Err(
-                        "container child type must be paragraph, image, table, container or spacer"
+                        "container child type must be paragraph, image, table, container, spacer, line_break or page_area_fill"
                             .into(),
                     )
                 }
@@ -295,6 +297,71 @@ mod tests {
                 },
                 0
             );
+        }
+    }
+
+    #[test]
+    fn ffi_controls_preserve_page_fragments_and_empty_pages() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/container-controls.json"
+        ))
+        .unwrap();
+        for shape in [false, true] {
+            let mut handle = ptr::null_mut();
+            assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+            let font = unsafe {
+                document_mut(handle)
+                    .unwrap()
+                    .add_embedded_font(
+                        "DejaVu Sans",
+                        include_bytes!("../../ofdrw/tests/fixtures/dejavu-sans.ttf"),
+                    )
+                    .unwrap()
+            };
+            let mut request = fixture["request"].clone();
+            typography(&mut request, &font.to_string(), shape);
+            let input = CString::new(request.to_string()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            assert_eq!(
+                unsafe { ofd_add_flow_containers_json(handle, 0, input.as_ptr(), &mut output) },
+                0
+            );
+            let result: serde_json::Value = serde_json::from_slice(unsafe {
+                std::slice::from_raw_parts(output.data, output.len)
+            })
+            .unwrap();
+            assert_eq!(result, fixture["expected"]);
+            unsafe { ofd_buffer_free(output) };
+            let bytes = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
+            for (page, expected) in fixture["text"].as_array().unwrap().iter().enumerate() {
+                let actual = unsafe { document_ref(handle).unwrap().page_text(page).unwrap() };
+                assert_eq!(serde_json::json!(actual), *expected);
+            }
+            for kind in ["line_break", "page_area_fill"] {
+                let mut invalid = request.clone();
+                invalid["containers"][0]["children"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"type":kind,"height":1}));
+                let input = CString::new(invalid.to_string()).unwrap();
+                let mut output = OfdBuffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
+                assert_ne!(
+                    unsafe { ofd_add_flow_containers_json(handle, 0, input.as_ptr(), &mut output) },
+                    0
+                );
+                assert!(output.data.is_null());
+                assert_eq!(
+                    unsafe { document_ref(handle).unwrap().to_bytes().unwrap() },
+                    bytes
+                );
+            }
+            unsafe { ofd_close(handle) };
         }
     }
 

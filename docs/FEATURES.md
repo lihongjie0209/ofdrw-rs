@@ -1063,6 +1063,23 @@ appended pages use their normal origin. Tests cover centered/cleared nested
 rows, independent line heights, merged header lookahead, shaped text, images,
 fractional edges, complete parents, canvas origins and rollback.
 
+
+`line_break` ends the current nonempty floating row; leading, repeated and
+trailing empty breaks are ignored. `page_area_fill` consumes the current page's
+remaining content area. If that area is already full, it starts and fills the
+next page, so consecutive fills preserve explicit blank pages. A trailing fill
+does not append another page. Fills reset row gaps and affect only their own
+floating column. Both controls accept only `type`; a complete (`integrity`)
+container that would span pages fails atomically.
+
+```json
+{"children": [{"type": "line_break"}, {"type": "page_area_fill"}]}
+```
+Independent Java-generated fixtures verify seven control sequences, including
+full, leading, trailing and consecutive page fillers. Shared C/Python/Go/Node.js
+fixtures verify complete root fragment geometry, preserved blank pages and
+strict atomic rejection of extra control fields.
+
 Native validation is shared across languages. Python accepts nested image
 bytes and normalizes font IDs without changing caller data. Go uses `FlowTable`
 for table children so zero padding remains explicit, and JSON encoding rejects

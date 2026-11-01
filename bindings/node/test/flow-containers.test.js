@@ -61,3 +61,34 @@ test('invalid container requests leave the document unchanged', () => {
   } finally { doc.close(); }
   assert.throws(() => doc.addFlowContainers(0, [root]));
 });
+
+
+test('container controls preserve explicit blank pages and roundtrip in plain and shaped text', () => {
+  for (const shape of [false, true]) {
+    const fixture = JSON.parse(fs.readFileSync(path.join(fixtures, 'container-controls.json')));
+    const {containers, ...options} = fixture.request;
+    const doc = Document.create();
+    try {
+      const font = doc.addEmbeddedFont('DejaVu Sans', fs.readFileSync(path.join(fixtures, 'dejavu-sans.ttf')));
+      typography(containers[0].children, font, shape);
+      const before = structuredClone(containers);
+      assert.deepEqual(doc.addFlowContainers(0, containers, options), fixture.expected);
+      assert.deepEqual(containers, before);
+      const reopened = Document.fromBytes(doc.toBytes());
+      try {
+        fixture.text.forEach((expected, page) => {
+          assert.deepEqual(doc.pageText(page), expected);
+          assert.deepEqual(reopened.pageText(page), expected);
+        });
+        assert.ok(reopened.pagePng(1, 30).length);
+      } finally { reopened.close(); }
+      const encoded = doc.toBytes();
+      for (const type of ['line_break', 'page_area_fill']) {
+        const invalid = structuredClone(containers);
+        invalid[0].children.push({type, height: 1});
+        assert.throws(() => doc.addFlowContainers(0, invalid, options));
+        assert.deepEqual(doc.toBytes(), encoded);
+      }
+    } finally { doc.close(); }
+  }
+});

@@ -72,3 +72,28 @@ def test_container_errors_are_atomic_and_wrapper_guards_apply():
             doc.add_flow_containers(-1, [root])
     with pytest.raises(OfdError):
         doc.add_flow_containers(0, [root])
+
+
+@pytest.mark.parametrize("shape", [False, True])
+def test_container_controls_preserve_blank_pages_and_roundtrip(shape):
+    fixture = json.loads((FIXTURES / "container-controls.json").read_text())
+    request = fixture["request"]
+    containers = request.pop("containers")
+    with Document.new() as doc:
+        font = doc.add_embedded_font("DejaVu Sans", (FIXTURES / "dejavu-sans.ttf").read_bytes())
+        typography(containers[0]["children"], font, shape)
+        before = copy.deepcopy(containers)
+        assert doc.add_flow_containers(0, containers, **request) == fixture["expected"]
+        assert containers == before
+        with Document.from_bytes(doc.to_bytes()) as reopened:
+            for page, expected in enumerate(fixture["text"]):
+                assert doc.page_text(page) == expected
+                assert reopened.page_text(page) == expected
+            assert reopened.page_png(1, 30)
+        encoded = doc.to_bytes()
+        for kind in ["line_break", "page_area_fill"]:
+            invalid = copy.deepcopy(containers)
+            invalid[0]["children"].append({"type": kind, "height": 1})
+            with pytest.raises(OfdError):
+                doc.add_flow_containers(0, invalid, **request)
+            assert doc.to_bytes() == encoded

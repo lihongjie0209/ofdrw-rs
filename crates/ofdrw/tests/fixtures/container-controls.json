@@ -1,0 +1,269 @@
+{
+  "reference": "A starts(2,2), BR puts B at(14,6) with1mm row gap. Fills occupy remaining current pages; C starts page2 at(2,2). Trailing fill ends at y12 without appending a page.",
+  "request": {
+    "containers": [
+      {
+        "layout": {
+          "size": [
+            16,
+            0
+          ]
+        },
+        "gap": 1,
+        "children": [
+          {
+            "type": "line_break"
+          },
+          {
+            "type": "container",
+            "container": {
+              "layout": {
+                "size": [
+                  4,
+                  0
+                ],
+                "float": "left",
+                "clear": "none"
+              },
+              "children": [
+                {
+                  "type": "paragraph",
+                  "spans": [
+                    {
+                      "text": "A"
+                    }
+                  ],
+                  "style": {
+                    "font_size": 2,
+                    "line_height": 3
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "line_break"
+          },
+          {
+            "type": "line_break"
+          },
+          {
+            "type": "container",
+            "container": {
+              "layout": {
+                "size": [
+                  4,
+                  0
+                ],
+                "float": "right",
+                "clear": "none"
+              },
+              "children": [
+                {
+                  "type": "paragraph",
+                  "spans": [
+                    {
+                      "text": "B"
+                    }
+                  ],
+                  "style": {
+                    "font_size": 2,
+                    "line_height": 3
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "page_area_fill"
+          },
+          {
+            "type": "page_area_fill"
+          },
+          {
+            "type": "paragraph",
+            "spans": [
+              {
+                "text": "C"
+              }
+            ],
+            "style": {
+              "font_size": 2,
+              "line_height": 3
+            }
+          },
+          {
+            "type": "page_area_fill"
+          },
+          {
+            "type": "line_break"
+          }
+        ]
+      }
+    ],
+    "page_size": [
+      20,
+      14
+    ],
+    "margins": [
+      2,
+      2,
+      2,
+      2
+    ]
+  },
+  "expected": {
+    "pages": [
+      0,
+      1,
+      2
+    ],
+    "placements": [
+      {
+        "source_index": 0,
+        "page_index": 0,
+        "allocation": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "padding_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "content_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "borders": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_offset": 0.0,
+        "first": true,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 1,
+        "allocation": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "padding_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "content_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "borders": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_offset": 10.0,
+        "first": false,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 2,
+        "allocation": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "padding_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "content_box": [
+          2.0,
+          2.0,
+          16.0,
+          10.0
+        ],
+        "borders": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_offset": 20.0,
+        "first": false,
+        "last": true
+      }
+    ],
+    "next": {
+      "page_index": 2,
+      "y": 12.0
+    }
+  },
+  "text": [
+    [
+      "A",
+      "B"
+    ],
+    [],
+    [
+      "C"
+    ]
+  ],
+  "positions": [
+    [
+      0,
+      "A",
+      2.0,
+      2.0
+    ],
+    [
+      0,
+      "B",
+      14.0,
+      6.0
+    ],
+    [
+      2,
+      "C",
+      2.0,
+      2.0
+    ]
+  ]
+}
