@@ -326,6 +326,7 @@ type nativeAPI struct {
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addFixedContainers              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowContainers               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addTextBoxes                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
@@ -699,6 +700,7 @@ func loadAPI() error {
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
 			{"ofd_add_text_boxes_json", &api.addTextBoxes},
+			{"ofd_add_fixed_containers_json", &api.addFixedContainers},
 			{"ofd_add_flow_containers_json", &api.addFlowContainers},
 			{"ofd_measure_flowed_spans_json", &api.measureFlowedSpans},
 			{"ofd_append_text_page_with_font", &api.appendTextWithFont},
@@ -10219,6 +10221,54 @@ func (doc *Document) AddFlowBlocks(documentIndex int, blocks []FlowBlock, style 
 	return result, nil
 }
 
+// AddFixedContainers draws mixed containers atomically on one existing global page.
+// It returns one placement per root and never adds pages. Invalid later content
+// leaves the document unchanged. Page-area fillers are ignored.
+func (doc *Document) AddFixedContainers(pageIndex int, containers []FixedContainer) ([]BoxPlacement, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return nil, err
+	}
+	if pageIndex < 0 {
+		return nil, errors.New("negative page index")
+	}
+	if containers == nil {
+		containers = []FixedContainer{}
+	}
+	payload, err := json.Marshal(struct {
+		Containers []FixedContainer `json:"containers"`
+	}{Containers: containers})
+	if err != nil {
+		return nil, fmt.Errorf("encode fixed containers: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return nil, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addFixedContainers(
+		doc.handle,
+		uintptr(pageIndex),
+		&payloadBytes[0],
+		&buffer,
+	)); err != nil {
+		return nil, fmt.Errorf("add fixed containers: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return nil, err
+	}
+	var result []BoxPlacement
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("decode fixed containers result: %w", err)
+	}
+	return result, nil
+}
+
 // AddFlowContainers measures, paginates and draws mixed-content containers atomically.
 // It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
 // Invalid later input leaves the document unchanged.
@@ -10983,6 +11033,13 @@ type TextBox struct {
 	Layout LayoutBox     `json:"layout"`
 	Spans  []FlowSpan    `json:"spans"`
 	Style  FlowTextStyle `json:"style"`
+}
+
+// FixedContainer positions mixed content on an existing page in absolute OFD coordinates.
+// Positive layout heights are retained; zero measures content. Children may overflow.
+type FixedContainer struct {
+	Position  [2]float64    `json:"position"`
+	Container FlowContainer `json:"container"`
 }
 
 // FlowContainer lays out mixed children and nested floating rows with measured height.

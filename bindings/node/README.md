@@ -588,3 +588,28 @@ pagination and to existing pages with nonzero canvas origins.
 document.addBoxLayout(0, [{type: 'box', size: [40, 10],
   background_color: [240, 240, 240], layer: 'background'}]);
 ```
+
+### Fixed page containers (development)
+
+Use development bindings with their matching native library; this API follows 0.3.0.
+
+```js
+const doc = Document.create();
+try {
+  doc.addBlankPage(80, 60);
+  const placements = doc.addFixedContainers(0, [{
+    position: [10, 20],
+    container: {layout: {size: [40, 0]}, children: [
+      {type: 'paragraph', spans: [{text: 'Hello'}]},
+    ]},
+  }]);
+  fs.writeFileSync('fixed.ofd', doc.toBytes());
+} finally { doc.close(); }
+```
+
+TypeScript exports `FixedContainer`; the method returns `BoxPlacement[]`. Positions
+are absolute OFD millimeters on an existing global page. Zero height measures content;
+positive heights control allocation and decoration while children may overflow.
+The call never adds pages. Nested text/images/tables, offsets, layers and placeholders
+follow flow-container rules. Page-area fillers are ignored; invalid later content
+rolls back the entire call. Images use `data_base64` strings.

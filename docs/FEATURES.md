@@ -959,7 +959,7 @@ measurement, safe content fragmentation and drawing.
 
 ### 按内容区间分页
 
-**未发布，Rust 接口：** `add_box_layout_with_content_ranges()` accepts
+**未发布：** `add_box_layout_with_content_ranges()` accepts
 `BoxContentRanges { source_index, ranges }` alongside the measured boxes.
 Each range is an indivisible `[start, end]` interval relative to the original
 content top. A cut inside an interval moves that interval intact to the next
@@ -1023,7 +1023,7 @@ pagination and to existing pages with nonzero canvas origins.
 
 ## 自动文字盒
 
-**未发布，Rust 接口：** `OfdDocument::add_text_boxes()` combines text
+**未发布：** `OfdDocument::add_text_boxes()` combines text
 measurement, safe line fragmentation, box decorations and styled drawing in
 one atomic operation. Each `TextBox` contains a `LayoutBox`, styled `FlowSpan`
 children and a `FlowTextStyle`. The requested width is clamped to the available
@@ -1061,7 +1061,7 @@ layout fidelity remains pending.
 
 ## 嵌套混合流容器
 
-**未发布，Rust 接口：** `OfdDocument::add_flow_containers()` lays out vertical
+**未发布：** `OfdDocument::add_flow_containers()` lays out vertical
 `FlowContainer` sequences containing paragraphs, images, tables, spacing and recursively
 nested decorated containers. Each container measures its own content height,
 clamps width before text wrapping, and adds its margin, padding and border
@@ -1142,7 +1142,7 @@ verify output text, image bounds, round trips, continuation and atomic errors.
 
 ## 固定页面混合容器
 
-**未发布，Rust 接口：** `OfdDocument::add_fixed_containers(page_index, &[FixedContainer])`
+**未发布：** `OfdDocument::add_fixed_containers(page_index, &[FixedContainer])`
 paints mixed containers on one existing global page. Each `FixedContainer` has
 `position: [x, y]` and a `container: FlowContainer`. Coordinates use the same
 OFD page space as `add_text_object`; physical-box origins are not added again.
@@ -1171,8 +1171,14 @@ root overlap, global pages, off-page coordinates, images, tables, controls,
 placeholders, glyph shaping and rollback. An independent Java VirtualPage/Div
 reference verifies absolute allocations and background geometry, including
 negative coordinates, smaller canvases, tall boxes and fractional edges.
-This API is currently Rust-only;
-C/Python/Go/Node.js bindings are planned next.
+C exposes `ofd_add_fixed_containers_json` with a strict
+`{"containers":[{"position":[x,y],"container":{...}}]}` request and a placement-array
+response. Python provides `add_fixed_containers`, Go `AddFixedContainers`, and
+Node.js `addFixedContainers` with the `FixedContainer` TypeScript type. Python
+image children accept `data` bytes; Go accepts `Data []byte`; Node.js accepts
+`data_base64`. Use the development bindings with a matching native library.
+All three language suites compare the independent Java allocation fixtures,
+exercise ordinary/shaped mixed content overflow on one page, and verify rollback.
 
 ## 表格与嵌套布局
 

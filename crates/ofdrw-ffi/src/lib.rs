@@ -11146,6 +11146,42 @@ pub unsafe extern "C" fn ofd_add_text_boxes_json(
     })
 }
 
+/// Draw fixed mixed containers on one existing global page, atomically.
+///
+/// JSON is `{"containers":[{"position":[x,y],"container":{...}}]}`.
+/// Positions are absolute page coordinates; positive heights are retained.
+/// Returns an array of box placements. No pages are created.
+///
+/// # Safety
+/// `handle` must be live, `layout_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_fixed_containers_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(input_string(layout_json)?).map_err(|e| e.to_string())?;
+        let containers = flow_container::parse_fixed(&input)?;
+        let placements = document_mut(handle)?
+            .add_fixed_containers(page_index, &containers)
+            .map_err(|e| e.to_string())?;
+        let result = placements
+            .iter()
+            .map(box_layout::PlacementResponse::from)
+            .collect::<Vec<_>>();
+        output_buffer(
+            serde_json::to_vec(&result).map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
 /// Measure, paginate, decorate and draw nested mixed-content containers atomically.
 ///
 /// JSON accepts containers plus optional page_size, margins and start.

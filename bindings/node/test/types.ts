@@ -9,6 +9,12 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const fixed: import('../index').BoxPlacement[] = document.addFixedContainers(0, [
+    {position: [-1, 2], container: {layout: {size: [20, 3]}, children: [{type: 'page_area_fill'}]}}
+  ]);
+  void fixed;
+  // @ts-expect-error fixed positions require two coordinates
+  document.addFixedContainers(0, [{position: [1], container: {layout: {size: [4, 3]}}}]);
   document.addFlowContainers(0, [{layout: {size: [20, 0]}, children: [
     {type: 'paragraph', spans: [{text: 'A'}], style: {font_size: 2}},
     {type: 'container', container: {layout: {size: [10, 0]}}},

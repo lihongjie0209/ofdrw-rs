@@ -132,3 +132,62 @@ test('container layers route mixed children and nested overrides without changin
     } finally { doc.close(); }
   }
 });
+
+
+test('fixed container allocations match independent Java fixtures', () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(fixtures, 'fixed-containers-java.json')));
+  for (const entry of fixture.cases) {
+    const doc = Document.create();
+    try {
+      doc.addBlankPage(20, 15);
+      const before = structuredClone(entry.input);
+      const result = doc.addFixedContainers(0, [entry.input]);
+      assert.deepEqual(result[0].allocation, entry.allocation, entry.name);
+      assert.equal(result[0].page_index, 0);
+      assert.deepEqual(entry.input, before);
+      assert.equal(doc.pageCount, 1);
+      const reopened = Document.fromBytes(doc.toBytes());
+      try { assert.ok(reopened.pagePng(0, 30).length); } finally { reopened.close(); }
+    } finally { doc.close(); }
+  }
+});
+
+test('fixed mixed containers overflow on one page and reject later invalid input atomically', () => {
+  for (const shape of [false, true]) {
+    const root = JSON.parse(fs.readFileSync(path.join(fixtures, 'flow-containers.json'))).request.containers[0];
+    root.layout.size[1] = 2;
+    const doc = Document.create();
+    try {
+      doc.addBlankPage(20, 15);
+      const font = doc.addEmbeddedFont('DejaVu Sans', fs.readFileSync(path.join(fixtures, 'dejavu-sans.ttf')));
+      typography(root.children, font, shape);
+      const source = [{position: [-1, 2], container: root}];
+      const before = structuredClone(source);
+      const result = doc.addFixedContainers(0, source);
+      assert.deepEqual(result[0].content_box, [-0.25, 2.75, 12, 2]);
+      assert.deepEqual(source, before);
+      assert.deepEqual(doc.pageText(0), ['A', 'B', 'C', 'R1', 'R2', 'R3', 'Z']);
+      assert.equal(doc.pageImages(0).length, 1);
+      assert.equal(doc.pageCount, 1);
+      const reopened = Document.fromBytes(doc.toBytes());
+      try { assert.deepEqual(reopened.pageText(0), doc.pageText(0)); assert.ok(reopened.pagePng(0, 30).length); }
+      finally { reopened.close(); }
+      const encoded = doc.toBytes();
+      const invalid = {position: [0, 0], container: {layout: {size: [4, 3]}, children: [
+        {type: 'image', data_base64: 'AA==', format: 'PNG', width: 1, height: 1}]}};
+      for (const bad of [invalid, {position: [0], container: root},
+        {position: [0, 0], container: {layout: {size: [4, -1]}}}]) {
+        assert.throws(() => doc.addFixedContainers(0, [...source, bad]));
+        assert.deepEqual(doc.toBytes(), encoded);
+      }
+      for (const value of [NaN, Infinity, -Infinity]) {
+        assert.throws(() => doc.addFixedContainers(0, [{position: [value, 0], container: root}]));
+      }
+      assert.throws(() => doc.addFixedContainers(-1, source));
+      assert.throws(() => doc.addFixedContainers(99, source));
+      assert.throws(() => doc.addFixedContainers(0, {}));
+      assert.deepEqual(doc.addFixedContainers(0, []), []);
+    } finally { doc.close(); }
+    assert.throws(() => doc.addFixedContainers(0, []));
+  }
+});
