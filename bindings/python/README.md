@@ -47,3 +47,21 @@ with Document.new() as document:
 支持图片、跨页表格和 `page_break`；图片可传 `data` 字节或 `data_base64`。
 `next` 包含全局 `page_index` 和相对页面顶端的 `y`。整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
+
+## 盒模型与浮动行（源码开发功能，尚未发布）
+
+```python
+with Document.new() as document:
+    result = document.add_box_layout(0, [
+        {"type": "box", "size": [40, 10], "padding": [2] * 4,
+         "border": [0.2] * 4, "float": "left", "clear": "none"},
+        {"type": "box", "size": [40, 10], "float": "right", "clear": "none"},
+    ])
+    placed = result["placements"][0]
+    document.add_text_object(placed["page_index"], "Hello", placed["content_box"])
+    document.save("boxes.ofd")
+```
+
+`size` 是内容宽高；`margin`、`border`、`padding` 均按上、右、下、左排列。
+`result["next"]` 可作为下一次调用的 `start`。接口布局已测量尺寸的盒子并绘制装饰；
+自动测量内容和一般子容器仍待实现。详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。

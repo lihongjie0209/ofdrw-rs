@@ -60,3 +60,25 @@ if err != nil { log.Fatal(err) }
 单元格中的 `NestedTable` 保留既有默认行为。图片使用 `Data` 字节，自动编码。
 `result.Next` 可传给下一次布局的 `Start`，整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
+
+## 盒模型与浮动行（源码开发功能，尚未发布）
+
+```go
+style := ofdrw.DefaultBoxLayoutStyle()
+result, err := document.AddBoxLayout(0, []ofdrw.BoxLayoutItem{
+    {Type: "box", LayoutBox: &ofdrw.LayoutBox{Size: [2]float64{40, 10},
+        Padding: [4]float64{2, 2, 2, 2}, Float: "left", Clear: "none"}},
+    {Type: "box", LayoutBox: &ofdrw.LayoutBox{Size: [2]float64{40, 10},
+        Float: "right", Clear: "none"}},
+}, style)
+if err != nil { log.Fatal(err) }
+placed := result.Placements[0]
+_, err = document.AddTextObject(placed.PageIndex, "Hello", placed.ContentBox, 5, "")
+if err != nil { log.Fatal(err) }
+```
+
+边距数组按上、右、下、左排列。使用 `DefaultBoxLayoutStyle()` 后可修改页面几何；
+将 `result.Next` 赋给 `style.Start` 可续写。断行和换页分别使用
+`BoxLayoutItem{Type: "line_break"}` 和 `BoxLayoutItem{Type: "page_break"}`。
+接口布局已测量尺寸的盒子；自动测量和一般子容器仍待实现。
+详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。

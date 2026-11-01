@@ -1,0 +1,166 @@
+{
+  "request": {
+    "page_size": [
+      20,
+      20
+    ],
+    "margins": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "items": [
+      {
+        "type": "box",
+        "size": [
+          4,
+          3
+        ],
+        "float": "left",
+        "clear": "none",
+        "background_color": [
+          240,
+          20,
+          20
+        ],
+        "alpha": 128
+      },
+      {
+        "type": "box",
+        "size": [
+          5,
+          22
+        ],
+        "float": "right",
+        "clear": "none"
+      },
+      {
+        "type": "line_break"
+      }
+    ]
+  },
+  "expected": {
+    "pages": [
+      0,
+      1
+    ],
+    "placements": [
+      {
+        "source_index": 0,
+        "page_index": 0,
+        "allocation": [
+          2.0,
+          2.0,
+          4.0,
+          3.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          4.0,
+          3.0
+        ],
+        "padding_box": [
+          2.0,
+          2.0,
+          4.0,
+          3.0
+        ],
+        "content_box": [
+          2.0,
+          2.0,
+          4.0,
+          3.0
+        ],
+        "borders": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_offset": 0.0,
+        "first": true,
+        "last": true
+      },
+      {
+        "source_index": 1,
+        "page_index": 0,
+        "allocation": [
+          13.0,
+          2.0,
+          5.0,
+          16.0
+        ],
+        "border_box": [
+          13.0,
+          2.0,
+          5.0,
+          16.0
+        ],
+        "padding_box": [
+          13.0,
+          2.0,
+          5.0,
+          16.0
+        ],
+        "content_box": [
+          13.0,
+          2.0,
+          5.0,
+          16.0
+        ],
+        "borders": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_offset": 0.0,
+        "first": true,
+        "last": false
+      },
+      {
+        "source_index": 1,
+        "page_index": 1,
+        "allocation": [
+          13.0,
+          2.0,
+          5.0,
+          6.0
+        ],
+        "border_box": [
+          13.0,
+          2.0,
+          5.0,
+          6.0
+        ],
+        "padding_box": [
+          13.0,
+          2.0,
+          5.0,
+          6.0
+        ],
+        "content_box": [
+          13.0,
+          2.0,
+          5.0,
+          6.0
+        ],
+        "borders": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_offset": 16.0,
+        "first": false,
+        "last": true
+      }
+    ],
+    "next": {
+      "page_index": 1,
+      "y": 8.0
+    }
+  }
+}
