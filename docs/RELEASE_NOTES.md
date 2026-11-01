@@ -1,5 +1,10 @@
 # Unreleased
 
+- Bake mapped TrueType font scaling into glyph geometry so it does not scale
+  stroke widths or paint coordinates. Text rendering also retains inherited
+  cap/join/miter and dash parameters. Independent PDF rasters cover filled,
+  affine, reflected, solid-stroked and dashed glyphs.
+
 - Import empty ActualText over painted embedded glyphs as separate native vector
   paths, keeping paint order, opacity, affine placement and clipping without
   retaining the suppressed text. Add independent font/transform/stroke rasters

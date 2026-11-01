@@ -385,9 +385,9 @@ pub struct PageObjectPaintInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrokeStyleInfo {
     pub line_width: f64,
-    /// Path-only SVG cap name: `butt`, `round`, or `square`.
+    /// SVG cap name: `butt`, `round`, or `square`.
     pub cap: Option<String>,
-    /// Path-only SVG join name: `miter`, `round`, or `bevel`.
+    /// SVG join name: `miter`, `round`, or `bevel`.
     pub join: Option<String>,
     pub miter_limit: Option<f64>,
     pub dash_pattern: Option<[f64; 2]>,
@@ -18269,7 +18269,25 @@ impl OfdDocument {
             } else {
                 ("none".to_owned(), 1.0)
             };
-            let line_width = resolved_stroke_style(object, &draw_style)?.line_width;
+            let stroke_style = resolved_stroke_style(object, &draw_style)?;
+            let line_width = stroke_style.line_width;
+            let cap = stroke_style.cap.as_deref().unwrap_or("butt");
+            let join = stroke_style.join.as_deref().unwrap_or("miter");
+            let miter = stroke_style.miter_limit.unwrap_or(3.528);
+            let mut stroke_geometry = format!(
+                "stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\" stroke-miterlimit=\"{miter}\""
+            );
+            if let Some(dashes) = &stroke_style.dash_sequence {
+                let dashes = dashes
+                    .iter()
+                    .map(f64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                stroke_geometry.push_str(&format!(
+                    " stroke-dasharray=\"{dashes}\" stroke-dashoffset=\"{}\"",
+                    stroke_style.dash_offset
+                ));
+            }
             let weight = text_weight(object)?;
             let italic = if text_italic(object)? {
                 "italic"
@@ -18281,7 +18299,7 @@ impl OfdDocument {
                 return Err(OfdError::Invalid("text HScale must be positive".into()));
             }
             let direction = i32::from(text_direction(object, "CharDirection")?);
-            let style = format!("font-size=\"{size}\" font-family=\"{}\" font-weight=\"{weight}\" font-style=\"{italic}\" fill=\"{fill}\" fill-opacity=\"{fill_opacity}\" stroke=\"{stroke}\" stroke-opacity=\"{stroke_opacity}\" stroke-width=\"{line_width}\"", escape_xml(family));
+            let style = format!("font-size=\"{size}\" font-family=\"{}\" font-weight=\"{weight}\" font-style=\"{italic}\" fill=\"{fill}\" fill-opacity=\"{fill_opacity}\" stroke=\"{stroke}\" stroke-opacity=\"{stroke_opacity}\" stroke-width=\"{line_width}\" {stroke_geometry}", escape_xml(family));
             let glyph_paths = svg_glyph_paths(
                 self,
                 object,
@@ -18289,7 +18307,7 @@ impl OfdDocument {
                 size,
                 h_scale,
                 direction,
-                &format!("fill=\"{fill}\" fill-opacity=\"{fill_opacity}\" stroke=\"{stroke}\" stroke-opacity=\"{stroke_opacity}\" stroke-width=\"{line_width}\""),
+                &format!("fill=\"{fill}\" fill-opacity=\"{fill_opacity}\" stroke=\"{stroke}\" stroke-opacity=\"{stroke_opacity}\" stroke-width=\"{line_width}\" {stroke_geometry}"),
             )?;
             if glyph_paths.is_some() {
                 svg.push_str("<g opacity=\"0\">");
@@ -32379,9 +32397,10 @@ fn svg_glyph_paths(
                     }
                     Ok(values)
                 })
-                .transpose()?;
+                .transpose()?
+                .unwrap_or([scale * h_scale, 0., 0., -scale, 0., 0.]);
             let mut outline = SvgGlyphOutline {
-                transform: glyph_matrix,
+                transform: Some(glyph_matrix),
                 ..SvgGlyphOutline::default()
             };
             if face.outline_glyph(*glyph, &mut outline).is_none() {
@@ -32395,13 +32414,9 @@ fn svg_glyph_paths(
             if outline.data.len() > 1_000_000 || output.len() > 32_000_000 {
                 return Err(OfdError::Limit("CGTransform outline is too large".into()));
             }
-            if cff_matrices.is_some() {
-                // Bake the font matrix into geometry so it does not also scale
-                // the TextObject's stroke width or user-space paint coordinates.
-                output.push_str(&format!("<path data-ofd-glyph=\"{}\" transform=\"translate({x} {y}) rotate({direction})\" d=\"{}\" {paint}/>", glyph.0, outline.data));
-            } else {
-                output.push_str(&format!("<path data-ofd-glyph=\"{}\" transform=\"translate({x} {y}) rotate({direction}) scale({} {})\" d=\"{}\" {paint}/>", glyph.0, scale * h_scale, -scale, outline.data));
-            }
+            // Font scaling belongs to glyph geometry, not to the document's
+            // stroke width or user-space paint coordinates.
+            output.push_str(&format!("<path data-ofd-glyph=\"{}\" transform=\"translate({x} {y}) rotate({direction})\" d=\"{}\" {paint}/>", glyph.0, outline.data));
         }
     }
     Ok(Some(SvgGlyphPaths {
@@ -33020,22 +33035,11 @@ fn resolved_stroke_style(
             .attribute(name)
             .or_else(|| draw_style.attrs.get(name).map(String::as_str))
     };
-    if is_element(object, "TextObject") {
-        let line_width = svg_number(attribute("LineWidth"), 0.353)?;
-        if line_width <= 0.0 {
-            return Err(OfdError::Invalid("text LineWidth must be positive".into()));
-        }
-        return Ok(StrokeStyleInfo {
-            line_width,
-            cap: None,
-            join: None,
-            miter_limit: None,
-            dash_pattern: None,
-            dash_sequence: None,
-            dash_offset: 0.0,
-        });
+    let text = is_element(object, "TextObject");
+    let line_width = svg_number(attribute("LineWidth"), if text { 0.353 } else { 0.4 })?;
+    if text && line_width <= 0.0 {
+        return Err(OfdError::Invalid("text LineWidth must be positive".into()));
     }
-    let line_width = svg_number(attribute("LineWidth"), 0.4)?;
     let cap = match attribute("Cap").unwrap_or("Butt") {
         value if value.eq_ignore_ascii_case("Butt") => "butt",
         value if value.eq_ignore_ascii_case("Round") => "round",
@@ -37518,6 +37522,54 @@ fn attachments_xml(attachments: &[AttachmentInfo]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_stroke_resolves_geometry_and_direct_overrides() {
+        let xml = roxmltree::Document::parse(
+            r#"<TextObject xmlns="http://www.ofdspec.org/2016" Cap="Square" DashOffset="0.75"/>"#,
+        )
+        .unwrap();
+        let style = super::ResolvedDrawStyle {
+            attrs: [
+                ("LineWidth", "0.8"),
+                ("Cap", "Round"),
+                ("Join", "Bevel"),
+                ("MiterLimit", "7"),
+                ("DashPattern", "2 1 3 1"),
+                ("DashOffset", "0.25"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, value.to_owned()))
+            .collect(),
+            ..Default::default()
+        };
+        let stroke = super::resolved_stroke_style(xml.root_element(), &style).unwrap();
+        assert_eq!(stroke.line_width, 0.8);
+        assert_eq!(stroke.cap.as_deref(), Some("square"));
+        assert_eq!(stroke.join.as_deref(), Some("bevel"));
+        assert_eq!(stroke.miter_limit, Some(7.));
+        assert_eq!(stroke.dash_sequence, Some(vec![2., 1., 3., 1.]));
+        assert_eq!(stroke.dash_offset, 0.75);
+    }
+
+    #[test]
+    fn text_stroke_rejects_invalid_geometry() {
+        for attribute in [
+            "Cap=\"invalid\"",
+            "Join=\"invalid\"",
+            "MiterLimit=\"0\"",
+            "DashPattern=\"2 -1\"",
+            "DashPattern=\"2 1\" DashOffset=\"NaN\"",
+            "LineWidth=\"0\"",
+        ] {
+            let source = format!("<TextObject xmlns=\"http://www.ofdspec.org/2016\" {attribute}/>");
+            let xml = roxmltree::Document::parse(&source).unwrap();
+            assert!(
+                super::resolved_stroke_style(xml.root_element(), &Default::default()).is_err(),
+                "{attribute}"
+            );
+        }
+    }
+
     #[test]
     fn independent_composite_resource_can_be_shared_by_a_pattern_and_page_object() {
         let mut document = OfdDocument::new();

@@ -1083,6 +1083,13 @@ embedded font glyph outlines when `CGTransform` supplies glyph IDs.
 
 ## SVG 字体与绘制效果
 
+Mapped TrueType and CFF glyphs bake their font matrix into outline geometry,
+keeping stroke widths in the owning object's coordinate units. Text paint
+resolves cap/join/miter and dash parameters from the object and its DrawParam.
+Independent PDF raster tests cover ordinary, affine, reflected, solid and dashed
+mapped glyphs; OFD save/reopen retains the raster. These changes are unreleased.
+
+
 Standalone SVG previews carry visible embedded TrueType/OpenType sfnt fonts as
 data URLs, up to eight MiB of source font bytes per page. Fonts with the same
 declared name receive distinct SVG family names. All embedded faces use internal
