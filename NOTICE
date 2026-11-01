@@ -19,6 +19,13 @@ License: MIT OR Apache-2.0; both license texts are retained in that directory.
 Changes add missing-glyph ActualText, explicit lifetimes, formatting and
 OFD-specific package metadata/default features. See its README for details.
 
+Bundled SVG rasterizers:
+vendor/ofdrw-resvg-045 and vendor/ofdrw-resvg-048 derive from Linebender resvg
+0.45.1 and 0.48.1. Authors: the Resvg Authors and upstream contributors.
+License: MIT OR Apache-2.0; both license texts are retained in each directory.
+Changes fix coordinate budgets for nested layers, masks and pattern tiles.
+Each UPSTREAM.md records the source commit and local changes.
+
 Additional font metric and glyph-list notices:
 
 Adobe Core 14 font metrics

@@ -2133,13 +2133,33 @@ glyphs and 500,000 unique-outline points are processed. Repeated glyph bounds
 are cached. Antialiasing at former object boundaries can differ after coalescing;
 independent original-PDF rasters verify the paint.
 
-Empty replacements now remove nonpainting native text runs (`Fill="false"`
-and no stroke), preserving interleaved graphics and the original PDF text
-advance. This includes invisible `3 Tr` text. A scope containing painted text
-still rejects an empty replacement before editing the OFD page.
+Empty replacements remove nonpainting native text runs (`Fill="false"` and
+no stroke), preserving interleaved graphics and the original PDF text advance.
+This includes invisible `3 Tr` text, zero object opacity and zero fill/stroke
+alpha, and does not require embedded glyph data.
+**Unreleased main:** Painted runs with complete embedded glyph mappings are
+converted to separate vector paths inside native composite resources. This
+removes their text semantics while retaining glyph paint order, original
+Boundary clipping, affine placement, object opacity and explicit clip Areas.
+TrueType, raw/OpenType CFF and per-glyph CID CFF matrices are supported. Fill
+and stroke paints are retained. Stroked glyph geometry is normalized into user
+space before applying line parameters; pattern placement and inline pattern
+object IDs are retained across reparenting. At most 10,000 painted glyphs,
+500,000 outline points
+and 32 MB of encoded outline/resource data are processed per marked sequence;
+each resource reserves at most 100,000 graphic IDs including pattern cells.
+Invalid input or a failed conversion leaves the document unchanged.
+Original-PDF Ghostscript/Poppler rasters and native OFD/PDF round trips cover ordinary,
+affine, mirrored, CFF matrix, CID CFF matrix, solid and dashed stroked glyphs.
+For these outlined runs, strokes retain cap/join/miter and dash state in user-space units, following
+[ISO 32000-1 section 9.3.6](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf).
 
-Empty replacements of painted text, shorter replacements across incompatible or interleaved
-runs, changed text without a usable embedded glyph program, scopes crossing composite objects and
+PNG rendering translates the raster budget into each offscreen layer coordinate
+system and gives pattern tiles their own surface budget. All viewport clips
+remain intact, including fractional edge coverage.
+
+Shorter replacements across incompatible or interleaved runs, changed text
+without a usable embedded glyph program, scopes crossing composite objects and
 structure-tree ActualText remain unsupported. Those marked-content replacement
 cases return errors rather than silently importing the original text.
 

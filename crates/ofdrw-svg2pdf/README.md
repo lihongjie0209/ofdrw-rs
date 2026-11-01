@@ -23,3 +23,7 @@ converter versions must not be replaced or republished.
 Raster conversion honors SVG image-rendering per placement. Nearest sampling
 sets PDF Interpolate=false; smooth sampling sets true on both color images and
 associated alpha images. JPEG samples retain their original compressed bytes.
+
+The raster backend uses `ofdrw-resvg` 0.45.1-ofdrw.1 to preserve nested
+layer, mask and pattern tile coordinates. Publish the renderer dependency with
+`Publish SVG renderers` before publishing this converter version.

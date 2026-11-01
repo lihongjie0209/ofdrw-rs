@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/ofdrw", "crates/ofdrw-ffi", "crates/ofdrw-svg2pdf"]
+exclude = ["vendor/ofdrw-resvg-048", "vendor/ofdrw-resvg-045"]
 resolver = "2"
 
 [workspace.package]

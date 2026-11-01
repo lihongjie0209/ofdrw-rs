@@ -1931,6 +1931,42 @@ test('import short PDF ActualText across consecutive native text runs', () => {
   }
 });
 
+test('import empty PDF ActualText without losing painted glyphs', () => {
+  for (const name of [
+    'truetype',
+    'affine',
+    'reflected',
+    'cff',
+    'cff-matrix',
+    'cid-cff-matrix',
+    'truetype-stroke',
+    'cff-stroke',
+    'truetype-dashed-stroke',
+    'cff-dashed-stroke',
+    'cff-opentype',
+    'truetype-matrix-stroke',
+    'cff-matrix-stroke',
+    'cff-pattern',
+    'cff-pattern-matrix-stroke',
+  ]) {
+    const document = Document.fromPdfBytes(fs.readFileSync(fixture(`actual-text-empty-${name}.pdf`)));
+    try {
+      assert.deepEqual(document.pageText(0), [], name);
+      const png = document.pagePng(0, 144);
+      const reopened = Document.fromBytes(document.toBytes());
+      try {
+        assert.deepEqual(reopened.pagePng(0, 144), png, name);
+        assert.deepEqual(reopened.validateReferences(), [], name);
+        const exported = Document.fromPdfBytes(reopened.toPdf());
+        try {
+          assert.equal(exported.pageText(0).join(''), '', name);
+          assert.deepEqual(exported.validateReferences(), [], name);
+        } finally { exported.close(); }
+      } finally { reopened.close(); }
+    } finally { document.close(); }
+  }
+});
+
 test('import a sixteen-bit PDF image through the C ABI', () => {
   const document = Document.fromPdfBytes(fs.readFileSync(fixture('gray-16-bit.pdf')));
   try {

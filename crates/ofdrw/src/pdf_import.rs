@@ -1239,7 +1239,8 @@ fn attach_text_paint(
         attrs.push_str(" Fill=\"false\"");
     }
     if stroke {
-        let width = graphics.line_width * graphics.stroke_scale()? * MM_PER_PT;
+        let scale = graphics.stroke_scale()? * MM_PER_PT;
+        let width = graphics.line_width * scale;
         if !width.is_finite() {
             return Err(OfdError::Invalid(
                 "PDF text stroke width is not representable".into(),
@@ -1247,6 +1248,22 @@ fn attach_text_paint(
         }
         let width = if width > 0.0 { width } else { 0.1 };
         attrs.push_str(&format!(" Stroke=\"true\" LineWidth=\"{width}\""));
+        let style = PathStyle {
+            cap: Some(graphics.line_cap),
+            join: Some(graphics.line_join),
+            miter_limit: Some(graphics.miter_limit),
+            dash_sequence: graphics
+                .dash_pattern
+                .as_ref()
+                .map(|values| values.iter().map(|value| value * scale).collect()),
+            dash_offset: graphics
+                .dash_pattern
+                .as_ref()
+                .map(|_| graphics.dash_phase * scale),
+            ..PathStyle::default()
+        };
+        style.validate_stroke()?;
+        attrs.push_str(&style.xml_attributes());
     }
     let mut colors = String::new();
     for (name, enabled, [r, g, b], alpha) in [
@@ -15304,11 +15321,63 @@ mod tests {
     }
 
     #[test]
+    fn empty_actual_text_keeps_painted_outlines_and_following_cursor() {
+        let plain = mapped_actual_text_pdf(b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj (A) Tj ET");
+        let reference = OfdDocument::from_pdf_bytes(&plain)
+            .unwrap()
+            .page_png(0, 144.)
+            .unwrap();
+        let bytes = mapped_actual_text_pdf(
+            b"BT /F1 12 Tf 10 20 Td /Span << /ActualText () >> BDC (A) Tj (B) Tj EMC (A) Tj ET",
+        );
+        let doc = OfdDocument::from_pdf_bytes(&bytes).unwrap();
+        assert_eq!(doc.page_text(0).unwrap(), ["A"]);
+        assert_eq!(doc.page_png(0, 144.).unwrap(), reference);
+        assert!(doc.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_text(0).unwrap(), ["A"]);
+        assert_eq!(reopened.page_png(0, 144.).unwrap(), reference);
+    }
+
+    #[test]
+    fn consecutive_empty_actual_text_scopes_do_not_revisit_prior_composites() {
+        let plain = mapped_actual_text_pdf(b"BT /F1 12 Tf 10 20 Td (A) Tj (B) Tj (A) Tj ET");
+        let reference = OfdDocument::from_pdf_bytes(&plain)
+            .unwrap()
+            .page_png(0, 144.)
+            .unwrap();
+        let content = b"BT /F1 12 Tf 10 20 Td /Span << /ActualText () >> BDC (A) Tj EMC /Span << /ActualText () >> BDC (B) Tj EMC (A) Tj ET";
+        let doc = OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(content)).unwrap();
+        assert_eq!(doc.page_text(0).unwrap(), ["A"]);
+        assert_eq!(doc.page_png(0, 144.).unwrap(), reference);
+        assert!(doc.validate_references().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_actual_text_keeps_text_clip_geometry_without_selectable_text() {
+        for mode in [4, 7] {
+            let plain =
+                format!("BT /F1 12 Tf 10 20 Td {mode} Tr (A) Tj ET 1 0 0 rg 0 0 144 96 re f");
+            let reference = OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(plain.as_bytes()))
+                .unwrap()
+                .page_png(0, 144.)
+                .unwrap();
+            let content = format!("/Span << /ActualText () >> BDC BT /F1 12 Tf 10 20 Td {mode} Tr (A) Tj ET EMC 1 0 0 rg 0 0 144 96 re f");
+            let doc =
+                OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(content.as_bytes())).unwrap();
+            assert!(doc.page_text(0).unwrap().is_empty());
+            assert_eq!(doc.page_png(0, 144.).unwrap(), reference);
+            let exported = OfdDocument::from_pdf_bytes(&doc.to_pdf().unwrap()).unwrap();
+            assert!(exported.page_text(0).unwrap().is_empty());
+            assert!(exported.validate_references().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn actual_text_malformed_and_unsupported_sequences_return_explicit_errors() {
         for content in [
             b"/Span << /ActualText 123 >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC".as_slice(),
             b"/Span << /ActualText <FEFF00> >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
-            b"/Span << /ActualText () >> BDC BT /F1 12 Tf 10 20 Td (A) Tj ET EMC",
         ] {
             assert!(
                 matches!(OfdDocument::from_pdf_bytes(&mapped_actual_text_pdf(content)), Err(OfdError::Invalid(message)) if message.contains("ActualText"))

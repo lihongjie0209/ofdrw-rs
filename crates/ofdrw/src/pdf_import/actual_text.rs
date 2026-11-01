@@ -2,6 +2,7 @@
 use super::*;
 
 mod coalesce;
+mod outlines;
 
 type NativeRun<'a, 'input> = (
     roxmltree::Node<'a, 'input>,
@@ -107,24 +108,22 @@ impl Replacement {
         }
         let source = parsed.input_text();
         if self.text.is_empty() {
-            // These objects contribute semantics only. Removing their native
-            // text does not change graphics or the already advanced PDF cursor.
-            if texts.iter().any(|object| {
-                object.attribute("Fill") != Some("false")
-                    || object
-                        .attribute("Stroke")
-                        .is_some_and(|value| value != "false")
-            }) {
-                return Err(invalid(
-                    "empty replacement of painted text is not yet supported",
-                ));
-            }
+            let mut staged = output.clone();
+            let mut budget = outlines::Budget::default();
             let mut result = source.to_owned();
             for object in texts.iter().rev() {
-                result.replace_range(object.range(), "");
+                let replacement = if nonpainting_text(*object)? {
+                    String::new()
+                } else {
+                    outlines::replace(&mut staged, &page, *object, &mut budget)?
+                };
+                result.replace_range(object.range(), &replacement);
             }
-            return output.set_entry(&page.path, result.into_bytes());
+            staged.set_entry(&page.path, result.into_bytes())?;
+            *output = staged;
+            return Ok(());
         }
+
         let mut runs = Vec::new();
         for object in texts {
             let codes = object
@@ -218,6 +217,39 @@ impl Replacement {
         }
         output.set_entry(&page.path, result.into_bytes())
     }
+}
+
+fn nonpainting_text(object: roxmltree::Node<'_, '_>) -> Result<bool, OfdError> {
+    if crate::visible_graphic_alpha(object)?.is_none() {
+        return Ok(true);
+    }
+    let paint = |name: &str, default: bool, color: &str| -> Result<bool, OfdError> {
+        let enabled = object.attribute(name).map_or(Ok(default), |value| {
+            if value.eq_ignore_ascii_case("true") {
+                Ok(true)
+            } else if value.eq_ignore_ascii_case("false") {
+                Ok(false)
+            } else {
+                Err(invalid("has invalid text paint flags"))
+            }
+        })?;
+        if !enabled {
+            return Ok(false);
+        }
+        let alpha = object
+            .children()
+            .find(|node| is_ofd_element(*node, color))
+            .and_then(|node| node.attribute("Alpha"))
+            .map(|value| {
+                value
+                    .parse::<u8>()
+                    .map_err(|_| invalid("has invalid text paint alpha"))
+            })
+            .transpose()?
+            .unwrap_or(255);
+        Ok(alpha != 0)
+    };
+    Ok(!paint("Fill", true, "FillColor")? && !paint("Stroke", false, "StrokeColor")?)
 }
 
 fn mapped_glyphs(object: roxmltree::Node<'_, '_>, text: &str) -> Result<Vec<u32>, OfdError> {
@@ -632,6 +664,8 @@ mod tests {
         .apply(&mut doc, 0)
         .unwrap();
         assert_eq!(doc.page_text(0).unwrap(), ["A", "中"]);
+        doc.add_text_object(0, "unmapped", [0., 0., 20., 10.], 5., None)
+            .unwrap();
         let before = doc.to_bytes().unwrap();
         assert!(Replacement {
             text: String::new(),
@@ -686,21 +720,88 @@ mod tests {
     }
 
     #[test]
-    fn empty_replacement_rejects_mixed_visible_and_hidden_text_atomically() {
-        for (fill, stroke) in [(true, false), (false, true)] {
-            let (mut doc, ids) = shaped(&["A", "B"]);
-            doc.set_page_text_paint_flags(0, &ids[0], Some(false), Some(false))
+    fn empty_replacement_preserves_painted_and_hidden_runs() {
+        let (mut doc, ids) = shaped(&["A", "B"]);
+        doc.set_page_text_paint_flags(0, &ids[0], Some(false), Some(false))
+            .unwrap();
+        let before = doc.page_png(0, 144.).unwrap();
+        Replacement {
+            text: String::new(),
+            first_id: ids[0].parse().unwrap(),
+        }
+        .apply(&mut doc, 0)
+        .unwrap();
+        assert!(doc.page_text(0).unwrap().is_empty());
+        assert_eq!(doc.page_png(0, 144.).unwrap(), before);
+        assert!(doc.validate_references().unwrap().is_empty());
+        let reopened = OfdDocument::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+        assert!(reopened.page_text(0).unwrap().is_empty());
+        assert_eq!(reopened.page_png(0, 144.).unwrap(), before);
+    }
+
+    #[test]
+    fn empty_replacement_missing_glyph_program_does_not_partially_remove_hidden_text() {
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(30., 20.).unwrap();
+        let first = doc
+            .add_text_object(0, "visible", [0., 0., 20., 10.], 5., None)
+            .unwrap();
+        let hidden = doc
+            .add_text_object(0, "hidden", [0., 10., 20., 10.], 5., None)
+            .unwrap();
+        doc.set_page_text_paint_flags(0, &hidden, Some(false), Some(false))
+            .unwrap();
+        let font = doc
+            .add_embedded_font(
+                "DejaVu",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/dejavu-serif.ttf"
+                )),
+            )
+            .unwrap()
+            .to_string();
+        doc.add_shaped_text_object(0, "AB", [0., 0., 20., 10.], 5., &font)
+            .unwrap();
+        let before = doc.to_bytes().unwrap();
+        assert!(Replacement {
+            text: String::new(),
+            first_id: first.parse().unwrap()
+        }
+        .apply(&mut doc, 0)
+        .is_err());
+        assert_eq!(doc.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn zero_alpha_text_does_not_require_an_embedded_glyph_program() {
+        for object_alpha in [false, true] {
+            let mut doc = OfdDocument::new();
+            doc.add_blank_page(30., 20.).unwrap();
+            let id = doc
+                .add_text_object(0, "suppressed", [0., 0., 20., 10.], 5., None)
                 .unwrap();
-            doc.set_page_text_paint_flags(0, &ids[1], Some(fill), Some(stroke))
+            if object_alpha {
+                doc.set_page_object_alpha(0, &id, 0).unwrap();
+            } else {
+                doc.set_page_object_solid_fill(
+                    0,
+                    &id,
+                    crate::SolidPaintStyle {
+                        color: [255, 0, 0],
+                        alpha: 0,
+                    },
+                )
                 .unwrap();
-            let before = doc.to_bytes().unwrap();
-            assert!(Replacement {
+            }
+            Replacement {
                 text: String::new(),
-                first_id: ids[0].parse().unwrap(),
+                first_id: id.parse().unwrap(),
             }
             .apply(&mut doc, 0)
-            .is_err());
-            assert_eq!(doc.to_bytes().unwrap(), before);
+            .unwrap();
+            assert!(doc.page_text_objects(0).unwrap().is_empty());
+            assert!(doc.validate_references().unwrap().is_empty());
         }
     }
 

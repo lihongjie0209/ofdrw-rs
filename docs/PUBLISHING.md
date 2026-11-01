@@ -65,6 +65,15 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 [转换器说明](../crates/ofdrw-svg2pdf/README.md)。
 
 
+尚未发布的渲染修复新增两个独立依赖版本：`ofdrw-resvg`
+`0.45.1-ofdrw.1` 与 `0.48.1-ofdrw.1`。其来源和许可证保留在
+`vendor/ofdrw-resvg-045`、`vendor/ofdrw-resvg-048`。
+等待对应 main 提交的完整 CI 成功后，先运行 `Publish SVG renderers`
+（`publish-renderers.yml`），输入该提交 SHA。确认两个版本均已在 crates.io
+可见，再发布依赖它们的 `ofdrw-svg2pdf 0.13.0-ofdrw.2`，最后发布新核心版本。
+这些工作流使用现有的 `CARGO_REGISTRY_TOKEN`，无需增加凭据。
+已发布的 `ofdrw 0.2.0` 和转换器旧版本保持不变。
+
 1. 更新 Rust 核心、C ABI、Python 和 Node.js 的版本，运行 `scripts/check_release_version.py vX.Y.Z`。
 2. 将提交推送到 `main`，等待该提交的完整 CI 成功。
 3. 创建并推送相同提交的 `vX.Y.Z` 标签。

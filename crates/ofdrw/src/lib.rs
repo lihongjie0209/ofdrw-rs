@@ -12,6 +12,8 @@ mod pdf_calculator;
 mod pdf_export;
 mod pdf_import;
 mod pdf_link_action;
+#[cfg(test)]
+mod raster_layer_tests;
 mod rtl_semantics;
 
 pub use encryption::{
@@ -20559,6 +20561,21 @@ impl OfdDocument {
         size: [f64; 2],
         child_xml: impl FnOnce(usize, f64, f64) -> String,
     ) -> Result<String, OfdError> {
+        self.add_composite_graphic_resource_with_children(page_index, size, 1, child_xml)
+    }
+
+    fn add_composite_graphic_resource_with_children(
+        &mut self,
+        page_index: usize,
+        size: [f64; 2],
+        child_count: usize,
+        child_xml: impl FnOnce(usize, f64, f64) -> String,
+    ) -> Result<String, OfdError> {
+        if child_count == 0 || child_count > 100_000 {
+            return Err(OfdError::Limit(
+                "composite child count must be between 1 and 100000".into(),
+            ));
+        }
         let [width, height] = size;
         if size.iter().any(|value| !value.is_finite() || *value <= 0.) {
             return Err(OfdError::Invalid(
@@ -20597,7 +20614,7 @@ impl OfdDocument {
             .checked_add(1)
             .ok_or_else(|| OfdError::Limit("object identifier overflow".into()))?;
         let next_id = child_id
-            .checked_add(1)
+            .checked_add(child_count)
             .ok_or_else(|| OfdError::Limit("object identifier overflow".into()))?;
         let resource_name = format!("CompositeRes_{unit_id}.xml");
         let resource_path = resolve_path(&parent_path(&root), &resource_name)?;
@@ -20624,7 +20641,7 @@ impl OfdDocument {
             .ok_or_else(|| OfdError::Invalid(format!("{root} has no MaxUnitID")))?;
         updated_document.replace_range(
             element_content_range(updated_max, &updated_document)?,
-            &child_id.to_string(),
+            &(next_id - 1).to_string(),
         );
         let child_xml = child_xml(child_id, width, height);
         let namespace = parsed_document

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "ofdrw-svg2pdf"
-version = "0.13.0-ofdrw.1"
+version = "0.13.0-ofdrw.2"
 authors = [
     "Laurenz Stampfl <laurenz.stampfl@gmail.com>",
     "Martin Haug <mhaug@live.de>",
@@ -88,7 +88,9 @@ version = "1.18"
 version = "0.12"
 
 [dependencies.resvg]
-version = "0.45"
+package = "ofdrw-resvg"
+path = "../../vendor/ofdrw-resvg-045"
+version = "0.45.1-ofdrw.1"
 optional = true
 default-features = false
 

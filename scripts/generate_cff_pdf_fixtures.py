@@ -88,7 +88,7 @@ def font(cid=False, font_matrix=None, fd_matrix=None, dingbats=False, long_name=
     return output.getvalue(), raw
 
 
-def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal=False, actual_text=None):
+def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal=False, actual_text=None, paint=b"", pattern=False):
     result = objects(font_bytes, simple=simple)
     if simple:
         result[4] = result[4].replace(b"/Subtype /TrueType", b"/Subtype /Type1")
@@ -122,6 +122,13 @@ def pdf(font_bytes, raw=False, simple=False, cid=False, vertical=False, internal
         content = result[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
         result[3] = stream(b"", content)
         result[4] = result[4].replace(b"Identity-H", b"Identity-V")
+    if pattern:
+        reference = str(len(result) + 1).encode() + b" 0 R"
+        result[2] = result[2].replace(b"/Resources <<", b"/Resources << /Pattern << /P " + reference + b" >>", 1)
+        result.append(stream(b"/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 6 6] /XStep 6 /YStep 6 /Resources << >>", b"1 0 0 rg 0 0 3 6 re f 0 0 1 rg 3 0 3 6 re f"))
+    if paint:
+        content = result[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
+        result[3] = stream(b"", content.replace(b"BT", b"BT " + paint, 1))
     if actual_text is not None:
         content = result[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
         replacement = (b"\xfe\xff" + actual_text.encode("utf-16-be")).hex().upper().encode()

@@ -19,7 +19,7 @@ from generate_pdf_glyph_fixtures import objects
 from generate_nested_stitching_fixture import pdf_bytes, stream
 
 
-def truetype(fixtures, matrix):
+def truetype(fixtures, matrix, empty=False, paint=b""):
     program = TTFont(fixtures / "dejavu-serif.ttf", recalcTimestamp=False)
     options = subset.Options()
     options.recalc_timestamp = False
@@ -34,7 +34,9 @@ def truetype(fixtures, matrix):
     program.save(output)
     parts = objects(output.getvalue(), simple=True)
     content = parts[3].split(b"stream\n", 1)[1].rsplit(b"endstream", 1)[0].rstrip(b"\n")
-    parts[3] = stream(b"", b"q " + matrix + b" cm /Span << /ActualText (X) >> BDC\n" + content + b"\nEMC Q")
+    if paint:
+        content = content.replace(b"BT", b"BT " + paint, 1)
+    parts[3] = stream(b"", b"q " + matrix + b" cm /Span << /ActualText " + (b"()" if empty else b"(X)") + b" >> BDC\n" + content + b"\nEMC Q")
     return pdf_bytes(parts)
 
 

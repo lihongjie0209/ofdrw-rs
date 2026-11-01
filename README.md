@@ -13,6 +13,7 @@
 版本变更见 [v0.2.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
 主分支另含批注图形动作的读取、追加、删除和触发区域编辑接口，支持 Rust、C、Python、Go 和 Node.js；
 这些尚未发布的接口见[批注与图章](docs/FEATURES.md#批注与图章)。
+主分支还支持将空 ActualText 覆盖的可见字形保留为矢量绘制，详见[PDF 导入范围](docs/FEATURES.md#pdf-导入与兼容范围)。
 
 ## 安装渠道
 

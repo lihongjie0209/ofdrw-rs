@@ -1,5 +1,11 @@
 # Unreleased
 
+- Import empty ActualText over painted embedded glyphs as separate native vector
+  paths, keeping paint order, opacity, affine placement and clipping without
+  retaining the suppressed text. Add independent font/transform/stroke rasters
+  and OFD/PDF round trips. Fix nested raster layer coordinate budgets while preserving viewport clips
+  and fractional edge coverage.
+
 - Add annotation graphic action reading, appending, removal and rectangular
   trigger-region editing in Rust, C, Python, Go and Node.js. Supports ordered
   CLICK URI, page, bookmark and attachment targets, with same-document checks
