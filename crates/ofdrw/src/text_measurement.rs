@@ -35,6 +35,17 @@ pub(super) struct ShapedLines {
     pub(super) group_widths: Vec<Vec<f64>>,
 }
 
+pub(super) enum PreparedFlowLines {
+    Plain(Vec<StyledFlowLine>),
+    Shaped(ShapedLines),
+}
+
+pub(super) struct PreparedFlowText {
+    pub(super) metrics: FlowTextMetrics,
+    pub(super) preparation: PreparedSpans,
+    pub(super) lines: PreparedFlowLines,
+}
+
 impl OfdDocument {
     /// Measure styled or shaped flowing text without changing the document.
     ///
@@ -65,70 +76,86 @@ impl OfdDocument {
         content_width: f64,
         style: &FlowTextStyle,
     ) -> Result<FlowTextMetrics, OfdError> {
+        Ok(self
+            .prepare_measured_flow_text(document_index, spans, content_width, style)?
+            .metrics)
+    }
+
+    pub(super) fn prepare_measured_flow_text(
+        &self,
+        document_index: usize,
+        spans: &[FlowSpan],
+        content_width: f64,
+        style: &FlowTextStyle,
+    ) -> Result<PreparedFlowText, OfdError> {
         let preparation = self.prepare_flow_spans(document_index, spans, style, content_width)?;
         let prepared = &preparation.spans;
         let leading = style.line_height - style.font_size;
-        let mut lines: Vec<FlowLineMetrics> = if style.shape {
-            self.prepare_shaped_flow_lines(
+        let flow_lines = if style.shape {
+            PreparedFlowLines::Shaped(self.prepare_shaped_flow_lines(
                 document_index,
                 spans,
                 style,
                 content_width,
                 &preparation,
                 true,
-            )?
-            .lines
-            .into_iter()
-            .map(|line| {
-                let baseline = if line.units.is_empty() {
-                    style.font_size
-                } else {
-                    line.units
-                        .iter()
-                        .map(|unit| prepared[unit.span_index].font_size)
-                        .fold(0., f64::max)
-                };
-                FlowLineMetrics {
-                    text: line.units.into_iter().map(|u| u.text).collect(),
-                    x: line.indent,
-                    y: 0.,
-                    width: line.width,
-                    height: baseline + leading,
-                    baseline,
-                    paragraph_start: line.paragraph_start,
-                }
-            })
-            .collect()
+            )?)
         } else {
             let paragraphs = styled_flow_paragraphs(spans, prepared);
-            wrap_styled_flow_lines(
+            PreparedFlowLines::Plain(wrap_styled_flow_lines(
                 &paragraphs,
                 content_width,
                 FlowIndents::new(preparation.first_line_indent, style.rest_line_indent),
                 prepared,
                 style.indent_each_paragraph,
-            )?
-            .into_iter()
-            .map(|line| {
-                let baseline = if line.glyphs.is_empty() {
-                    style.font_size
-                } else {
-                    line.glyphs
-                        .iter()
-                        .map(|glyph| prepared[glyph.span_index].font_size)
-                        .fold(0., f64::max)
-                };
-                FlowLineMetrics {
-                    text: line.glyphs.into_iter().map(|g| g.ch).collect(),
-                    x: line.indent,
-                    y: 0.,
-                    width: line.width,
-                    height: baseline + leading,
-                    baseline,
-                    paragraph_start: line.paragraph_start,
-                }
-            })
-            .collect()
+            )?)
+        };
+        let mut lines: Vec<FlowLineMetrics> = match &flow_lines {
+            PreparedFlowLines::Shaped(shaped) => shaped
+                .lines
+                .iter()
+                .map(|line| {
+                    let baseline = if line.units.is_empty() {
+                        style.font_size
+                    } else {
+                        line.units
+                            .iter()
+                            .map(|unit| prepared[unit.span_index].font_size)
+                            .fold(0., f64::max)
+                    };
+                    FlowLineMetrics {
+                        text: line.units.iter().map(|u| u.text.as_str()).collect(),
+                        x: line.indent,
+                        y: 0.,
+                        width: line.width,
+                        height: baseline + leading,
+                        baseline,
+                        paragraph_start: line.paragraph_start,
+                    }
+                })
+                .collect(),
+            PreparedFlowLines::Plain(plain) => plain
+                .iter()
+                .map(|line| {
+                    let baseline = if line.glyphs.is_empty() {
+                        style.font_size
+                    } else {
+                        line.glyphs
+                            .iter()
+                            .map(|glyph| prepared[glyph.span_index].font_size)
+                            .fold(0., f64::max)
+                    };
+                    FlowLineMetrics {
+                        text: line.glyphs.iter().map(|g| g.ch).collect(),
+                        x: line.indent,
+                        y: 0.,
+                        width: line.width,
+                        height: baseline + leading,
+                        baseline,
+                        paragraph_start: line.paragraph_start,
+                    }
+                })
+                .collect(),
         };
         if lines.is_empty() {
             return Err(OfdError::Invalid(
@@ -167,10 +194,14 @@ impl OfdDocument {
                 ));
             }
         }
-        Ok(FlowTextMetrics {
-            width,
-            height,
-            lines,
+        Ok(PreparedFlowText {
+            metrics: FlowTextMetrics {
+                width,
+                height,
+                lines,
+            },
+            preparation,
+            lines: flow_lines,
         })
     }
 
