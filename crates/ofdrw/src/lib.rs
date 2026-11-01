@@ -1880,6 +1880,65 @@ pub struct TableCellImage {
     pub height: f64,
 }
 
+impl TableCellImage {
+    /// Read an image's intrinsic layout size using Java OFDRW's 5 pixels/mm.
+    ///
+    /// The image is validated before its dimensions are used. Embedded DPI
+    /// metadata does not change this conversion. No document resources are added.
+    pub fn from_intrinsic(data: Vec<u8>, format: &str) -> Result<Self, OfdError> {
+        let (canonical, _) = checked_image_format(&data, format)?;
+        let converted;
+        let raster = match canonical {
+            "JPEG2000" => {
+                converted = jpeg2000_to_png(&data)?;
+                converted.as_slice()
+            }
+            "GBIG2" => {
+                converted = jbig2_to_png(&data)?;
+                converted.as_slice()
+            }
+            _ => data.as_slice(),
+        };
+        let (width, height) = image::ImageReader::new(Cursor::new(raster))
+            .with_guessed_format()
+            .map_err(|error| OfdError::Invalid(format!("cannot identify image: {error}")))?
+            .into_dimensions()
+            .map_err(|error| OfdError::Invalid(format!("cannot read image dimensions: {error}")))?;
+        Ok(Self {
+            data,
+            format: canonical.into(),
+            width: f64::from(width) / 5.,
+            height: f64::from(height) / 5.,
+        })
+    }
+
+    /// Shrink to a positive finite bounding size while retaining aspect ratio.
+    ///
+    /// Images already inside the bounds retain their size. This also works on
+    /// explicitly sized images; it never changes their encoded bytes.
+    pub fn fit_within(mut self, bounds: [f64; 2]) -> Result<Self, OfdError> {
+        if [self.width, self.height, bounds[0], bounds[1]]
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.)
+        {
+            return Err(OfdError::Invalid(
+                "image dimensions and bounds must be positive and finite".into(),
+            ));
+        }
+        let scale = (bounds[0] / self.width)
+            .min(bounds[1] / self.height)
+            .min(1.);
+        self.width *= scale;
+        self.height *= scale;
+        if self.width <= 0. || self.height <= 0. {
+            return Err(OfdError::Invalid(
+                "scaled image dimensions underflow".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 impl Default for TableStyle {
     fn default() -> Self {
         Self {
