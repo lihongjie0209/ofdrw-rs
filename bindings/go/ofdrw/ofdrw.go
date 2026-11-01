@@ -327,6 +327,7 @@ type nativeAPI struct {
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	measureFlowedSpans              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
 	appendPathPage                  func(uintptr, uintptr, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
 	appendImagePage                 func(uintptr, uintptr, *byte, uintptr, *byte, float64, float64) int32
@@ -695,6 +696,7 @@ func loadAPI() error {
 			{"ofd_add_flowed_spans_json", &api.addFlowedSpans},
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
+			{"ofd_measure_flowed_spans_json", &api.measureFlowedSpans},
 			{"ofd_append_text_page_with_font", &api.appendTextWithFont},
 			{"ofd_append_path_page", &api.appendPathPage},
 			{"ofd_append_image_page", &api.appendImagePage},
@@ -1131,6 +1133,25 @@ type FlowTable struct {
 type FlowLayoutResult struct {
 	Pages []int      `json:"pages"`
 	Next  *FlowStart `json:"next"`
+}
+
+// FlowLineMetrics describes one logical wrapped line relative to the paragraph top-left.
+type FlowLineMetrics struct {
+	Text           string  `json:"text"`
+	X              float64 `json:"x"`
+	Y              float64 `json:"y"`
+	Width          float64 `json:"width"`
+	Height         float64 `json:"height"`
+	Baseline       float64 `json:"baseline"`
+	ParagraphStart bool    `json:"paragraph_start"`
+}
+
+// FlowTextMetrics gives unpaginated dimensions, including interior blank lines and gaps.
+// Width is the largest line advance, excluding indentation and alignment offsets.
+type FlowTextMetrics struct {
+	Width  float64           `json:"width"`
+	Height float64           `json:"height"`
+	Lines  []FlowLineMetrics `json:"lines"`
 }
 
 // LayoutBox describes measured content and independent top/right/bottom/left edges.
@@ -10229,6 +10250,50 @@ func (doc *Document) AddBoxLayout(documentIndex int, items []BoxLayoutItem, styl
 	var result BoxLayoutResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		return BoxLayoutResult{}, fmt.Errorf("decode box layout result: %w", err)
+	}
+	return result, nil
+}
+
+// MeasureFlowedSpans computes logical text dimensions without changing pages or resources.
+// Typography matches AddFlowedSpans; geometry, Start and page keep rules are ignored.
+func (doc *Document) MeasureFlowedSpans(documentIndex int, spans []FlowSpan, contentWidth float64, style FlowTextStyle) (FlowTextMetrics, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return FlowTextMetrics{}, err
+	}
+	if documentIndex < 0 {
+		return FlowTextMetrics{}, errors.New("negative document index")
+	}
+	if style == (FlowTextStyle{}) {
+		style = DefaultFlowTextStyle()
+	}
+	payload, err := json.Marshal(struct {
+		Spans        []FlowSpan `json:"spans"`
+		ContentWidth float64    `json:"content_width"`
+		FlowTextStyle
+	}{Spans: spans, ContentWidth: contentWidth, FlowTextStyle: style})
+	if err != nil {
+		return FlowTextMetrics{}, fmt.Errorf("encode text measurement: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return FlowTextMetrics{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.measureFlowedSpans(doc.handle, uintptr(documentIndex), &payloadBytes[0], &buffer)); err != nil {
+		return FlowTextMetrics{}, fmt.Errorf("measure flowed spans: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return FlowTextMetrics{}, err
+	}
+	var result FlowTextMetrics
+	if err := json.Unmarshal(data, &result); err != nil {
+		return FlowTextMetrics{}, fmt.Errorf("decode text metrics: %w", err)
 	}
 	return result, nil
 }

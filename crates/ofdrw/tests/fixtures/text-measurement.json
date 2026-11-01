@@ -1,0 +1,51 @@
+{
+  "reference": "DejaVu Serif hmtx advances, with declared indentation/alignment and line spacing",
+  "font_fixture": "dejavu-serif.ttf",
+  "request": {
+    "content_width": 20,
+    "font_size": 2,
+    "line_height": 3,
+    "paragraph_gap": 1,
+    "first_line_indent": 2,
+    "rest_line_indent": 1,
+    "align": "center",
+    "spans": [
+      {
+        "text": "A\n\nB"
+      }
+    ]
+  },
+  "expected": {
+    "width": 1.4697265625,
+    "height": 11.0,
+    "lines": [
+      {
+        "text": "A",
+        "x": 10.27783203125,
+        "y": 0.0,
+        "width": 1.4443359375,
+        "height": 3.0,
+        "baseline": 2.0,
+        "paragraph_start": false
+      },
+      {
+        "text": "",
+        "x": 10.5,
+        "y": 4.0,
+        "width": 0.0,
+        "height": 3.0,
+        "baseline": 6.0,
+        "paragraph_start": true
+      },
+      {
+        "text": "B",
+        "x": 9.76513671875,
+        "y": 8.0,
+        "width": 1.4697265625,
+        "height": 3.0,
+        "baseline": 10.0,
+        "paragraph_start": true
+      }
+    ]
+  }
+}

@@ -6,7 +6,17 @@ import type { FlowBlock, FlowDocumentOptions, FlowLayoutResult } from '../index'
 
 import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index';
 
+import type { FlowTextMetrics, FlowLineMetrics } from '../index';
+
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const measured: FlowTextMetrics = document.measureFlowedSpans(0, [{text: 'Hello'}], 40, {font_size: 5});
+  const firstMeasured: FlowLineMetrics | undefined = measured.lines[0];
+  if (firstMeasured) void [firstMeasured.x, firstMeasured.y, firstMeasured.baseline, firstMeasured.paragraph_start];
+  // @ts-expect-error measurement width must be numeric
+  document.measureFlowedSpans(0, [{text: 'Hello'}], '40');
+  // @ts-expect-error the result contains metrics, not page indexes
+  const wrongMetrics: number[] = document.measureFlowedSpans(0, [{text: 'Hello'}], 40);
+  void wrongMetrics;
   const boxes: BoxLayoutItem[] = [
     {type: 'box', size: [20, 10], margin: [1, 1, 1, 1], float: 'right', clear: 'none', alpha: 128},
     {type: 'line_break'}, {type: 'page_break'},

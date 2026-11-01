@@ -21,6 +21,8 @@ mod pdf_link_action;
 #[cfg(test)]
 mod raster_layer_tests;
 mod rtl_semantics;
+mod text_measurement;
+pub use text_measurement::{FlowLineMetrics, FlowTextMetrics};
 
 pub use encryption::{
     CertificateRecipient, EncryptionInfo, EncryptionRecipient, PasswordRecipient,
@@ -20276,130 +20278,7 @@ impl OfdDocument {
             let bytes = self.required_entry(path)?;
             let face = rustybuzz::Face::from_slice(bytes, 0)
                 .ok_or_else(|| OfdError::Invalid("shaped text font is invalid".into()))?;
-            if visual_shape_runs(text)?.len() > 1 {
-                shape_bidirectional_text(&face, text, size, language)?
-            } else {
-                let mut buffer = rustybuzz::UnicodeBuffer::new();
-                buffer.push_str(text);
-                buffer.guess_segment_properties();
-                if let Some(language) = language {
-                    buffer.set_language(language.clone());
-                }
-                let direction = buffer.direction();
-                if direction != rustybuzz::Direction::LeftToRight
-                    && direction != rustybuzz::Direction::RightToLeft
-                {
-                    return Err(OfdError::Invalid(
-                        "shaped text direction is unsupported".into(),
-                    ));
-                }
-                let shaped = rustybuzz::shape(&face, &[], buffer);
-                let glyphs = shaped.glyph_infos();
-                let positions = shaped.glyph_positions();
-                if glyphs.is_empty() || glyphs.len() > 10_000 {
-                    return Err(OfdError::Invalid(
-                        "shaped text glyph mapping is invalid".into(),
-                    ));
-                }
-                let mut transforms = String::new();
-                if direction == rustybuzz::Direction::RightToLeft {
-                    let mapped = glyphs
-                        .iter()
-                        .map(|glyph| {
-                            u16::try_from(glyph.glyph_id)
-                                .ok()
-                                .filter(|id| *id != 0)
-                                .map(|id| id.to_string())
-                                .ok_or_else(|| {
-                                    OfdError::Invalid("shaped text glyph ID is invalid".into())
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join(" ");
-                    let code_count = text.encode_utf16().count();
-                    transforms.push_str(&format!("<ofd:CGTransform CodePosition=\"0\" CodeCount=\"{code_count}\" GlyphCount=\"{}\"><ofd:Glyphs>{mapped}</ofd:Glyphs></ofd:CGTransform>", glyphs.len()));
-                } else {
-                    if glyphs[0].cluster != 0 {
-                        return Err(OfdError::Invalid(
-                            "shaped text glyph mapping is invalid".into(),
-                        ));
-                    }
-                    let mut code_position = 0_usize;
-                    let mut start = 0_usize;
-                    while start < glyphs.len() {
-                        let cluster = glyphs[start].cluster as usize;
-                        let mut end = start + 1;
-                        while end < glyphs.len() && glyphs[end].cluster == glyphs[start].cluster {
-                            end += 1;
-                        }
-                        let next_cluster = if end < glyphs.len() {
-                            glyphs[end].cluster as usize
-                        } else {
-                            text.len()
-                        };
-                        let code_count = text
-                            .get(cluster..next_cluster)
-                            .filter(|segment| !segment.is_empty())
-                            .ok_or_else(|| {
-                                OfdError::Invalid("shaped text cluster is invalid".into())
-                            })?
-                            .encode_utf16()
-                            .count();
-                        let mapped = glyphs[start..end]
-                            .iter()
-                            .map(|glyph| {
-                                u16::try_from(glyph.glyph_id)
-                                    .ok()
-                                    .filter(|id| *id != 0)
-                                    .map(|id| id.to_string())
-                                    .ok_or_else(|| {
-                                        OfdError::Invalid("shaped text glyph ID is invalid".into())
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                            .join(" ");
-                        transforms.push_str(&format!("<ofd:CGTransform CodePosition=\"{code_position}\" CodeCount=\"{code_count}\" GlyphCount=\"{}\"><ofd:Glyphs>{mapped}</ofd:Glyphs></ofd:CGTransform>", end - start));
-                        code_position += code_count;
-                        start = end;
-                    }
-                    if code_position != text.encode_utf16().count() {
-                        return Err(OfdError::Invalid(
-                            "shaped text code mapping is invalid".into(),
-                        ));
-                    }
-                }
-                let scale = size / f64::from(face.units_per_em());
-                let mut pen_x = 0_i64;
-                let mut pen_y = 0_i64;
-                let mut glyph_positions = Vec::with_capacity(positions.len());
-                for position in positions {
-                    let x = (pen_x + i64::from(position.x_offset)) as f64 * scale;
-                    let y = size - (pen_y + i64::from(position.y_offset)) as f64 * scale;
-                    if !x.is_finite() || !y.is_finite() {
-                        return Err(OfdError::Invalid("shaped text position is invalid".into()));
-                    }
-                    glyph_positions.push((x, y));
-                    pen_x += i64::from(position.x_advance);
-                    pen_y += i64::from(position.y_advance);
-                }
-                let delta_x = glyph_positions
-                    .windows(2)
-                    .map(|pair| (pair[1].0 - pair[0].0).to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let delta_y = glyph_positions
-                    .windows(2)
-                    .map(|pair| (pair[1].1 - pair[0].1).to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                (
-                    transforms,
-                    glyph_positions[0].0,
-                    glyph_positions[0].1,
-                    delta_x,
-                    delta_y,
-                )
-            }
+            text_measurement::prepare_positioned_shaping(&face, text, size, language)?
         };
         let [box_x, box_y, width, height] = boundary;
         let escaped_text = escape_text_code(text);
@@ -26683,11 +26562,6 @@ impl OfdDocument {
                 "flowed span language requires shaping".into(),
             ));
         }
-        let default_language = style
-            .language
-            .as_deref()
-            .map(parse_shaping_language)
-            .transpose()?;
         let [page_width, page_height] = style.page_size;
         let [top, right, bottom, left] = style.margins;
         if style
@@ -26717,107 +26591,18 @@ impl OfdDocument {
         {
             return Err(OfdError::Invalid("flowed text geometry is invalid".into()));
         }
-        if document_index >= self.doc_roots()?.len() {
-            return Err(OfdError::Invalid("document index is out of bounds".into()));
-        }
-        let fonts = self.fonts()?;
-        let mut prepared = Vec::with_capacity(spans.len());
-        for span in spans {
-            let language = span
-                .language
-                .as_deref()
-                .map(parse_shaping_language)
-                .transpose()?
-                .or_else(|| default_language.clone());
-            let font_size = span.font_size.unwrap_or(style.font_size);
-            if !font_size.is_finite() || font_size <= 0.0 {
-                return Err(OfdError::Invalid("flowed span font size is invalid".into()));
-            }
-            if !span.letter_spacing.is_finite()
-                || !span.underline_offset.is_finite()
-                || !span.underline_width.is_finite()
-                || span.underline_width < 0.0
-                || (span.underline && !(font_size + span.underline_offset).is_finite())
-                || span
-                    .stroke_width
-                    .is_some_and(|width| !width.is_finite() || width <= 0.0)
-                || span
-                    .weight
-                    .is_some_and(|weight| !(100..=900).contains(&weight) || weight % 100 != 0)
-            {
-                return Err(OfdError::Invalid("flowed span style is invalid".into()));
-            }
-            let selected = span.font_id.as_ref().or(style.font_id.as_ref());
-            let font = fonts
-                .iter()
-                .find(|font| {
-                    font.document_index == document_index
-                        && selected
-                            .is_none_or(|id| resource_id_key(&font.id) == resource_id_key(id))
-                })
-                .ok_or_else(|| OfdError::Invalid("flowed span font is not defined".into()))?;
-            let metrics = flow_font_metrics(self, font, &span.text)?;
-            if !style.shape
-                && span
-                    .text
-                    .chars()
-                    .filter(|ch| !is_flow_hard_break(*ch))
-                    .any(|ch| {
-                        let width = metrics.advance(ch) * font_size + span.letter_spacing;
-                        !width.is_finite() || width <= 0.0
-                    })
-            {
-                return Err(OfdError::Invalid(
-                    "flowed span glyph advance is invalid".into(),
-                ));
-            }
-            prepared.push(PreparedFlowSpan {
-                font_id: font.id.clone(),
-                font_size,
-                language,
-                fill_color: span.fill_color,
-                fill: span.fill,
-                stroke: span.stroke,
-                stroke_color: span.stroke_color,
-                stroke_width: span.stroke_width,
-                bold: span.bold,
-                weight: span.weight,
-                italic: span.italic,
-                letter_spacing: span.letter_spacing,
-                underline: span.underline,
-                underline_offset: span.underline_offset,
-                underline_width: span.underline_width,
-                keep_together: span.keep_together,
-                metrics,
-            });
-        }
-        let first_span_index = spans
-            .iter()
-            .position(|span| !span.text.is_empty())
-            .expect("nonempty span was checked");
-        let first_span = &prepared[first_span_index];
-        let first_line_indent = effective_flow_indent(
-            &style,
-            first_span.font_size,
-            first_span.letter_spacing,
-            page_width - left - right,
-        )?;
+        let preparation =
+            self.prepare_flow_spans(document_index, spans, &style, page_width - left - right)?;
+        let prepared = &preparation.spans;
         if style.shape {
-            return self.add_shaped_flowed_spans(
-                document_index,
-                spans,
-                style,
-                first_line_indent,
-                &prepared,
-                &fonts,
-            );
+            return self.add_shaped_flowed_spans(document_index, spans, style, &preparation);
         }
-        let paragraphs = styled_flow_paragraphs(spans, &prepared);
+        let paragraphs = styled_flow_paragraphs(spans, prepared);
         let lines = wrap_styled_flow_lines(
             &paragraphs,
             page_width - left - right,
-            FlowIndents::new(first_line_indent, style.rest_line_indent),
-            &prepared,
+            FlowIndents::new(preparation.first_line_indent, style.rest_line_indent),
+            prepared,
             style.indent_each_paragraph,
         )?;
         if lines.is_empty() {
@@ -27562,158 +27347,22 @@ impl OfdDocument {
         document_index: usize,
         spans: &[FlowSpan],
         style: FlowTextStyle,
-        first_line_indent: f64,
-        prepared: &[PreparedFlowSpan],
-        fonts: &[FontInfo],
+        preparation: &text_measurement::PreparedSpans,
     ) -> Result<flow_blocks::FlowPlacement, OfdError> {
-        use unicode_segmentation::UnicodeSegmentation;
-
-        let faces = prepared
-            .iter()
-            .map(|span| {
-                let font = fonts
-                    .iter()
-                    .find(|font| {
-                        font.document_index == document_index
-                            && resource_id_key(&font.id) == resource_id_key(&span.font_id)
-                    })
-                    .ok_or_else(|| OfdError::Invalid("flowed span font is not defined".into()))?;
-                let path = font.embedded_path.as_deref().ok_or_else(|| {
-                    OfdError::Invalid("shaped flow requires an embedded font".into())
-                })?;
-                rustybuzz::Face::from_slice(self.required_entry(path)?, 0)
-                    .ok_or_else(|| OfdError::Invalid("shaped flow font is invalid".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let paragraphs = flow_styled_paragraph_chars(spans)
-            .into_iter()
-            .map(|characters| {
-                let content = characters.iter().map(|(ch, _)| *ch).collect::<String>();
-                let mut index = 0;
-                let mut units = Vec::new();
-                let mut kept_ranges = HashMap::<usize, (usize, usize)>::new();
-                for grapheme in content.graphemes(true) {
-                    let next = index + grapheme.chars().count();
-                    let unit_index = units.len();
-                    for &(_, span_index) in &characters[index..next] {
-                        if prepared[span_index].keep_together {
-                            kept_ranges
-                                .entry(span_index)
-                                .and_modify(|(_, last)| *last = unit_index)
-                                .or_insert((unit_index, unit_index));
-                        }
-                    }
-                    units.push(ShapedFlowUnit {
-                        text: grapheme.to_owned(),
-                        span_index: characters[index].1,
-                        keep_until: unit_index + 1,
-                    });
-                    index = next;
-                }
-                for (first, last) in kept_ranges.into_values() {
-                    units[first].keep_until = units[first].keep_until.max(last + 1);
-                }
-                units
-            })
-            .collect::<Vec<_>>();
+        let shaped = self.prepare_shaped_flow_lines(
+            document_index,
+            spans,
+            &style,
+            style.page_size[0] - style.margins[3] - style.margins[1],
+            preparation,
+            false,
+        )?;
+        let lines = shaped.lines;
+        let group_widths = shaped.group_widths;
+        let prepared = &preparation.spans;
         let [page_width, page_height] = style.page_size;
         let [top, right, bottom, left] = style.margins;
         let content_width = page_width - left - right;
-        let indents = FlowIndents::new(first_line_indent, style.rest_line_indent);
-        let mut lines = Vec::<ShapedStyledLine>::new();
-        for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
-            let paragraph_line_start = lines.len();
-            if paragraph.is_empty() {
-                lines.push(ShapedStyledLine {
-                    units: Vec::new(),
-                    width: 0.0,
-                    paragraph_start: paragraph_index > 0,
-                    indent: indents.for_line(paragraph_index == 0 || style.indent_each_paragraph),
-                });
-                continue;
-            }
-            let content = paragraph
-                .iter()
-                .map(|unit| unit.text.as_str())
-                .collect::<String>();
-            let break_offsets = unicode_linebreak::linebreaks(&content)
-                .map(|(offset, _)| offset)
-                .collect::<Vec<_>>();
-            let mut unit_end_bytes = Vec::with_capacity(paragraph.len() + 1);
-            unit_end_bytes.push(0);
-            for unit in paragraph {
-                unit_end_bytes.push(unit_end_bytes.last().copied().unwrap() + unit.text.len());
-            }
-            let mut start = 0;
-            let mut first_line = paragraph_index == 0 || style.indent_each_paragraph;
-            while start < paragraph.len() {
-                let indent = indents.for_line(first_line);
-                let available = content_width - indent;
-                let mut end = start;
-                let mut width = 0.0;
-                let mut last_break = None;
-                let mut has_visible = false;
-                while end < paragraph.len() {
-                    let mut next = end + 1;
-                    let mut cursor = end;
-                    while cursor < next {
-                        next = next.max(paragraph[cursor].keep_until);
-                        cursor += 1;
-                    }
-                    let run_width = shaped_styled_width(&paragraph[end..next], prepared, &faces)?;
-                    if run_width > content_width + 1e-9 {
-                        return Err(OfdError::Invalid(
-                            "shaped flowed span exceeds available line width".into(),
-                        ));
-                    }
-                    let candidate = shaped_styled_width(&paragraph[start..next], prepared, &faces)?;
-                    if candidate > available + 1e-9 {
-                        if let Some((break_end, break_width)) = last_break {
-                            end = break_end;
-                            width = break_width;
-                        }
-                        break;
-                    }
-                    has_visible |= paragraph[end..next]
-                        .iter()
-                        .any(|unit| unit.text.chars().any(|ch| !ch.is_whitespace()));
-                    end = next;
-                    width = candidate;
-                    if has_visible && break_offsets.binary_search(&unit_end_bytes[end]).is_ok() {
-                        last_break = Some((end, width));
-                    }
-                }
-                if end == start {
-                    if first_line {
-                        lines.push(ShapedStyledLine {
-                            units: Vec::new(),
-                            width: 0.0,
-                            indent,
-                            paragraph_start: paragraph_index > 0
-                                && lines.len() == paragraph_line_start,
-                        });
-                        first_line = false;
-                        continue;
-                    }
-                    return Err(OfdError::Invalid(
-                        "shaped flowed span exceeds available line width".into(),
-                    ));
-                }
-                lines.push(ShapedStyledLine {
-                    units: paragraph[start..end].to_vec(),
-                    width,
-                    indent,
-                    paragraph_start: paragraph_index > 0 && lines.len() == paragraph_line_start,
-                });
-                start = end;
-                first_line = false;
-            }
-        }
-        if lines.is_empty() {
-            return Err(OfdError::Invalid(
-                "flowed spans have no rendered lines".into(),
-            ));
-        }
         let line_spacing = style.line_height - style.font_size;
         let paragraph_heights = if style.keep_paragraphs_together {
             let heights = paragraph_run_heights(
@@ -27743,16 +27392,6 @@ impl OfdDocument {
         } else {
             Vec::new()
         };
-        let group_widths = lines
-            .iter()
-            .map(|line| {
-                line.units
-                    .chunk_by(|a, b| a.span_index == b.span_index)
-                    .map(|group| shaped_styled_width(group, prepared, &faces))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(faces);
         let mut cursor = FlowPageCursor::new(
             self,
             document_index,

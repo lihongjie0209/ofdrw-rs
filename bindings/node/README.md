@@ -422,3 +422,20 @@ try {
 `BoxLayoutResult` TypeScript 类型。`next` 可传给下次调用的 `start`。
 接口布局已测量尺寸的盒子；自动内容测量和一般子容器仍待实现。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
+
+## 文本自动测量（源码开发功能，尚未发布）
+
+```js
+const document = Document.create();
+try {
+  const spans = [{text: 'First line\nSecond line'}];
+  const metrics = document.measureFlowedSpans(0, spans, 40, {font_size: 5, line_height: 6});
+  console.log(metrics.width, metrics.height, metrics.lines);
+  document.addBoxLayout(0, [{type: 'box', size: [40, metrics.height],
+    padding: [2, 2, 2, 2], border: [0.2, 0.2, 0.2, 0.2], integrity: true}]);
+} finally { document.close(); }
+```
+
+提供 `FlowTextMetrics` 和 `FlowLineMetrics` 类型。测量不增加页面或资源，
+页面几何和 `start` 被忽略；逐行位置和逻辑基线相对段落原点。
+测得高度可用于盒模型；一般子容器及按行拆分的容器绘制仍待实现。

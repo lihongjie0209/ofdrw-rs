@@ -2,6 +2,7 @@
 
 mod box_layout;
 mod flow_blocks;
+mod text_measurement;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11051,6 +11052,45 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
             .map_err(|e| e.to_string())?;
         output_buffer(
             serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
+/// Measure flowing spans without allocating pages, objects, or resources.
+///
+/// JSON requires `spans` and `content_width` in millimeters. Typography options
+/// match `ofd_add_flowed_spans_json`; page geometry, starts and page keep rules
+/// are ignored after JSON type validation. Returns logical width, height and
+/// lines with text, x/y, width, height, baseline and paragraph_start.
+///
+/// # Safety
+/// `handle` must be live, `measure_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_measure_flowed_spans_json(
+    handle: *const OfdDocument,
+    document_index: usize,
+    measure_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(input_string(measure_json)?).map_err(|e| e.to_string())?;
+        let width = input
+            .get("content_width")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or("content_width must be a number")?;
+        let style = parse_flow_style(&input)?;
+        let spans = parse_flow_spans(&input)?;
+        let metrics = document_ref(handle)?
+            .measure_flowed_spans(document_index, &spans, width, &style)
+            .map_err(|e| e.to_string())?;
+        output_buffer(
+            serde_json::to_vec(&text_measurement::Response::from(&metrics))
+                .map_err(|e| e.to_string())?,
             output,
         )
     })
