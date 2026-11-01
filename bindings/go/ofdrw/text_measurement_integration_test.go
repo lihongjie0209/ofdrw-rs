@@ -158,3 +158,57 @@ func TestTextMeasurementErrorsAndDefaultsPreserveTheDocument(t *testing.T) {
 		t.Fatal("accepted closed document")
 	}
 }
+
+func TestNaturalZeroGlyphAdvanceRemainsZeroThroughMeasurement(t *testing.T) {
+	fixture := filepath.Join(
+		"..",
+		"..",
+		"..",
+		"crates",
+		"ofdrw",
+		"tests",
+		"fixtures",
+		"dejavu-sans.ttf",
+	)
+	font, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	id, err := doc.AddEmbeddedFont("DejaVu Sans", font)
+	if err != nil {
+		t.Fatal(err)
+	}
+	style := DefaultFlowTextStyle()
+	style.FontID, style.FontSize, style.LineHeight = strconv.Itoa(id), 2, 3
+	spans := []FlowSpan{{Text: "\u0301"}}
+	before, err := doc.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	measured, err := doc.MeasureFlowedSpans(
+		0,
+		spans,
+		20,
+		style,
+	)
+	if err != nil || measured.Width != 0 || measured.Height != 3 || len(measured.Lines) != 1 {
+		t.Fatalf("measurement: %+v, %v", measured, err)
+	}
+	after, err := doc.ToBytes()
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("measurement mutation: %v", err)
+	}
+	pages, err := doc.AddFlowedSpans(0, spans, style)
+	if err != nil || !reflect.DeepEqual(pages, []int{0}) {
+		t.Fatalf("flow: %v, %v", pages, err)
+	}
+	text, err := doc.PageText(0)
+	if err != nil || !reflect.DeepEqual(text, []string{"\u0301"}) {
+		t.Fatalf("text: %v, %v", text, err)
+	}
+}

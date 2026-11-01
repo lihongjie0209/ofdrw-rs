@@ -67,3 +67,22 @@ def test_measurement_defaults_terminal_breaks_and_error_paths_are_read_only():
         doc.close()
     with pytest.raises(OfdError):
         doc.measure_flowed_spans(0, [{"text": "A"}], 20)
+
+
+def test_natural_zero_advance_survives_measurement_and_flow_without_mutating_source():
+    with Document.new() as doc:
+        font = doc.add_embedded_font("DejaVu Sans", (FIXTURES / "dejavu-sans.ttf").read_bytes())
+        options = {"font_id": font, "font_size": 2, "line_height": 3}
+        spans = [{"text": "\u0301"}]
+        before = doc.to_bytes()
+        measured = doc.measure_flowed_spans(0, spans, 20, **options)
+        assert measured["width"] == 0
+        assert measured["height"] == 3
+        assert measured["lines"][0]["text"] == "\u0301"
+        assert doc.to_bytes() == before
+        with pytest.raises(OfdError):
+            doc.measure_flowed_spans(0, [{"text": "\u0301", "letter_spacing": -0.1}], 20, **options)
+        assert doc.to_bytes() == before
+        assert doc.add_flowed_spans(0, spans, **options) == [0]
+        assert doc.page_text(0) == ["\u0301"]
+        assert doc.page_png(0, 30)
