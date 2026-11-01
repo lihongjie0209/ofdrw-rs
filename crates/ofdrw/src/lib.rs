@@ -13,7 +13,7 @@ pub use box_layout::{
 };
 mod encryption;
 mod flow_container;
-pub use flow_container::{FlowContainer, FlowContainerChild};
+pub use flow_container::{FixedContainer, FlowContainer, FlowContainerChild};
 mod flow_blocks;
 pub use flow_blocks::{FlowBlock, FlowDocumentStyle, FlowLayoutResult, FlowParagraphStyle};
 mod pdf_annotation_appearance;

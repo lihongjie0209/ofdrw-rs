@@ -77,15 +77,26 @@ fn shares(row: &[&LayoutBox], b: &LayoutBox, width: f64) -> bool {
     )
 }
 
-fn positions(row: &[&LayoutBox], width: f64) -> Vec<f64> {
+pub(super) fn positions(row: &[&LayoutBox], width: f64) -> Vec<f64> {
     box_layout::row_positions(row.iter().map(|b| (*b, outer_width(b))), width, 0.)
 }
 
-fn rows(b: &PreparedContainer<'_>) -> Vec<Vec<usize>> {
+pub(super) fn rows(b: &PreparedContainer<'_>) -> Vec<Vec<usize>> {
+    rows_with_fillers(b, true)
+}
+
+pub(super) fn fixed_rows(b: &PreparedContainer<'_>) -> Vec<Vec<usize>> {
+    rows_with_fillers(b, false)
+}
+
+fn rows_with_fillers(b: &PreparedContainer<'_>, include_fillers: bool) -> Vec<Vec<usize>> {
     let mut result = Vec::new();
     let mut row = Vec::new();
     let mut layouts = Vec::new();
     for (index, child) in b.children.iter().enumerate() {
+        if !include_fillers && matches!(child.node, PreparedChild::PageAreaFill) {
+            continue;
+        }
         if matches!(child.node, PreparedChild::LineBreak) {
             if !row.is_empty() {
                 result.push(std::mem::take(&mut row));
@@ -720,6 +731,7 @@ mod tests {
     #[test]
     fn a_full_existing_start_page_does_not_consume_the_used_page_budget() {
         let source = PreparedContainer {
+            declared_height: 0.,
             layout: LayoutBox {
                 size: [1., 10_000.],
                 ..Default::default()

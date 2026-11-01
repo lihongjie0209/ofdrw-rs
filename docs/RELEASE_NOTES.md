@@ -1,5 +1,15 @@
 # Unreleased
 
+- Retain natural zero font advances in plain styled text, including combining
+  marks and cross-span graphemes. Keep invalid tracking rejection and verify
+  zero-width measurement/flow through Rust, C, Python, Go and Node.js.
+
+- Add Rust fixed-page mixed containers with absolute positions, optional
+  automatic height and retained explicit heights. Draw complete mixed content
+  on existing global pages, including overflow, floating nested rows, shaping,
+  tables, images, layers and root overlap. Preserve atomic rollback and source
+  page count; ignore page fillers as Java fixed-page rendering does.
+
 - Add Background/Body/Foreground painting layers to measured boxes, automatic
   text boxes and nested mixed containers in all language bindings. Inherit
   nested layers, restore parent/default selection, reuse existing layers and
