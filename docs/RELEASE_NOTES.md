@@ -36,6 +36,11 @@
   source offsets while decoration bands remain consumed once. Validate
   ranges and reject unfit lines atomically.
 
+- Add Rust automatic text boxes: measure and clamp widths before wrapping,
+  protect whole lines or paragraphs, decorate fragments and draw styled or
+  shaped spans atomically. Measurement and box drawing share prepared lines;
+  ordinary flow and box text share painting helpers.
+
 # v0.3.0
 
 ## Upgrade notes

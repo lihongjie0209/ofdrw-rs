@@ -22,6 +22,8 @@ mod pdf_link_action;
 #[cfg(test)]
 mod raster_layer_tests;
 mod rtl_semantics;
+mod text_box;
+pub use text_box::TextBox;
 mod text_measurement;
 pub use text_measurement::{FlowLineMetrics, FlowTextMetrics};
 
@@ -26742,39 +26744,18 @@ impl OfdDocument {
                 FlowTextAlign::Center => free / 2.0,
                 FlowTextAlign::Right => free,
             };
-            let mut x = origin_x + left + line.indent + align_offset;
-            for group in line.glyphs.chunk_by(|a, b| a.span_index == b.span_index) {
-                let span = &prepared[group[0].span_index];
-                let text: String = group.iter().map(|glyph| glyph.ch).collect();
-                let width: f64 = group.iter().map(|glyph| glyph.width).sum();
-                self.add_flow_span_object(
+            let x = origin_x + left + line.indent + align_offset;
+            self.draw_plain_flow_line(
+                line,
+                prepared,
+                text_box::FlowLineDraw {
                     page_index,
-                    &text,
-                    [x, y, width.max(0.001), line_height],
+                    x,
+                    y,
+                    height: line_height,
                     baseline,
-                    span,
-                    group,
-                )?;
-                if span.underline {
-                    let offset = baseline + span.underline_offset;
-                    let line_width = if span.underline_width == 0.0 {
-                        span.font_size * 0.05
-                    } else {
-                        span.underline_width
-                    };
-                    self.add_path_object(
-                        page_index,
-                        &format!("M 0 {offset} L {width} {offset}"),
-                        [x, y, width.max(0.001), line_height],
-                        PathStyle {
-                            line_width,
-                            stroke_color: span.fill_color,
-                            ..PathStyle::default()
-                        },
-                    )?;
-                }
-                x += width;
-            }
+                },
+            )?;
             cursor.y += line_height;
         }
         Ok(flow_blocks::FlowPlacement {
@@ -27495,49 +27476,19 @@ impl OfdDocument {
                 FlowTextAlign::Center => free / 2.0,
                 FlowTextAlign::Right => free,
             };
-            let mut x = origin_x + left + line.indent + offset;
-            for (group, width) in line
-                .units
-                .chunk_by(|a, b| a.span_index == b.span_index)
-                .zip(&group_widths[line_index])
-            {
-                let span = &prepared[group[0].span_index];
-                let text = group
-                    .iter()
-                    .map(|unit| unit.text.as_str())
-                    .collect::<String>();
-                let width = *width;
-                self.add_shaped_text_object_with_style(
+            let x = origin_x + left + line.indent + offset;
+            self.draw_shaped_flow_line(
+                line,
+                &group_widths[line_index],
+                prepared,
+                text_box::FlowLineDraw {
                     page_index,
-                    &text,
-                    [x, y, width.max(0.001), line_height],
-                    span.font_size,
-                    &span.font_id,
-                    ShapingContext {
-                        style: Some((baseline, span)),
-                        language: span.language.as_ref(),
-                    },
-                )?;
-                if span.underline {
-                    let underline_y = baseline + span.underline_offset;
-                    let line_width = if span.underline_width == 0.0 {
-                        span.font_size * 0.05
-                    } else {
-                        span.underline_width
-                    };
-                    self.add_path_object(
-                        page_index,
-                        &format!("M 0 {underline_y} L {width} {underline_y}"),
-                        [x, y, width.max(0.001), line_height],
-                        PathStyle {
-                            line_width,
-                            stroke_color: span.fill_color,
-                            ..PathStyle::default()
-                        },
-                    )?;
-                }
-                x += width;
-            }
+                    x,
+                    y,
+                    height: line_height,
+                    baseline,
+                },
+            )?;
             cursor.y += line_height;
         }
         Ok(flow_blocks::FlowPlacement {

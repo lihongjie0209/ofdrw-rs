@@ -18,6 +18,7 @@
 - [图片自动尺寸](#图片自动尺寸)
 - [混合流布局](#混合流布局)
 - [盒模型与浮动分段](#盒模型与浮动分段)
+- [自动文字盒](#自动文字盒)
 - [表格与嵌套布局](#表格与嵌套布局)
 - [页面顺序与对象分组](#页面顺序与对象分组)
 - [SVG 预览](#svg-预览)
@@ -964,6 +965,36 @@ whole operation. Ordinary `add_box_layout()` retains geometric splitting.
 This API places and decorates fragments; callers still draw child content in
 the returned rectangles. Automatic styled-child rendering and nested container
 pagination remain pending, as does exposure of range policies in the bindings.
+
+## 自动文字盒
+
+**未发布，Rust 接口：** `OfdDocument::add_text_boxes()` combines text
+measurement, safe line fragmentation, box decorations and styled drawing in
+one atomic operation. Each `TextBox` contains a `LayoutBox`, styled `FlowSpan`
+children and a `FlowTextStyle`. The requested width is clamped to the available
+box content width before wrapping; content height is measured automatically,
+replacing `layout.size[1]`. Page geometry and start position come exclusively
+from the shared `BoxLayoutStyle`.
+
+Ordinary and shaped lines share the existing flow renderer’s span drawing,
+including mixed font sizes, font selection, tracking, indentation, alignment,
+underline and stroke styles. Lines remain intact across pages. With
+`keep_paragraphs_together`, each paragraph becomes an indivisible content
+range instead. A line or protected paragraph taller than the full page content
+area returns an error. Boxes can float, move intact, use relative drawing
+offsets or act as nondrawing placeholders. The returned `BoxLayoutResult`
+contains fragment geometry and a continuation position.
+
+Measurement and rendering share one prepared line representation. Backgrounds
+and borders are drawn before child text. Tests compare both text object data
+and raster output with ordinary flow rendering, and cover decorated multi-page
+boxes, independent floating columns, width clamping, placeholders, rollback
+and document round trips. These remain logical line bounds; painted ink and
+underline overhang can extend beyond them.
+
+This provides text children inside automatically sized boxes. General nested
+child containers, mixed child kinds and the multi-language convenience API
+remain pending.
 
 ## 表格与嵌套布局
 
