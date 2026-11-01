@@ -381,3 +381,23 @@ annotation's image object.
 currently supported OFD-A rules, and `prepareArchive()` returns a separate
 package with supported archival normalizations applied. Check the returned
 package again because complete OFD-A conversion is not yet implemented.
+
+## 混合流布局（源码开发功能，尚未发布）
+
+```js
+const document = Document.create();
+try {
+  const result = document.addFlowBlocks(0, [
+    {type: 'paragraph', text: 'First paragraph'},
+    {type: 'spacer', height: 4},
+    {type: 'paragraph', spans: [{text: 'Second paragraph', bold: true}]},
+  ], {block_gap: 2});
+  document.addFlowBlocks(0, [{type: 'paragraph', text: 'Continued'}],
+    {start: result.next});
+  document.save('mixed.ofd');
+} finally { document.close(); }
+```
+
+支持图片、跨页表格和 `page_break`，并提供 `FlowBlock`、`FlowDocumentOptions`
+和 `FlowLayoutResult` TypeScript 类型。图片使用 `data_base64`。
+详见[混合流布局](../../docs/FEATURES.md#混合流布局)。

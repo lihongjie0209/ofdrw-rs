@@ -7,6 +7,8 @@
 mod archive;
 mod bilevel;
 mod encryption;
+mod flow_blocks;
+pub use flow_blocks::{FlowBlock, FlowDocumentStyle, FlowLayoutResult, FlowParagraphStyle};
 mod pdf_annotation_appearance;
 mod pdf_calculator;
 mod pdf_export;
@@ -26655,6 +26657,18 @@ impl OfdDocument {
         spans: &[FlowSpan],
         style: FlowTextStyle,
     ) -> Result<Vec<usize>, OfdError> {
+        let mut staged = self.clone();
+        let placement = staged.add_flowed_spans_in_place(document_index, spans, style)?;
+        *self = staged;
+        Ok(placement.pages)
+    }
+
+    fn add_flowed_spans_in_place(
+        &mut self,
+        document_index: usize,
+        spans: &[FlowSpan],
+        style: FlowTextStyle,
+    ) -> Result<flow_blocks::FlowPlacement, OfdError> {
         if spans.is_empty() || spans.iter().all(|span| span.text.is_empty()) {
             return Err(OfdError::Invalid("flowed spans are empty".into()));
         }
@@ -26843,7 +26857,6 @@ impl OfdDocument {
             style.margins,
             style.start,
         )?;
-        let mut staged = self.clone();
         let mut indexes = Vec::new();
         for (line_index, line) in lines.iter().enumerate() {
             let baseline = if line.glyphs.is_empty() {
@@ -26872,7 +26885,7 @@ impl OfdDocument {
                     line_height
                 };
             let (page_index, origin_x, y) =
-                cursor.place(&mut staged, document_index, required, gap, &mut indexes)?;
+                cursor.place(self, document_index, required, gap, &mut indexes)?;
             let available = page_width - left - right - line.indent;
             let free = (available - line.width).max(0.0);
             let align_offset = match style.align {
@@ -26885,7 +26898,7 @@ impl OfdDocument {
                 let span = &prepared[group[0].span_index];
                 let text: String = group.iter().map(|glyph| glyph.ch).collect();
                 let width: f64 = group.iter().map(|glyph| glyph.width).sum();
-                staged.add_flow_span_object(
+                self.add_flow_span_object(
                     page_index,
                     &text,
                     [x, y, width.max(0.001), line_height],
@@ -26900,7 +26913,7 @@ impl OfdDocument {
                     } else {
                         span.underline_width
                     };
-                    staged.add_path_object(
+                    self.add_path_object(
                         page_index,
                         &format!("M 0 {offset} L {width} {offset}"),
                         [x, y, width.max(0.001), line_height],
@@ -26915,8 +26928,10 @@ impl OfdDocument {
             }
             cursor.y += line_height;
         }
-        *self = staged;
-        Ok(indexes)
+        Ok(flow_blocks::FlowPlacement {
+            pages: indexes,
+            cursor,
+        })
     }
 
     /// Flow a fixed-grid table, optionally starting on an existing page.
@@ -26986,6 +27001,19 @@ impl OfdDocument {
         cells: &[TableCell],
         style: TableStyle,
     ) -> Result<Vec<usize>, OfdError> {
+        let mut staged = self.clone();
+        let placement = staged.add_table_cells_in_place(document_index, row_count, cells, style)?;
+        *self = staged;
+        Ok(placement.pages)
+    }
+
+    fn add_table_cells_in_place(
+        &mut self,
+        document_index: usize,
+        row_count: usize,
+        cells: &[TableCell],
+        style: TableStyle,
+    ) -> Result<flow_blocks::FlowPlacement, OfdError> {
         let [page_width, page_height] = style.page_size;
         let [top, right, bottom, left] = style.margins;
         let column_count = style.column_widths.len();
@@ -27502,7 +27530,6 @@ impl OfdDocument {
             style.margins,
             style.start,
         )?;
-        let mut staged = self.clone();
         let mut pages = Vec::new();
         let first_body_height = groups.get(1).map_or(0., |group| group.2);
         for (first, end, height) in groups {
@@ -27514,17 +27541,16 @@ impl OfdDocument {
             };
             let previous_page = cursor.page;
             let (page_index, origin_x, mut y) =
-                cursor.place(&mut staged, document_index, required, 0., &mut pages)?;
+                cursor.place(self, document_index, required, 0., &mut pages)?;
             if previous_page != Some(page_index) && first > 0 && style.repeat_header {
-                draw_group(&mut staged, page_index, 0, 1, origin_x, y)?;
+                draw_group(self, page_index, 0, 1, origin_x, y)?;
                 y += row_heights[0];
                 cursor.y += row_heights[0];
             }
-            draw_group(&mut staged, page_index, first, end, origin_x, y)?;
+            draw_group(self, page_index, first, end, origin_x, y)?;
             cursor.y += height;
         }
-        *self = staged;
-        Ok(pages)
+        Ok(flow_blocks::FlowPlacement { pages, cursor })
     }
 
     fn add_shaped_flowed_spans(
@@ -27535,7 +27561,7 @@ impl OfdDocument {
         first_line_indent: f64,
         prepared: &[PreparedFlowSpan],
         fonts: &[FontInfo],
-    ) -> Result<Vec<usize>, OfdError> {
+    ) -> Result<flow_blocks::FlowPlacement, OfdError> {
         use unicode_segmentation::UnicodeSegmentation;
 
         let faces = prepared
@@ -27713,6 +27739,16 @@ impl OfdDocument {
         } else {
             Vec::new()
         };
+        let group_widths = lines
+            .iter()
+            .map(|line| {
+                line.units
+                    .chunk_by(|a, b| a.span_index == b.span_index)
+                    .map(|group| shaped_styled_width(group, prepared, &faces))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(faces);
         let mut cursor = FlowPageCursor::new(
             self,
             document_index,
@@ -27720,7 +27756,6 @@ impl OfdDocument {
             style.margins,
             style.start,
         )?;
-        let mut staged = self.clone();
         let mut indexes = Vec::new();
         for (line_index, line) in lines.iter().enumerate() {
             let baseline = if line.units.is_empty() {
@@ -27749,7 +27784,7 @@ impl OfdDocument {
                     line_height
                 };
             let (page_index, origin_x, y) =
-                cursor.place(&mut staged, document_index, required, gap, &mut indexes)?;
+                cursor.place(self, document_index, required, gap, &mut indexes)?;
             let available = content_width - line.indent;
             let free = (available - line.width).max(0.0);
             let offset = match style.align {
@@ -27758,14 +27793,18 @@ impl OfdDocument {
                 FlowTextAlign::Right => free,
             };
             let mut x = origin_x + left + line.indent + offset;
-            for group in line.units.chunk_by(|a, b| a.span_index == b.span_index) {
+            for (group, width) in line
+                .units
+                .chunk_by(|a, b| a.span_index == b.span_index)
+                .zip(&group_widths[line_index])
+            {
                 let span = &prepared[group[0].span_index];
                 let text = group
                     .iter()
                     .map(|unit| unit.text.as_str())
                     .collect::<String>();
-                let width = shaped_styled_width(group, prepared, &faces)?;
-                staged.add_shaped_text_object_with_style(
+                let width = *width;
+                self.add_shaped_text_object_with_style(
                     page_index,
                     &text,
                     [x, y, width.max(0.001), line_height],
@@ -27783,7 +27822,7 @@ impl OfdDocument {
                     } else {
                         span.underline_width
                     };
-                    staged.add_path_object(
+                    self.add_path_object(
                         page_index,
                         &format!("M 0 {underline_y} L {width} {underline_y}"),
                         [x, y, width.max(0.001), line_height],
@@ -27798,8 +27837,10 @@ impl OfdDocument {
             }
             cursor.y += line_height;
         }
-        *self = staged;
-        Ok(indexes)
+        Ok(flow_blocks::FlowPlacement {
+            pages: indexes,
+            cursor,
+        })
     }
 
     fn add_flow_span_object(

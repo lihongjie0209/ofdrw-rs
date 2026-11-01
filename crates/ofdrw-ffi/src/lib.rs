@@ -1,5 +1,7 @@
 //! Versioned C ABI for OFD package operations.
 
+mod flow_blocks;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
@@ -10616,6 +10618,50 @@ fn parse_table_cells(values: &serde_json::Value, depth: usize) -> Result<Vec<Tab
         .collect()
 }
 
+fn parse_nested_table(grid: &serde_json::Value, depth: usize) -> Result<NestedTable, String> {
+    let row_count = grid
+        .get("row_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|number| usize::try_from(number).ok())
+        .ok_or("nested table row_count must be a nonnegative integer")?;
+    let column_widths = serde_json::from_value(
+        grid.get("column_widths")
+            .ok_or("nested table column_widths are required")?
+            .clone(),
+    )
+    .map_err(|_| "nested table column_widths must be numbers")?;
+    let cells = parse_table_cells(
+        grid.get("cells").ok_or("nested table cells are required")?,
+        depth,
+    )?;
+    let number = |key: &str, default: f64| -> Result<f64, String> {
+        grid.get(key)
+            .map(|value| {
+                value
+                    .as_f64()
+                    .ok_or_else(|| format!("nested table {key} must be numeric"))
+            })
+            .unwrap_or(Ok(default))
+    };
+    let border_color = grid
+        .get("border_color")
+        .map(|color| {
+            serde_json::from_value(color.clone())
+                .map_err(|_| "nested table border_color must be three RGB bytes".to_owned())
+        })
+        .transpose()?
+        .unwrap_or([0, 0, 0]);
+    Ok(NestedTable {
+        row_count,
+        column_widths,
+        cells,
+        row_height: number("row_height", 0.0)?,
+        padding: number("padding", 1.0)?,
+        border_width: number("border_width", 0.2)?,
+        border_color,
+    })
+}
+
 fn parse_table_block(value: &serde_json::Value, depth: usize) -> Result<TableCellBlock, String> {
     match value.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => Ok(TableCellBlock::Text {
@@ -10656,47 +10702,10 @@ fn parse_table_block(value: &serde_json::Value, depth: usize) -> Result<TableCel
         }),
         Some("table") => {
             let grid = value.get("table").ok_or("table block table is required")?;
-            let row_count = grid
-                .get("row_count")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|number| usize::try_from(number).ok())
-                .ok_or("nested table row_count must be a nonnegative integer")?;
-            let column_widths = serde_json::from_value(
-                grid.get("column_widths")
-                    .ok_or("nested table column_widths are required")?
-                    .clone(),
-            )
-            .map_err(|_| "nested table column_widths must be numbers")?;
-            let cells = parse_table_cells(
-                grid.get("cells").ok_or("nested table cells are required")?,
+            Ok(TableCellBlock::Table(Box::new(parse_nested_table(
+                grid,
                 depth + 1,
-            )?;
-            let number = |key: &str, default: f64| -> Result<f64, String> {
-                grid.get(key)
-                    .map(|value| {
-                        value
-                            .as_f64()
-                            .ok_or_else(|| format!("nested table {key} must be numeric"))
-                    })
-                    .unwrap_or(Ok(default))
-            };
-            let border_color = grid
-                .get("border_color")
-                .map(|color| {
-                    serde_json::from_value(color.clone())
-                        .map_err(|_| "nested table border_color must be three RGB bytes".to_owned())
-                })
-                .transpose()?
-                .unwrap_or([0, 0, 0]);
-            Ok(TableCellBlock::Table(Box::new(NestedTable {
-                row_count,
-                column_widths,
-                cells,
-                row_height: number("row_height", 0.0)?,
-                padding: number("padding", 1.0)?,
-                border_width: number("border_width", 0.2)?,
-                border_color,
-            })))
+            )?)))
         }
         _ => Err("table cell block type must be text, image, spacer, rule, or table".into()),
     }
@@ -10827,6 +10836,161 @@ pub unsafe extern "C" fn ofd_add_flowed_text_json(
     })
 }
 
+fn parse_flow_spans(input: &serde_json::Value) -> Result<Vec<FlowSpan>, String> {
+    let items = input
+        .get("spans")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("spans must be an array")?;
+    let mut spans = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("span text must be a string")?;
+        let mut span = FlowSpan::new(text);
+        if let Some(value) = item.get("font_id") {
+            span.font_id = Some(
+                value
+                    .as_str()
+                    .ok_or("span font_id must be a string")?
+                    .into(),
+            );
+        }
+        if let Some(value) = item.get("font_size") {
+            span.font_size = Some(value.as_f64().ok_or("span font_size must be a number")?);
+        }
+        if let Some(value) = item.get("language") {
+            span.language = Some(
+                value
+                    .as_str()
+                    .ok_or("span language must be a string")?
+                    .to_owned(),
+            );
+        }
+        if let Some(value) = item.get("fill_color") {
+            span.fill_color = Some(
+                serde_json::from_value(value.clone())
+                    .map_err(|_| "span fill_color must contain three RGB bytes")?,
+            );
+        }
+        if let Some(value) = item.get("fill") {
+            span.fill = value.as_bool().ok_or("span fill must be a boolean")?;
+        }
+        if let Some(value) = item.get("stroke") {
+            span.stroke = value.as_bool().ok_or("span stroke must be a boolean")?;
+        }
+        if let Some(value) = item.get("stroke_color") {
+            span.stroke_color = Some(
+                serde_json::from_value(value.clone())
+                    .map_err(|_| "span stroke_color must contain three RGB bytes")?,
+            );
+        }
+        if let Some(value) = item.get("stroke_width") {
+            span.stroke_width = Some(value.as_f64().ok_or("span stroke_width must be a number")?);
+        }
+        if let Some(value) = item.get("bold") {
+            span.bold = value.as_bool().ok_or("span bold must be a boolean")?;
+        }
+        if let Some(value) = item.get("weight") {
+            span.weight = Some(
+                value
+                    .as_u64()
+                    .and_then(|weight| weight.try_into().ok())
+                    .ok_or("span weight must be an unsigned 16-bit integer")?,
+            );
+        }
+        if let Some(value) = item.get("italic") {
+            span.italic = value.as_bool().ok_or("span italic must be a boolean")?;
+        }
+        if let Some(value) = item.get("letter_spacing") {
+            span.letter_spacing = value
+                .as_f64()
+                .ok_or("span letter_spacing must be a number")?;
+        }
+        if let Some(value) = item.get("underline") {
+            span.underline = value.as_bool().ok_or("span underline must be a boolean")?;
+        }
+        if let Some(value) = item.get("underline_offset") {
+            span.underline_offset = value
+                .as_f64()
+                .ok_or("span underline_offset must be a number")?;
+        }
+        if let Some(value) = item.get("underline_width") {
+            span.underline_width = value
+                .as_f64()
+                .ok_or("span underline_width must be a number")?;
+        }
+        if let Some(value) = item.get("line_break_after") {
+            span.line_break_after = value
+                .as_bool()
+                .ok_or("span line_break_after must be a boolean")?;
+        }
+        if let Some(value) = item.get("keep_together") {
+            span.keep_together = value
+                .as_bool()
+                .ok_or("span keep_together must be a boolean")?;
+        }
+        spans.push(span);
+    }
+    Ok(spans)
+}
+
+/// Lay out ordered blocks atomically and return JSON `{"pages": [...], "next": ...}`.
+///
+/// The request combines normal flow style fields with `block_gap` and `blocks`.
+/// Paragraph blocks accept either `text` or `spans` and optional `style` overrides.
+/// Images use `data_base64`, `format`, `width`, `height`, and optional `align`.
+/// Tables use the existing nested `table` grid and optional `repeat_header`.
+/// Spacers use `height`; `page_break` explicitly appends a blank page.
+///
+/// # Safety
+/// `handle` must be live, `flow_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_flow_blocks_json(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    flow_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(input_string(flow_json)?).map_err(|e| e.to_string())?;
+        let style = ofdrw::FlowDocumentStyle {
+            text: parse_flow_style(&input)?,
+            block_gap: input
+                .get("block_gap")
+                .map(|v| v.as_f64().ok_or("block_gap must be a number"))
+                .transpose()?
+                .unwrap_or(0.),
+        };
+        let values = input
+            .get("blocks")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("blocks must be an array")?;
+        if values.len() > 10_000 {
+            return Err("too many flow blocks".into());
+        }
+        let blocks = values
+            .iter()
+            .map(flow_blocks::parse_block)
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = document_mut(handle)?
+            .add_flow_blocks(document_index, &blocks, style)
+            .map_err(|e| e.to_string())?;
+        let next = result
+            .next
+            .map(|start| serde_json::json!({"page_index": start.page_index, "y": start.y}));
+        output_buffer(
+            serde_json::to_vec(&serde_json::json!({"pages": result.pages, "next": next}))
+                .map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
 /// Flow styled spans into new pages. Returns page indexes as a JSON array.
 ///
 /// `flow_json` accepts `spans`, whose entries contain `text` and optional
@@ -10849,102 +11013,7 @@ pub unsafe extern "C" fn ofd_add_flowed_spans_json(
         let input: serde_json::Value =
             serde_json::from_str(input_string(flow_json)?).map_err(|e| e.to_string())?;
         let style = parse_flow_style(&input)?;
-        let items = input
-            .get("spans")
-            .and_then(serde_json::Value::as_array)
-            .ok_or("spans must be an array")?;
-        let mut spans = Vec::with_capacity(items.len());
-        for item in items {
-            let text = item
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("span text must be a string")?;
-            let mut span = FlowSpan::new(text);
-            if let Some(value) = item.get("font_id") {
-                span.font_id = Some(
-                    value
-                        .as_str()
-                        .ok_or("span font_id must be a string")?
-                        .into(),
-                );
-            }
-            if let Some(value) = item.get("font_size") {
-                span.font_size = Some(value.as_f64().ok_or("span font_size must be a number")?);
-            }
-            if let Some(value) = item.get("language") {
-                span.language = Some(
-                    value
-                        .as_str()
-                        .ok_or("span language must be a string")?
-                        .to_owned(),
-                );
-            }
-            if let Some(value) = item.get("fill_color") {
-                span.fill_color = Some(
-                    serde_json::from_value(value.clone())
-                        .map_err(|_| "span fill_color must contain three RGB bytes")?,
-                );
-            }
-            if let Some(value) = item.get("fill") {
-                span.fill = value.as_bool().ok_or("span fill must be a boolean")?;
-            }
-            if let Some(value) = item.get("stroke") {
-                span.stroke = value.as_bool().ok_or("span stroke must be a boolean")?;
-            }
-            if let Some(value) = item.get("stroke_color") {
-                span.stroke_color = Some(
-                    serde_json::from_value(value.clone())
-                        .map_err(|_| "span stroke_color must contain three RGB bytes")?,
-                );
-            }
-            if let Some(value) = item.get("stroke_width") {
-                span.stroke_width =
-                    Some(value.as_f64().ok_or("span stroke_width must be a number")?);
-            }
-            if let Some(value) = item.get("bold") {
-                span.bold = value.as_bool().ok_or("span bold must be a boolean")?;
-            }
-            if let Some(value) = item.get("weight") {
-                span.weight = Some(
-                    value
-                        .as_u64()
-                        .and_then(|weight| weight.try_into().ok())
-                        .ok_or("span weight must be an unsigned 16-bit integer")?,
-                );
-            }
-            if let Some(value) = item.get("italic") {
-                span.italic = value.as_bool().ok_or("span italic must be a boolean")?;
-            }
-            if let Some(value) = item.get("letter_spacing") {
-                span.letter_spacing = value
-                    .as_f64()
-                    .ok_or("span letter_spacing must be a number")?;
-            }
-            if let Some(value) = item.get("underline") {
-                span.underline = value.as_bool().ok_or("span underline must be a boolean")?;
-            }
-            if let Some(value) = item.get("underline_offset") {
-                span.underline_offset = value
-                    .as_f64()
-                    .ok_or("span underline_offset must be a number")?;
-            }
-            if let Some(value) = item.get("underline_width") {
-                span.underline_width = value
-                    .as_f64()
-                    .ok_or("span underline_width must be a number")?;
-            }
-            if let Some(value) = item.get("line_break_after") {
-                span.line_break_after = value
-                    .as_bool()
-                    .ok_or("span line_break_after must be a boolean")?;
-            }
-            if let Some(value) = item.get("keep_together") {
-                span.keep_together = value
-                    .as_bool()
-                    .ok_or("span keep_together must be a boolean")?;
-            }
-            spans.push(span);
-        }
+        let spans = parse_flow_spans(&input)?;
         let indexes = document_mut(handle)?
             .add_flowed_spans(document_index, &spans, style)
             .map_err(|e| e.to_string())?;

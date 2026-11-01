@@ -325,6 +325,7 @@ type nativeAPI struct {
 	addFlowedText                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
 	appendPathPage                  func(uintptr, uintptr, *byte, float64, float64, float64, float64, float64, float64, int32, int32) int32
 	appendImagePage                 func(uintptr, uintptr, *byte, uintptr, *byte, float64, float64) int32
@@ -691,6 +692,7 @@ func loadAPI() error {
 			{"ofd_add_flowed_text_json", &api.addFlowedText},
 			{"ofd_add_table_json", &api.addTable},
 			{"ofd_add_flowed_spans_json", &api.addFlowedSpans},
+			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
 			{"ofd_append_text_page_with_font", &api.appendTextWithFont},
 			{"ofd_append_path_page", &api.appendPathPage},
 			{"ofd_append_image_page", &api.appendImagePage},
@@ -1070,6 +1072,63 @@ type FlowTextStyle struct {
 	IndentEachParagraph    bool       `json:"indent_each_paragraph,omitempty"`
 	Shape                  bool       `json:"shape,omitempty"`
 	Language               string     `json:"language,omitempty"`
+}
+
+// FlowDocumentStyle shares page geometry and default typography across mixed blocks.
+type FlowDocumentStyle struct {
+	FlowTextStyle
+	BlockGap float64 `json:"block_gap,omitempty"`
+}
+
+// FlowParagraphStyle overrides typography without changing shared page geometry.
+// Pointer fields distinguish an explicit zero or false from an inherited value.
+type FlowParagraphStyle struct {
+	FontID                 *string  `json:"font_id,omitempty"`
+	FontSize               *float64 `json:"font_size,omitempty"`
+	LineHeight             *float64 `json:"line_height,omitempty"`
+	Align                  *string  `json:"align,omitempty"`
+	ParagraphGap           *float64 `json:"paragraph_gap,omitempty"`
+	KeepParagraphsTogether *bool    `json:"keep_paragraphs_together,omitempty"`
+	FirstLineIndent        *float64 `json:"first_line_indent,omitempty"`
+	RestLineIndent         *float64 `json:"rest_line_indent,omitempty"`
+	FirstLineIndentChars   *int     `json:"first_line_indent_chars,omitempty"`
+	IndentEachParagraph    *bool    `json:"indent_each_paragraph,omitempty"`
+	Shape                  *bool    `json:"shape,omitempty"`
+	Language               *string  `json:"language,omitempty"`
+}
+
+// FlowBlock is a paragraph, image, table, spacer, or page_break in placement order.
+// Paragraphs require exactly one of Text and Spans. Image Data is encoded as base64.
+type FlowBlock struct {
+	Type         string              `json:"type"`
+	Text         *string             `json:"text,omitempty"`
+	Spans        []FlowSpan          `json:"spans,omitempty"`
+	Style        *FlowParagraphStyle `json:"style,omitempty"`
+	Data         []byte              `json:"data_base64,omitempty"`
+	Format       string              `json:"format,omitempty"`
+	Width        float64             `json:"width,omitempty"`
+	Height       float64             `json:"height,omitempty"`
+	Align        string              `json:"align,omitempty"`
+	Table        *FlowTable          `json:"table,omitempty"`
+	RepeatHeader bool                `json:"repeat_header,omitempty"`
+}
+
+// FlowTable is a paginated grid inside a mixed flow. Padding is explicit:
+// zero means no padding. Nested tables in Cells keep their existing defaults.
+type FlowTable struct {
+	RowCount     int         `json:"row_count"`
+	ColumnWidths []float64   `json:"column_widths"`
+	Cells        []TableCell `json:"cells"`
+	RowHeight    float64     `json:"row_height,omitempty"`
+	Padding      float64     `json:"padding"`
+	BorderWidth  float64     `json:"border_width,omitempty"`
+	BorderColor  [3]uint8    `json:"border_color,omitempty"`
+}
+
+// FlowLayoutResult gives used global page indexes and the next continuation position.
+type FlowLayoutResult struct {
+	Pages []int      `json:"pages"`
+	Next  *FlowStart `json:"next"`
 }
 
 // TableStyle controls table layout and row pagination. RowHeight zero sizes
@@ -10019,6 +10078,52 @@ func (doc *Document) AddFlowedSpans(documentIndex int, spans []FlowSpan, style F
 		return nil, fmt.Errorf("decode flowed span page indexes: %w", err)
 	}
 	return indexes, nil
+}
+
+// AddFlowBlocks lays out ordered content atomically and returns its continuation.
+// A zero FlowTextStyle selects default A4 typography. Explicit spacers may span pages.
+func (doc *Document) AddFlowBlocks(documentIndex int, blocks []FlowBlock, style FlowDocumentStyle) (FlowLayoutResult, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return FlowLayoutResult{}, err
+	}
+	if documentIndex < 0 {
+		return FlowLayoutResult{}, errors.New("negative document index")
+	}
+	if style.FlowTextStyle == (FlowTextStyle{}) {
+		style.FlowTextStyle = DefaultFlowTextStyle()
+	}
+	if blocks == nil {
+		blocks = []FlowBlock{}
+	}
+	payload, err := json.Marshal(struct {
+		Blocks []FlowBlock `json:"blocks"`
+		FlowDocumentStyle
+	}{Blocks: blocks, FlowDocumentStyle: style})
+	if err != nil {
+		return FlowLayoutResult{}, fmt.Errorf("encode flow blocks: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return FlowLayoutResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addFlowBlocks(doc.handle, uintptr(documentIndex), &payloadBytes[0], &buffer)); err != nil {
+		return FlowLayoutResult{}, fmt.Errorf("add flow blocks: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return FlowLayoutResult{}, err
+	}
+	var result FlowLayoutResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return FlowLayoutResult{}, fmt.Errorf("decode flow layout result: %w", err)
+	}
+	return result, nil
 }
 
 // AppendTextPageWithFont appends a text page with the selected document font.

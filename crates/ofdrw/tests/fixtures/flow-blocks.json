@@ -1,0 +1,78 @@
+{
+  "request": {
+    "page_size": [
+      20,
+      20
+    ],
+    "margins": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "font_size": 2,
+    "line_height": 3,
+    "block_gap": 1,
+    "blocks": [
+      {
+        "type": "paragraph",
+        "text": "A"
+      },
+      {
+        "type": "image",
+        "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGM4oSECRAwQCgAfTgQRihDW0AAAAABJRU5ErkJggg==",
+        "format": "PNG",
+        "width": 6,
+        "height": 4,
+        "align": "center"
+      },
+      {
+        "type": "table",
+        "table": {
+          "row_count": 2,
+          "column_widths": [
+            16
+          ],
+          "row_height": 4,
+          "padding": 0,
+          "border_width": 0.2,
+          "cells": [
+            {
+              "row": 0,
+              "column": 0,
+              "text": "R1",
+              "row_span": 1,
+              "column_span": 1
+            },
+            {
+              "row": 1,
+              "column": 0,
+              "text": "R2",
+              "row_span": 1,
+              "column_span": 1
+            }
+          ]
+        }
+      },
+      {
+        "type": "paragraph",
+        "spans": [
+          {
+            "text": "B",
+            "underline": true
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "pages": [
+      0,
+      1
+    ],
+    "next": {
+      "page_index": 1,
+      "y": 10
+    }
+  }
+}

@@ -378,6 +378,18 @@ export interface FlowTextOptions {
   language?: string;
 }
 
+/** Typography overrides within a mixed flow; page geometry stays shared. */
+export type FlowParagraphStyle = Omit<FlowTextOptions, 'start' | 'page_size' | 'margins'>;
+export interface FlowDocumentOptions extends FlowTextOptions { block_gap?: number }
+export type FlowBlock =
+  | ({ type: 'paragraph'; style?: FlowParagraphStyle } & (
+      { text: string; spans?: never } | { spans: FlowSpan[]; text?: never }))
+  | ({ type: 'image'; align?: 'left' | 'center' | 'right' } & TableImage)
+  | { type: 'table'; table: NestedTable; repeat_header?: boolean }
+  | { type: 'spacer'; height: number }
+  | { type: 'page_break' };
+export interface FlowLayoutResult { pages: number[]; next: FlowStart | null }
+
 export type TextObjectOptions = {
   size?: number;
   fill_color?: [number, number, number];
@@ -1007,6 +1019,7 @@ export class Document {
   addImagePage(data: Buffer | Uint8Array, format: string, width?: number, height?: number): void;
   addPathPage(commands: string, boundary: [number, number, number, number], pageWidth?: number, pageHeight?: number, fill?: boolean, stroke?: boolean): void;
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
+  addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
   addFlowedSpans(documentIndex: number, spans: FlowSpan[], options?: FlowTextOptions): number[];
   addEmbeddedFont(name: string, data: Buffer | Uint8Array): string;
   addEmbeddedFontToDocument(documentIndex: number, name: string, data: Buffer | Uint8Array): string;

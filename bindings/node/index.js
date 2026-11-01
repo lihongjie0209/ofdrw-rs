@@ -306,6 +306,7 @@ const api = {
   addPathPage: library.func('int ofd_add_path_page(OfdDocument handle, str commands, double x, double y, double width, double height, double page_width, double page_height, int fill, int stroke)'),
   addFlowedText: library.func('int ofd_add_flowed_text_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowedSpans: library.func('int ofd_add_flowed_spans_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
+  addFlowBlocks: library.func('int ofd_add_flow_blocks_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addTable: library.func('int ofd_add_table_json(OfdDocument handle, size_t document_index, str table, _Out_ OfdBuffer *output)'),
   addEmbeddedFont: library.func('int ofd_add_embedded_font(OfdDocument handle, str name, const uint8_t *data, size_t len, _Out_ size_t *output)'),
   addEmbeddedFontToDocument: library.func('int ofd_add_embedded_font_to_document(OfdDocument handle, size_t document_index, str name, const uint8_t *data, size_t len, _Out_ size_t *output)'),
@@ -1655,6 +1656,12 @@ class Document {
   addFlowedText(documentIndex, value, options = {}) {
     const request = { ...optionsObject(options), text: textValue(value) };
     return this._json(api.addFlowedText, index(documentIndex, 'documentIndex'), JSON.stringify(request));
+  }
+
+  addFlowBlocks(documentIndex, blocks, options = {}) {
+    if (!Array.isArray(blocks)) throw new TypeError('blocks must be an array');
+    const request = { ...optionsObject(options), blocks };
+    return this._json(api.addFlowBlocks, index(documentIndex, 'documentIndex'), JSON.stringify(request));
   }
 
   addFlowedSpans(documentIndex, spans, options = {}) {

@@ -14,6 +14,7 @@
 - [多媒体资源与动作](#多媒体资源与动作)
 - [页面对象与文字编辑](#页面对象与文字编辑)
 - [文本流式布局](#文本流式布局)
+- [混合流布局](#混合流布局)
 - [表格与嵌套布局](#表格与嵌套布局)
 - [页面顺序与对象分组](#页面顺序与对象分组)
 - [SVG 预览](#svg-预览)
@@ -802,6 +803,42 @@ error without modifying the document. In shaped flow, a grapheme that crosses
 span boundaries inherits the first span's appearance, while any overlapping
 `keep_together` span still keeps the whole touched grapheme with its following
 content.
+
+## 混合流布局
+
+**未发布（开发分支）：** `OfdDocument::add_flow_blocks()` accepts an ordered
+sequence of paragraphs, images, paginated tables, spacers, and explicit page
+breaks. `FlowDocumentStyle.text` shares page size, margins, an optional existing
+page start, and default typography. `block_gap` separates content blocks and is
+discarded when a block moves to a new page. A spacer adds explicit space; it
+preserves the pending gap between neighboring content blocks. Explicit page
+breaks append blank pages, including consecutive or trailing breaks.
+
+The result contains `pages` (used global page indexes) and `next` (a
+`FlowStart`, or `None` when no page was selected). `next.y` is measured from the
+last page's canvas top and includes blank text lines and explicit spacers. Pass
+it as the start of a later flow call. Paragraph overrides change typography
+without changing shared page geometry; changing font size alone preserves the
+inherited leading. Span styles, shaping, and paragraph keep rules retain their
+existing behavior. Images move as whole blocks and must fit the content area.
+Tables retain merged row groups and optional repeated headers. A later invalid
+block rolls back the entire call, including earlier pages and resources.
+Image-only flows do not require a font. Calls accept at most 10,000 blocks and
+10,000 used pages; oversized spacers are rejected before page allocation.
+
+Interfaces: Python `Document.add_flow_blocks(document_index, blocks, **options)`,
+Go `Document.AddFlowBlocks(documentIndex, blocks, style)`, Node.js
+`Document.addFlowBlocks(documentIndex, blocks, options)`, and C
+`ofd_add_flow_blocks_json()`. C JSON style fields match existing text flow and
+add `block_gap` and `blocks`. Paragraph blocks require exactly one of `text` or
+`spans`, with optional `style` overrides. Image blocks use `data_base64`,
+`format`, `width`, `height`, and optional `align`; Python also accepts bytes in
+`data`. Table blocks contain a `table` grid and optional `repeat_header`.
+Go uses `FlowTable` for top-level paginated grids: its `Padding` zero is explicit;
+existing `NestedTable` defaults inside cells are preserved.
+
+This is vertical block composition. Java-style floating elements, general
+containers, and other DOM layout behavior remain pending.
 
 ## 表格与嵌套布局
 
