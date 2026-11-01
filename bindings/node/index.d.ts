@@ -415,6 +415,8 @@ export interface LayoutBox {
   border?: [number, number, number, number];
   background_color?: [number, number, number] | null;
   border_color?: [number, number, number];
+  /** Java dash arguments: one length, dash/gap pairs, or offset then pairs. */
+  border_dash?: number[] | null;
   alpha?: number | null;
   float?: 'left' | 'right' | 'center';
   clear?: 'none' | 'left' | 'right' | 'both';

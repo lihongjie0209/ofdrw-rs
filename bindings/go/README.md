@@ -211,3 +211,24 @@ container that would span pages fails atomically.
 ```json
 {"children": [{"type": "line_break"}, {"type": "page_area_fill"}]}
 ```
+
+
+### Dashed box borders (unreleased source API)
+
+`border_dash` (`BorderDash` in Go) uses Java `Div.setBorderDash` arguments:
+`[3]` means dash/gap `[3, 3]`; `[3, 2]` means dash/gap `[3, 2]`;
+`[1, 3, 2]` sets offset 1 followed by dash/gap `[3, 2]`. Longer even
+sequences contain dash/gap pairs, and longer odd sequences start with the
+offset. Null or an empty sequence selects a solid border. Lengths must be
+positive and finite, with at most 256 lengths; offsets below 0.000001 are
+omitted, matching Java. Invalid patterns fail atomically, including placeholders.
+
+This field works in measured boxes, automatic text boxes and nested mixed
+containers. Equal-width borders use one closed stroked path; different edge
+widths use separate paths with horizontal edges owning the corners. Page cuts
+preserve the existing top/bottom border fragmentation rules. Dash phase starts
+at each emitted path; allocation, text wrapping and continuation are unchanged.
+
+```json
+{"size": [40, 10], "border": [0.5, 0.5, 0.5, 0.5], "border_dash": [1, 3, 2]}
+```

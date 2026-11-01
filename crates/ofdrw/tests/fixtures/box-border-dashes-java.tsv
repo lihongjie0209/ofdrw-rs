@@ -1,0 +1,11 @@
+# Java OFDRW revision 84e9eb260ba6fd351ecccf08a01a40305d4af635; generated independently of Rust.
+# case boundary line_width dash_pattern dash_offset abbreviated_data
+one	2 2 12 7	1.0	3 3	0.0	M 0.500 0.500 L 11.500 0.500 L 11.500 6.500 L 0.500 6.500 C
+pairs	2 2 12 7	1.0	3 2	0.0	M 0.500 0.500 L 11.500 0.500 L 11.500 6.500 L 0.500 6.500 C
+offset	2 2 12 7	1.0	3 2	1.0	M 0.500 0.500 L 11.500 0.500 L 11.500 6.500 L 0.500 6.500 C
+long	2 2 12 7	1.0	3 2 4 1	1.0	M 0.500 0.500 L 11.500 0.500 L 11.500 6.500 L 0.500 6.500 C
+unequal	2 2 16 1	1.0	3 2	1.0	M 0 0.500 L 16 0.500
+unequal	2 8 16 3	3.0	3 2	1.0	M 0 1.500 L 16 1.500
+unequal	2 3 4 5	4.0	3 2	1.0	M 2 0 L 2 5
+unequal	16 3 2 5	2.0	3 2	1.0	M 1 0 L 1 5
+negative_offset	2 2 12 7	1.0	3 2	0.0	M 0.500 0.500 L 11.500 0.500 L 11.500 6.500 L 0.500 6.500 C

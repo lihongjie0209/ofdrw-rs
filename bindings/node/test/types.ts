@@ -437,6 +437,9 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
   ]}]);
   // @ts-expect-error controls do not accept a height
   document.addFlowContainers(0, [{layout: {size: [16, 0]}, children: [{type: 'page_area_fill', height: 1}]}]);
+  document.addBoxLayout(0, [{type: 'box', size: [10, 5], border_dash: [1, 3, 2]}]);
+  // @ts-expect-error border dash lengths must be numeric
+  document.addBoxLayout(0, [{type: 'box', size: [10, 5], border_dash: ['3']}]);
   // @ts-expect-error password recipients need a password
   document.encryptWithPasswords([{ username: 'alice' }]);
   // @ts-expect-error certificate recipients need DER bytes

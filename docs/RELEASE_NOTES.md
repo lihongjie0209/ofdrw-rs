@@ -1,5 +1,10 @@
 # Unreleased
 
+- Add Java-style dashed box borders to Rust, C, Python, Go and Node.js, shared
+  by measured boxes, automatic text boxes and nested mixed containers. Keep
+  border fragment geometry and atomic validation; verify paths against an
+  independently rendered Java reference.
+
 - Add Java-compatible `BR` and `PageAreaFiller` controls to mixed containers
   in Rust, C, Python, Go and Node.js. Preserve explicit blank pages, ignore
   empty row breaks, reset row gaps after fills, and reject page-splitting
