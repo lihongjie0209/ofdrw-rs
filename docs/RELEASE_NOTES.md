@@ -31,6 +31,11 @@
   Python, Go and Node.js flow and table image requests, with cross-language
   geometry and rollback tests.
 
+- Add Rust box content ranges for line-aware page cuts. Measured text lines
+  can become indivisible intervals; floating columns retain independent
+  source offsets while decoration bands remain consumed once. Validate
+  ranges and reject unfit lines atomically.
+
 # v0.3.0
 
 ## Upgrade notes

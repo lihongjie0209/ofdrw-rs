@@ -8,7 +8,8 @@ mod archive;
 mod bilevel;
 mod box_layout;
 pub use box_layout::{
-    BoxClear, BoxFloat, BoxLayoutItem, BoxLayoutResult, BoxLayoutStyle, BoxPlacement, LayoutBox,
+    BoxClear, BoxContentRanges, BoxFloat, BoxLayoutItem, BoxLayoutResult, BoxLayoutStyle,
+    BoxPlacement, LayoutBox,
 };
 mod encryption;
 mod flow_blocks;

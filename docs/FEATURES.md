@@ -946,6 +946,25 @@ Text dimensions can be measured with the API above and used to size a box.
 General nested child containers and line-aware
 container fragmentation remain pending.
 
+### 按内容区间分页
+
+**未发布，Rust 接口：** `add_box_layout_with_content_ranges()` accepts
+`BoxContentRanges { source_index, ranges }` alongside the measured boxes.
+Each range is an indivisible `[start, end]` interval relative to the original
+content top. A cut inside an interval moves that interval intact to the next
+page. `BoxContentRanges::from_text(source_index, &metrics)` creates these
+intervals from measured lines, including line leading. Disjoint gaps can still
+be split. Margin, padding and border bands retain the ordinary box rules.
+
+Floating columns may consume different content heights before a page break;
+returned `source_offset` values identify each column’s own remaining source.
+Line intervals must be ordered, positive, disjoint, inside the content height,
+and no taller than the full page content area. Invalid ranges roll back the
+whole operation. Ordinary `add_box_layout()` retains geometric splitting.
+This API places and decorates fragments; callers still draw child content in
+the returned rectangles. Automatic styled-child rendering and nested container
+pagination remain pending, as does exposure of range policies in the bindings.
+
 ## 表格与嵌套布局
 
 **v0.3.0:** Tables accept the same optional `start` position as text flow

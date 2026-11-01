@@ -97,12 +97,37 @@ pub struct BoxLayoutResult {
     pub next: Option<FlowStart>,
 }
 
+/// Indivisible vertical content ranges for one box, in content coordinates.
+///
+/// Ranges must be positive, ordered, disjoint and inside the box's content
+/// height. A page break inside a range moves that range to the next page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoxContentRanges {
+    pub source_index: usize,
+    pub ranges: Vec<[f64; 2]>,
+}
+
+impl BoxContentRanges {
+    /// Protect each measured text line, including its leading, from page cuts.
+    pub fn from_text(source_index: usize, metrics: &FlowTextMetrics) -> Self {
+        Self {
+            source_index,
+            ranges: metrics
+                .lines
+                .iter()
+                .map(|line| [line.y, line.y + line.height])
+                .collect(),
+        }
+    }
+}
+
 struct PreparedBox<'a> {
     source_index: usize,
     source: &'a LayoutBox,
     width: f64,
     height: f64,
     content_width: f64,
+    ranges: &'a [[f64; 2]],
 }
 
 impl PreparedBox<'_> {
@@ -218,6 +243,23 @@ impl OfdDocument {
         items: &[BoxLayoutItem],
         style: BoxLayoutStyle,
     ) -> Result<BoxLayoutResult, OfdError> {
+        self.add_box_layout_with_content_ranges(document_index, items, &[], style)
+    }
+
+    /// Lay out boxes while keeping specified content ranges on a single page.
+    ///
+    /// Ranges are relative to content tops, before margins, borders, padding
+    /// and drawing offsets. Columns can consume different source heights at a
+    /// page boundary; their remaining content retains its horizontal position.
+    /// Unused space below a protected range is left blank. A range taller than
+    /// a full page content area is rejected. All changes remain atomic.
+    pub fn add_box_layout_with_content_ranges(
+        &mut self,
+        document_index: usize,
+        items: &[BoxLayoutItem],
+        content_ranges: &[BoxContentRanges],
+        style: BoxLayoutStyle,
+    ) -> Result<BoxLayoutResult, OfdError> {
         if items.len() > 10_000 {
             return Err(OfdError::Limit("too many layout boxes".into()));
         }
@@ -252,6 +294,38 @@ impl OfdDocument {
             style.margins,
             style.start,
         )?;
+        let mut ranges_by_item = vec![None; items.len()];
+        let mut range_count = 0usize;
+        for policy in content_ranges {
+            let Some(BoxLayoutItem::Box(b)) = items.get(policy.source_index) else {
+                return Err(OfdError::Invalid(
+                    "content ranges must reference a box".into(),
+                ));
+            };
+            if ranges_by_item[policy.source_index].is_some() {
+                return Err(OfdError::Invalid("duplicate box content ranges".into()));
+            }
+            range_count = range_count.saturating_add(policy.ranges.len());
+            if range_count > 100_000 {
+                return Err(OfdError::Limit("too many box content ranges".into()));
+            }
+            let mut end = 0.;
+            for &[start, stop] in &policy.ranges {
+                if !start.is_finite()
+                    || !stop.is_finite()
+                    || start < end
+                    || stop <= start
+                    || stop > b.size[1]
+                    || stop - start > height
+                {
+                    return Err(OfdError::Invalid(
+                        "box content ranges are invalid or too tall".into(),
+                    ));
+                }
+                end = stop;
+            }
+            ranges_by_item[policy.source_index] = Some(policy.ranges.as_slice());
+        }
         let mut prepared = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             let BoxLayoutItem::Box(b) = item else {
@@ -296,6 +370,7 @@ impl OfdDocument {
                 width: outer_width,
                 height: outer_height,
                 content_width,
+                ranges: ranges_by_item[index].unwrap_or(&[]),
             }));
         }
         let mut staged = self.clone();
@@ -406,6 +481,29 @@ impl OfdDocument {
                 cursor.page = None;
                 continue;
             }
+            let consumptions: Vec<f64> = row
+                .iter()
+                .enumerate()
+                .map(|(index, b)| {
+                    if done[index] || (b.source.integrity && b.height - offsets[index] > required) {
+                        return 0.;
+                    }
+                    let mut consumed = (b.height - offsets[index]).min(required);
+                    let content_top = b.source.margin[0] + b.source.border[0] + b.source.padding[0];
+                    let cut = offsets[index] + consumed - content_top;
+                    let range_index = b.ranges.partition_point(|range| range[1] <= cut);
+                    if let Some(&[start, end]) = b.ranges.get(range_index) {
+                        if start < cut && cut < end {
+                            consumed = (content_top + start - offsets[index]).max(0.);
+                        }
+                    }
+                    consumed
+                })
+                .collect();
+            if remaining > 0. && consumptions.iter().all(|value| *value == 0.) {
+                cursor.page = None;
+                continue;
+            }
             let (page, origin_x, y) = cursor.place(self, document_index, required, 0., pages)?;
             for (index, b) in row.iter().enumerate() {
                 if done[index] {
@@ -415,7 +513,10 @@ impl OfdDocument {
                 if b.source.integrity && remaining > required {
                     continue;
                 }
-                let consumed = remaining.min(required);
+                let consumed = consumptions[index];
+                if consumed == 0. && remaining > 0. {
+                    continue;
+                }
                 let placement = b.fragment(
                     page,
                     origin_x + positions[index],
