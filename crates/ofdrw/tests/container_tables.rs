@@ -190,10 +190,6 @@ fn invalid_table_typography_grid_and_oversized_groups_roll_back() {
     }
     for bad_style in [
         TableStyle {
-            repeat_header: true,
-            ..typography()
-        },
-        TableStyle {
             font_id: Some("missing".into()),
             ..typography()
         },

@@ -131,14 +131,6 @@ struct PreparedBox<'a> {
 }
 
 impl PreparedBox<'_> {
-    fn exclusive(&self) -> bool {
-        self.source.clear == BoxClear::Both
-            || matches!(
-                (self.source.float, self.source.clear),
-                (BoxFloat::Left, BoxClear::Right) | (BoxFloat::Right, BoxClear::Left)
-            )
-    }
-
     fn fragment(&self, page: usize, x: f64, y: f64, offset: f64, height: f64) -> BoxPlacement {
         let b = self.source;
         let bands = [
@@ -185,30 +177,78 @@ impl PreparedBox<'_> {
     }
 }
 
-fn can_share(row: &[PreparedBox<'_>], item: &PreparedBox<'_>, width: f64) -> bool {
-    if row.is_empty() {
+fn exclusive(b: &LayoutBox) -> bool {
+    b.clear == BoxClear::Both
+        || matches!(
+            (b.float, b.clear),
+            (BoxFloat::Left, BoxClear::Right) | (BoxFloat::Right, BoxClear::Left)
+        )
+}
+
+pub(super) fn shares_row<'a>(
+    mut row: impl Iterator<Item = (&'a LayoutBox, f64)> + Clone,
+    item: (&LayoutBox, f64),
+    width: f64,
+) -> bool {
+    let Some((first, _)) = row.clone().next() else {
         return true;
-    }
-    if item.exclusive()
-        || row[0].exclusive()
-        || row.iter().map(|b| b.width).sum::<f64>() + item.width > width
+    };
+    let b = item.0;
+    if exclusive(b)
+        || exclusive(first)
+        || row.clone().map(|(_, width)| width).sum::<f64>() + item.1 > width
     {
         return false;
     }
-    if row[0].source.float == BoxFloat::Center {
-        item.source.float == BoxFloat::Center
-            && item.source.clear != BoxClear::Left
-            && row.last().is_none_or(|b| b.source.clear != BoxClear::Right)
+    if first.float == BoxFloat::Center {
+        b.float == BoxFloat::Center
+            && b.clear != BoxClear::Left
+            && row.last().is_none_or(|(b, _)| b.clear != BoxClear::Right)
     } else {
-        item.source.float != BoxFloat::Center
-            && !row.iter().any(|b| {
-                b.source.float == item.source.float
+        b.float != BoxFloat::Center
+            && !row.any(|(prior, _)| {
+                prior.float == b.float
                     && matches!(
-                        (item.source.float, item.source.clear),
+                        (b.float, b.clear),
                         (BoxFloat::Left, BoxClear::Left) | (BoxFloat::Right, BoxClear::Right)
                     )
             })
     }
+}
+
+pub(super) fn row_positions<'a>(
+    row: impl Iterator<Item = (&'a LayoutBox, f64)> + Clone,
+    width: f64,
+    start_x: f64,
+) -> Vec<f64> {
+    let centered = row
+        .clone()
+        .next()
+        .is_some_and(|(b, _)| b.float == BoxFloat::Center);
+    let mut left = start_x;
+    let mut right = left + width;
+    if centered {
+        left += (width - row.clone().map(|(_, width)| width).sum::<f64>()) / 2.;
+    }
+    row.map(|(b, width)| {
+        if b.float == BoxFloat::Right && !centered {
+            right -= width;
+            right
+        } else {
+            let x = left;
+            left += width;
+            x
+        }
+    })
+    .collect()
+}
+
+fn can_share(row: &[PreparedBox<'_>], item: &PreparedBox<'_>, width: f64) -> bool {
+    shares_row(
+        row.iter().map(|b| (b.source, b.width)),
+        (item.source, item.width),
+        width,
+    )
 }
 
 impl OfdDocument {
@@ -439,22 +479,11 @@ impl OfdDocument {
             return Ok(());
         }
         let width = cursor.page_size[0] - cursor.margins[1] - cursor.margins[3];
-        let mut left = cursor.margins[3];
-        let mut right = left + width;
-        let centered = row[0].source.float == BoxFloat::Center;
-        if centered {
-            left += (width - row.iter().map(|b| b.width).sum::<f64>()) / 2.;
-        }
-        let mut positions = Vec::with_capacity(row.len());
-        for b in row {
-            if b.source.float == BoxFloat::Right && !centered {
-                right -= b.width;
-                positions.push(right);
-            } else {
-                positions.push(left);
-                left += b.width;
-            }
-        }
+        let positions = row_positions(
+            row.iter().map(|b| (b.source, b.width)),
+            width,
+            cursor.margins[3],
+        );
         let mut offsets = vec![0.; row.len()];
         let mut done = vec![false; row.len()];
         while done.iter().any(|v| !v) {

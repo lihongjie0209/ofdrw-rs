@@ -29,11 +29,20 @@ func containerTypography(container *FlowContainer, font string, shape bool) {
 
 func TestFlowContainersMatchReferenceAndContinue(t *testing.T) {
 	for _, input := range []struct {
-		name  string
-		shape bool
-	}{{"plain", false}, {"shaped", true}} {
+		name    string
+		shape   bool
+		dynamic bool
+		repeat  bool
+	}{
+		{"plain", false, false, false},
+		{"shaped", true, false, false},
+		{"plain dynamic", false, true, false},
+		{"shaped dynamic", true, true, false},
+		{"repeated headers", false, false, true},
+	} {
 		t.Run(input.name, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "flow-containers.json"))
+			fixturePath := filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "flow-containers.json")
+			data, err := os.ReadFile(fixturePath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,9 +51,11 @@ func TestFlowContainersMatchReferenceAndContinue(t *testing.T) {
 					Containers []FlowContainer `json:"containers"`
 					BoxLayoutStyle
 				} `json:"request"`
-				Expected      BoxLayoutResult `json:"expected"`
-				Text          [][]string      `json:"text"`
-				ImageBoundary []float64       `json:"image_boundary"`
+				Expected       BoxLayoutResult `json:"expected"`
+				Text           [][]string      `json:"text"`
+				HeaderExpected BoxLayoutResult `json:"header_expected"`
+				HeaderText     [][]string      `json:"header_text"`
+				ImageBoundary  []float64       `json:"image_boundary"`
 			}
 			if err := json.Unmarshal(data, &fixture); err != nil {
 				t.Fatal(err)
@@ -63,19 +74,31 @@ func TestFlowContainersMatchReferenceAndContinue(t *testing.T) {
 				t.Fatal(err)
 			}
 			containerTypography(&fixture.Request.Containers[0], strconv.Itoa(id), input.shape)
+			if input.dynamic {
+				fixture.Request.Containers[0].Children[1].Container.Layout.Clear = "none"
+			}
+			if input.repeat {
+				fixture.Request.Containers[0].Children[3].TableStyle.RepeatHeader = true
+			}
+			expected := fixture.Expected
+			textReference := fixture.Text
+			if input.repeat {
+				expected, textReference = fixture.HeaderExpected, fixture.HeaderText
+			}
+			last := expected.Pages[len(expected.Pages)-1]
 			before, err := json.Marshal(fixture.Request.Containers)
 			if err != nil {
 				t.Fatal(err)
 			}
 			result, err := doc.AddFlowContainers(0, fixture.Request.Containers, fixture.Request.BoxLayoutStyle)
-			if err != nil || !reflect.DeepEqual(result, fixture.Expected) {
+			if err != nil || !reflect.DeepEqual(result, expected) {
 				t.Fatalf("layout: %+v, %v", result, err)
 			}
 			after, err := json.Marshal(fixture.Request.Containers)
 			if err != nil || !bytes.Equal(before, after) {
 				t.Fatalf("input changed: %v", err)
 			}
-			for page, expected := range fixture.Text {
+			for page, expected := range textReference {
 				text, err := doc.PageText(page)
 				if err != nil || !reflect.DeepEqual(text, expected) {
 					t.Fatalf("page %d: %v, %v", page, text, err)
@@ -95,14 +118,20 @@ func TestFlowContainersMatchReferenceAndContinue(t *testing.T) {
 			}
 			defer reopened.Close()
 			text, err := reopened.PageText(2)
-			if err != nil || !reflect.DeepEqual(text, []string{"R3", "Z"}) {
+			if err != nil || !reflect.DeepEqual(text, textReference[2]) {
 				t.Fatalf("reopened text: %v, %v", text, err)
 			}
-			extra := FlowContainer{Layout: LayoutBox{Size: [2]float64{4, 0}}, Children: []FlowContainerChild{{Type: "paragraph", Spans: []FlowSpan{{Text: "Q"}}, Style: fixture.Request.Containers[0].Children[0].Style}}}
+			extra := FlowContainer{
+				Layout: LayoutBox{Size: [2]float64{4, 0}},
+				Children: []FlowContainerChild{{
+					Type: "paragraph", Spans: []FlowSpan{{Text: "Q"}},
+					Style: fixture.Request.Containers[0].Children[0].Style,
+				}},
+			}
 			geometry := fixture.Request.BoxLayoutStyle
 			geometry.Start = result.Next
 			continued, err := doc.AddFlowContainers(0, []FlowContainer{extra}, geometry)
-			if err != nil || !reflect.DeepEqual(continued.Pages, []int{2}) {
+			if err != nil || !reflect.DeepEqual(continued.Pages, []int{last}) {
 				t.Fatalf("continuation: %+v, %v", continued, err)
 			}
 		})

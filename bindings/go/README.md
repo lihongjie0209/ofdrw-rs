@@ -188,9 +188,13 @@ types are paragraph, image, container, spacer and table. A table child has a
 fit bounds. Spacer height defaults to zero. Returned root fragments and
 `next` / `Next` support continuation with shared `start` / `Start` options.
 
-Root containers support floating rows. Nested children remain vertical;
-nested clear must be `both` or omitted. Internal floating rows and repeated
-table headers remain pending; requesting repeated headers returns an error.
+Containers support floating rows at every nesting level. Adjacent nested
+boxes share rows according to float, clear and width rules, with independent
+page continuation per column. Paragraphs, images, tables and spacers occupy
+full rows; `gap` separates rows. Repeated table headers stay with complete
+body-row groups, and header/body pairs that cannot fit a full page fail.
+Fragment heights include repeated headers and the space needed to align
+continuing floating columns.
 The whole call rolls back on invalid children. Limits are eight container
 levels and 10,000 container/child entries. This source API is not included in
 published version 0.3.0.

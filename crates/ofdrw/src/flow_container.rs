@@ -1,11 +1,12 @@
 use super::*;
+mod pagination;
 
 /// A vertical sequence of text, images, tables, spacing and nested decorated boxes.
 ///
 /// Content height is automatic; `layout.size[0]` is the requested width.
-/// Root containers support ordinary box floating rows. Nested containers are
-/// vertical children; their float direction controls horizontal alignment and
-/// their clear rule must be `Both`. Internal floating rows are separate work.
+/// Containers support Java-style floating rows at every nesting level.
+/// Paragraph, image, spacer and table children occupy full rows; nested boxes
+/// share rows according to their float direction, clear rules and widths.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowContainer {
     pub layout: LayoutBox,
@@ -25,7 +26,7 @@ pub enum FlowContainerChild {
     },
     /// Rows split only between complete merged-row groups. Table geometry
     /// comes from `table`; `style` supplies text defaults and font selection.
-    /// Repeated headers inside containers are currently unsupported.
+    /// Repeated headers stay with the first complete merged body-row group.
     Table {
         table: Box<NestedTable>,
         style: Box<TableStyle>,
@@ -41,10 +42,12 @@ struct PreparedContainer<'a> {
     layout: LayoutBox,
     children: Vec<PlacedChild<'a>>,
     ranges: Vec<[f64; 2]>,
+    gap: f64,
 }
 
 struct PlacedChild<'a> {
     id: usize,
+    keep_paragraphs: bool,
     x: f64,
     y: f64,
     node: PreparedChild<'a>,
@@ -53,6 +56,7 @@ struct PlacedChild<'a> {
 enum PreparedChild<'a> {
     Text(text_measurement::PreparedFlowText),
     Image(&'a TableCellImage),
+    Spacer(f64),
     Table {
         prepared: Box<PreparedNestedTable<'a>>,
         style: &'a TableStyle,
@@ -76,6 +80,7 @@ fn expected_units(b: &PreparedContainer<'_>) -> usize {
         .map(|child| match &child.node {
             PreparedChild::Text(flow) => flow.metrics.lines.len(),
             PreparedChild::Image(_) => 1,
+            PreparedChild::Spacer(_) => 0,
             PreparedChild::Table { groups, .. } => groups.len(),
             PreparedChild::Container(nested) => expected_units(nested),
         })
@@ -106,7 +111,8 @@ impl OfdDocument {
     /// Widths are clamped before text measurement. All changes are atomic.
     /// Up to 10,000 total nodes and eight nested container levels are accepted.
     /// Returned placements describe root containers; child objects use the
-    /// corresponding nested coordinates. Nested floating rows are unsupported.
+    /// corresponding nested coordinates. Columns continue independently; table
+    /// headers repeat when requested, expanding actual laid-out content height.
     ///
     /// ```
     /// use ofdrw::{BoxLayoutStyle, FlowContainer, FlowContainerChild, FlowSpan,
@@ -137,6 +143,9 @@ impl OfdDocument {
             .iter()
             .map(|b| self.prepare_container(document_index, b, available_width, 0, &mut count))
             .collect::<Result<Vec<_>, _>>()?;
+        if prepared.iter().any(pagination::needs_dynamic) {
+            return pagination::draw_containers(self, document_index, &prepared, style);
+        }
         let items = prepared
             .iter()
             .map(|b| BoxLayoutItem::Box(b.layout.clone()))
@@ -199,11 +208,6 @@ impl OfdDocument {
                 "flow container geometry is invalid".into(),
             ));
         }
-        if depth > 0 && b.layout.clear != BoxClear::Both {
-            return Err(OfdError::Invalid(
-                "nested vertical containers require clear Both".into(),
-            ));
-        }
         let mut layout = b.layout.clone();
         let horizontal = layout.margin[1]
             + layout.margin[3]
@@ -230,6 +234,7 @@ impl OfdDocument {
                 y += b.gap;
             }
             let id = *count;
+            let keep_paragraphs = matches!(child, FlowContainerChild::Paragraph { style, .. } if style.keep_paragraphs_together);
             let (x, height, node, protected) = match child {
                 FlowContainerChild::Paragraph { spans, style } => {
                     let flow =
@@ -276,11 +281,6 @@ impl OfdDocument {
                     style,
                     align,
                 } => {
-                    if style.repeat_header {
-                        return Err(OfdError::Invalid(
-                            "repeated table headers inside containers are unsupported".into(),
-                        ));
-                    }
                     let (font, metrics) =
                         self.container_table_fonts(document_index, table, style)?;
                     let prepared =
@@ -365,7 +365,12 @@ impl OfdDocument {
                     if !height.is_finite() || *height < 0. {
                         return Err(OfdError::Invalid("flow container spacer is invalid".into()));
                     }
-                    (0., *height, None, Vec::new())
+                    (
+                        0.,
+                        *height,
+                        Some(PreparedChild::Spacer(*height)),
+                        Vec::new(),
+                    )
                 }
             };
             ranges.extend(
@@ -374,7 +379,13 @@ impl OfdDocument {
                     .map(|[start, end]| [start + y, end + y]),
             );
             if let Some(node) = node {
-                children.push(PlacedChild { id, x, y, node });
+                children.push(PlacedChild {
+                    id,
+                    keep_paragraphs,
+                    x,
+                    y,
+                    node,
+                });
             }
             y += height;
             if !y.is_finite() {
@@ -386,6 +397,7 @@ impl OfdDocument {
             layout,
             children,
             ranges,
+            gap: b.gap,
         })
     }
 
@@ -493,6 +505,7 @@ impl OfdDocument {
                         }
                     }
                 }
+                PreparedChild::Spacer(_) => {}
                 PreparedChild::Image(image) => {
                     if child.y >= start && child.y + image.height <= end + 1e-9 {
                         if !drawn.insert((child.id, 0)) {

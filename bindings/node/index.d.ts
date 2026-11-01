@@ -1158,7 +1158,7 @@ export class Document {
 /** Automatically measured text children in a decorated box. Height is replaced. */
 export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTextOptions }
 
-/** Vertical children with measured height; nested floating rows remain unsupported. */
+/** Mixed children with measured height, nested floating rows and repeated table headers. */
 export interface FlowContainer { layout: LayoutBox; children?: FlowContainerChild[]; gap?: number }
 export type FlowContainerChild =
   | {type: 'paragraph'; spans: FlowSpan[]; style?: FlowTextOptions}

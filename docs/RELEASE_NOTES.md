@@ -47,17 +47,20 @@
 
 - Add Rust vertical mixed flow containers with recursive decorated children,
   paragraph and image children, safe content page cuts, gap/spacing and
-  atomic validation. Root boxes retain floating rows; internal floating rows
-  remain pending.
+  atomic validation. Root boxes retain floating rows.
 
 - Add paginated table children inside Rust flow containers, preserving complete
   merged-row groups and reusing existing cell drawing. Cache cell ordering
   and draw selected row intervals without rebuilding full-table row positions.
-  Repeated headers inside containers remain pending.
 
 - Expose nested mixed flow containers through C, Python, Go and Node.js with
   shared validation, typed models, recursive image/font normalization,
   reference geometry, continuation and atomic error tests, and usage examples.
+
+- Add planned nested floating rows and repeated table headers inside mixed
+  containers. Columns paginate independently, complete containers measure
+  maximum row heights, and headers stay with merged body groups. Preserve
+  start-page origins and stage all planning/drawing atomically.
 
 # v0.3.0
 

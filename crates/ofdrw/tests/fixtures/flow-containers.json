@@ -293,5 +293,185 @@
     2.0,
     4.0,
     4.0
+  ],
+  "header_reference": "Repeat R1 before R3 adds4mm; the last0.75mm bottom decoration moves to page3.",
+  "header_expected": {
+    "pages": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "placements": [
+      {
+        "source_index": 0,
+        "page_index": 0,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          11.25
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          11.25
+        ],
+        "padding_box": [
+          2.25,
+          2.25,
+          13.0,
+          11.0
+        ],
+        "content_box": [
+          2.75,
+          2.75,
+          12.0,
+          10.5
+        ],
+        "borders": [
+          0.25,
+          0.25,
+          0.0,
+          0.25
+        ],
+        "source_offset": 0.0,
+        "first": true,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 1,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          12.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          12.0
+        ],
+        "padding_box": [
+          2.25,
+          2.0,
+          13.0,
+          12.0
+        ],
+        "content_box": [
+          2.75,
+          2.0,
+          12.0,
+          12.0
+        ],
+        "borders": [
+          0.0,
+          0.25,
+          0.0,
+          0.25
+        ],
+        "source_offset": 11.25,
+        "first": false,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 2,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          12.0
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          12.0
+        ],
+        "padding_box": [
+          2.25,
+          2.0,
+          13.0,
+          12.0
+        ],
+        "content_box": [
+          2.75,
+          2.0,
+          12.0,
+          12.0
+        ],
+        "borders": [
+          0.0,
+          0.25,
+          0.0,
+          0.25
+        ],
+        "source_offset": 23.25,
+        "first": false,
+        "last": false
+      },
+      {
+        "source_index": 0,
+        "page_index": 3,
+        "allocation": [
+          2.0,
+          2.0,
+          13.5,
+          0.75
+        ],
+        "border_box": [
+          2.0,
+          2.0,
+          13.5,
+          0.75
+        ],
+        "padding_box": [
+          2.25,
+          2.0,
+          13.0,
+          0.5
+        ],
+        "content_box": [
+          2.75,
+          2.0,
+          12.0,
+          0.0
+        ],
+        "borders": [
+          0.0,
+          0.25,
+          0.25,
+          0.25
+        ],
+        "source_offset": 35.25,
+        "first": false,
+        "last": true
+      }
+    ],
+    "next": {
+      "page_index": 3,
+      "y": 2.75
+    }
+  },
+  "header_text": [
+    [
+      "A",
+      "B",
+      "C"
+    ],
+    [
+      "R1",
+      "R2"
+    ],
+    [
+      "R1",
+      "R3",
+      "Z"
+    ],
+    []
   ]
 }
