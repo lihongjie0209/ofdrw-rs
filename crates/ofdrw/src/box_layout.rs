@@ -560,7 +560,11 @@ impl OfdDocument {
         Ok(())
     }
 
-    fn draw_box_fragment(&mut self, b: &LayoutBox, p: &BoxPlacement) -> Result<(), OfdError> {
+    pub(super) fn draw_box_fragment(
+        &mut self,
+        b: &LayoutBox,
+        p: &BoxPlacement,
+    ) -> Result<(), OfdError> {
         let [x, y, w, h] = p.padding_box;
         if let Some(color) = b.background_color.filter(|_| w > 0. && h > 0.) {
             self.add_path_object(
@@ -620,4 +624,55 @@ impl OfdDocument {
         }
         Ok(())
     }
+}
+
+pub(super) fn nested_fragment(
+    source: &LayoutBox,
+    page: usize,
+    x: f64,
+    y: f64,
+    offset: f64,
+    height: f64,
+) -> Result<BoxPlacement, OfdError> {
+    let placement = PreparedBox {
+        source_index: 0,
+        source,
+        width: source.size[0]
+            + source.margin[1]
+            + source.margin[3]
+            + source.border[1]
+            + source.border[3]
+            + source.padding[1]
+            + source.padding[3],
+        height: source.size[1]
+            + source.margin[0]
+            + source.margin[2]
+            + source.border[0]
+            + source.border[2]
+            + source.padding[0]
+            + source.padding[2],
+        content_width: source.size[0],
+        ranges: &[],
+    }
+    .fragment(page, x, y, offset, height);
+    if placement
+        .allocation
+        .iter()
+        .chain(&placement.border_box)
+        .chain(&placement.padding_box)
+        .chain(&placement.content_box)
+        .any(|v| !v.is_finite())
+    {
+        return Err(OfdError::Invalid("nested box coordinates overflow".into()));
+    }
+    for [x, y, w, h] in [
+        placement.border_box,
+        placement.padding_box,
+        placement.content_box,
+    ] {
+        if !(x + w).is_finite() || !(y + h).is_finite() {
+            return Err(OfdError::Invalid("nested box bounds overflow".into()));
+        }
+    }
+    Ok(placement)
 }
