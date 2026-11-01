@@ -6,8 +6,13 @@
   merged rows and repeated headers. Paragraph typography overrides inherit
   shared page geometry. Rust, C, Python, Go and Node.js expose the operation.
 - Add mixed-flow API examples, cross-language fixtures, rollback tests,
-  TypeScript checks and explicit Node.js CI test inclusion. General floating
-  elements and container layout remain pending.
+  TypeScript checks and explicit Node.js CI test inclusion.
+- Add the Rust measured-box layout foundation: Java-style floating rows, clear
+  rules, independent margin/border/padding edges, fragment coordinates, complete
+  boxes, placeholders and atomic decoration drawing. Independent Java-generated
+  coordinates and Rust rendering tests cover the implementation. Automatic
+  content measurement, general child containers and language bindings for boxes
+  remain pending.
 
 # v0.3.0
 

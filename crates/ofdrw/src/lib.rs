@@ -6,6 +6,10 @@
 
 mod archive;
 mod bilevel;
+mod box_layout;
+pub use box_layout::{
+    BoxClear, BoxFloat, BoxLayoutItem, BoxLayoutResult, BoxLayoutStyle, BoxPlacement, LayoutBox,
+};
 mod encryption;
 mod flow_blocks;
 pub use flow_blocks::{FlowBlock, FlowDocumentStyle, FlowLayoutResult, FlowParagraphStyle};
