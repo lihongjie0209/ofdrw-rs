@@ -183,7 +183,13 @@ mod tests {
             "../../ofdrw/tests/fixtures/flow-containers.json"
         ))
         .unwrap();
-        for shape in [false, true] {
+        for (shape, dynamic, repeat) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+        ] {
             let mut handle = ptr::null_mut();
             assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
             let font = unsafe {
@@ -197,6 +203,20 @@ mod tests {
             };
             let mut request = fixture["request"].clone();
             typography(&mut request, &font.to_string(), shape);
+            if dynamic {
+                request["containers"][0]["children"][1]["container"]["layout"]["clear"] =
+                    serde_json::json!("none");
+            }
+            if repeat {
+                request["containers"][0]["children"][3]["table_style"]["repeat_header"] =
+                    serde_json::json!(true);
+            }
+            let expected = &fixture[if repeat {
+                "header_expected"
+            } else {
+                "expected"
+            }];
+            let text = &fixture[if repeat { "header_text" } else { "text" }];
             let input = CString::new(request.to_string()).unwrap();
             let before = unsafe { document_ref(handle).unwrap().to_bytes().unwrap() };
             assert_ne!(
@@ -219,11 +239,11 @@ mod tests {
                 std::slice::from_raw_parts(output.data, output.len)
             })
             .unwrap();
-            assert_eq!(result, fixture["expected"]);
+            assert_eq!(&result, expected);
             unsafe { ofd_buffer_free(output) };
-            for page in 0..3 {
+            for page in 0..expected["pages"].as_array().unwrap().len() {
                 let actual = unsafe { document_ref(handle).unwrap().page_text(page).unwrap() };
-                assert_eq!(serde_json::json!(actual), fixture["text"][page]);
+                assert_eq!(serde_json::json!(actual), text[page]);
             }
             assert_eq!(
                 unsafe { document_ref(handle).unwrap().page_images(1).unwrap()[0].boundary },

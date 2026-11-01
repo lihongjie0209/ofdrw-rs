@@ -15,13 +15,19 @@ function typography(children, font, shape) {
 }
 
 test('nested mixed containers return complete fragments and draw all child kinds', () => {
-  for (const shape of [false, true]) {
-    const {request, expected, text, image_boundary} = JSON.parse(fs.readFileSync(path.join(fixtures, 'flow-containers.json')));
+  for (const mode of [{shape: false, dynamic: false}, {shape: true, dynamic: false}, {shape: false, dynamic: true}, {shape: true, dynamic: true}, {shape: false, dynamic: false, repeat: true}]) {
+    const {shape, dynamic, repeat} = mode;
+    const {request, expected: normalExpected, text: normalText, image_boundary, header_expected, header_text} = JSON.parse(fs.readFileSync(path.join(fixtures, 'flow-containers.json')));
     const {containers, ...options} = request;
     const doc = Document.create();
     try {
       const font = doc.addEmbeddedFont('DejaVu Sans', fs.readFileSync(path.join(fixtures, 'dejavu-sans.ttf')));
       typography(containers[0].children, font, shape);
+      if (dynamic) containers[0].children[1].container.layout.clear = "none";
+      if (repeat) containers[0].children[3].table_style.repeat_header = true;
+      const expected = repeat ? header_expected : normalExpected;
+      const text = repeat ? header_text : normalText;
+      const last = expected.pages.at(-1);
       const before = structuredClone(containers);
       const result = doc.addFlowContainers(0, containers, options);
       assert.deepEqual(result, expected);
@@ -29,11 +35,11 @@ test('nested mixed containers return complete fragments and draw all child kinds
       text.forEach((expected, page) => assert.deepEqual(doc.pageText(page), expected));
       assert.deepEqual(doc.pageImages(1)[0].boundary, image_boundary);
       const reopened = Document.fromBytes(doc.toBytes());
-      try { assert.deepEqual(reopened.pageText(2), ['R3', 'Z']); assert.ok(reopened.pagePng(1, 30).length); }
+      try { assert.deepEqual(reopened.pageText(2), text[2]); assert.ok(reopened.pagePng(1, 30).length); }
       finally { reopened.close(); }
       const extra = {layout: {size: [4, 0]}, children: [{type: 'paragraph', spans: [{text: 'Q'}], style: containers[0].children[0].style}]};
-      assert.deepEqual(doc.addFlowContainers(0, [extra], {...options, start: result.next}).pages, [2]);
-      assert.deepEqual(doc.pageText(2), ['R3', 'Z', 'Q']);
+      assert.deepEqual(doc.addFlowContainers(0, [extra], {...options, start: result.next}).pages, [last]);
+      assert.deepEqual(doc.pageText(last), [...text[last], 'Q']);
     } finally { doc.close(); }
   }
 });

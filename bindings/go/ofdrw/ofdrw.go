@@ -10981,8 +10981,8 @@ type TextBox struct {
 	Style  FlowTextStyle `json:"style"`
 }
 
-// FlowContainer is a vertical sequence of mixed children with measured height.
-// Nested float controls alignment and nested Clear must be both or omitted.
+// FlowContainer lays out mixed children and nested floating rows with measured height.
+// Nested Float and Clear control shared rows and independent page continuation.
 type FlowContainer struct {
 	Layout   LayoutBox            `json:"layout"`
 	Children []FlowContainerChild `json:"children,omitempty"`
@@ -11009,7 +11009,7 @@ type FlowContainerChild struct {
 }
 
 // FlowContainerTableStyle supplies table typography; grid geometry belongs to Table.
-// Repeated headers inside containers are currently rejected.
+// Repeated headers stay with complete merged body-row groups.
 type FlowContainerTableStyle struct {
 	FontID       string  `json:"font_id,omitempty"`
 	FontSize     float64 `json:"font_size,omitempty"`

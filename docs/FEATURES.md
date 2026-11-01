@@ -835,7 +835,8 @@ the logical line box.
 Use the measured height as `LayoutBox.size[1]` to size a box from its text.
 After box placement, the returned content rectangle can define the start and
 margins for normal text flow. Existing-page origins are applied during drawing.
-General nested containers and line-aware container fragmentation remain pending.
+Automatic text boxes and mixed containers below support measured content and
+line-aware fragmentation; arbitrary DOM layout fidelity remains pending.
 
 Python: `Document.measure_flowed_spans(document_index, spans, content_width, **options)`.
 Go: `Document.MeasureFlowedSpans(documentIndex, spans, contentWidth, style)`.
@@ -901,8 +902,8 @@ Go uses `FlowTable` for top-level paginated grids: its `Padding` zero is explici
 existing `NestedTable` defaults inside cells are preserved.
 
 This is vertical block composition. Measured floating boxes are supported
-separately below; text and image measurement are available independently, while general child
-containers and other DOM layout behavior remain pending.
+separately below. Measured text boxes and nested mixed-content containers are
+also available below; arbitrary DOM layout fidelity remains pending.
 
 ## 盒模型与浮动分段
 
@@ -945,8 +946,8 @@ Go provides `DefaultBoxLayoutStyle()` and typed items, boxes, placements, and
 results; Node.js provides corresponding TypeScript declarations.
 
 Text dimensions can be measured with the API above and used to size a box.
-General nested child containers and line-aware
-container fragmentation remain pending.
+Automatic text boxes and nested mixed-content containers below combine
+measurement, safe content fragmentation and drawing.
 
 ### 按内容区间分页
 
@@ -963,9 +964,10 @@ returned `source_offset` values identify each column’s own remaining source.
 Line intervals must be ordered, positive, disjoint, inside the content height,
 and no taller than the full page content area. Invalid ranges roll back the
 whole operation. Ordinary `add_box_layout()` retains geometric splitting.
-This API places and decorates fragments; callers still draw child content in
-the returned rectangles. Automatic styled-child rendering and nested container
-pagination remain pending, as does exposure of range policies in the bindings.
+This low-level API places and decorates fragments; callers draw child content
+in the returned rectangles. Automatic text boxes and mixed containers below
+provide styled child drawing and nested pagination. Direct range policies
+remain Rust-only.
 
 ## 自动文字盒
 
@@ -1001,8 +1003,9 @@ Go uses `Document.AddTextBoxes(documentIndex, boxes, style)`, Node.js uses
 Layout fields match measured boxes, without a `type` field. The response is
 the ordinary box layout result, including full fragments and `next`.
 
-This provides text children inside automatically sized boxes. General nested
-child containers and mixed child kinds remain pending.
+This API accepts text spans inside automatically sized boxes. Mixed and nested
+child kinds are available through the flow container API below; arbitrary DOM
+layout fidelity remains pending.
 
 ## 嵌套混合流容器
 
@@ -1015,11 +1018,14 @@ Images remain indivisible; protected lines, paragraphs and complete nested
 containers move intact across pages. Nested decorations consume top/bottom
 bands only once, and parent decoration is painted before child content.
 
-Root containers support shared floating rows through the measured-box engine.
-Within a container, children form a vertical sequence separated by `gap`;
-nested float direction controls horizontal alignment and nested clear must be
-`Both`. Child floating rows and arbitrary DOM layout remain pending. The API accepts eight container levels and 10,000 container/child
-entries. Invalid later content or overflowing nested coordinates rolls back
+Root containers and nested boxes support Java-style floating rows. Adjacent
+nested boxes share rows according to their float, clear and width rules;
+paragraph, image, table and spacer children occupy full rows. `gap` separates
+rows. Floating columns continue independently across pages, and the next row
+starts after the longest continuing column. Complete containers use the
+unpaginated maximum row height before deciding whether to move as a whole.
+Arbitrary DOM layout fidelity remains pending. The API accepts eight container levels, 10,000 container/child entries,
+10,000 used pages and 100,000 total nested fragments. Invalid later content or overflowing nested coordinates rolls back
 the whole call. Placeholders reserve measured space without painting children.
 Returned placements describe roots; child objects use nested content positions.
 
@@ -1032,7 +1038,9 @@ font selection and text defaults. Complete merged-row groups are protected
 from page cuts. Sliced table drawing reuses cached cell ordering and only
 builds positions for the selected rows. Existing nested cell tables, images,
 backgrounds and text decorations use the ordinary table renderer. Repeated
-headers inside containers remain pending and `repeat_header: true` is rejected.
+headers repeat when `repeat_header` is true. A header stays with the first
+complete merged body-row group. A header cannot span body rows; header/body
+pairs taller than the full page content area fail atomically.
 Tests compare container-table raster output with the existing table API and
 cover merged rows, fractional geometry and rollback of malformed tables.
 
@@ -1046,6 +1054,14 @@ optional `gap`, and optional `children`. Children select a `type`: paragraph
 optional `table_style` and `align`), container (`container`), or spacer
 (optional `height`, default zero). Table style supplies only typography and
 optional `repeat_header`; grid geometry belongs to `table`.
+
+Advanced pagination is planned before document mutation. Actual fragment
+heights and source offsets include repeated headers and row space needed to
+align independently continuing columns. Parent decoration precedes nested
+content. Existing canvas origins apply only to the selected start page;
+appended pages use their normal origin. Tests cover centered/cleared nested
+rows, independent line heights, merged header lookahead, shaped text, images,
+fractional edges, complete parents, canvas origins and rollback.
 
 Native validation is shared across languages. Python accepts nested image
 bytes and normalizes font IDs without changing caller data. Go uses `FlowTable`

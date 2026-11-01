@@ -134,7 +134,7 @@ fn invalid_nested_content_rolls_back_the_entire_operation() {
         assert_eq!(doc.to_bytes().unwrap(), before);
     }
     let mut nested = container(vec![paragraph("B")]);
-    nested.layout.clear = ofdrw::BoxClear::None;
+    nested.layout.offset = [f64::NAN, 0.];
     assert!(doc
         .add_flow_containers(
             0,
