@@ -478,12 +478,18 @@ def test_imports_hairline_pdf_text_across_binding(tmp_path):
                "tests" / "fixtures" / "hairline-text.pdf")
     with Document.from_pdf_bytes(fixture.read_bytes()) as document:
         assert document.page_text(0) == ["Hairline"]
-        assert 'stroke-width="0.1"' in document.page_svg(0)
+        assert 'non-scaling-stroke' in document.page_svg(0)
+        assert document.page_images(0) == []
+        assert document.page_paths(0)
+        strokes = [item for item in document.page_object_stroke_styles(0) if item["kind"] == "PathObject"]
+        assert strokes and all(item["stroke_enabled"] and item["style"]["line_width"] == 0 for item in strokes)
+        png = document.page_png(0, 144)
         target = tmp_path / "hairline.ofd"
         document.save(target)
     with Document.open(target) as reopened:
         assert reopened.page_text(0) == ["Hairline"]
-        assert 'stroke-width="0.1"' in reopened.page_svg(0)
+        assert 'non-scaling-stroke' in reopened.page_svg(0)
+        assert reopened.page_png(0, 144) == png
 
 
 def test_imports_direct_ocmd_pdf_across_binding():

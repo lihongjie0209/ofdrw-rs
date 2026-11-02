@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ofdrw_root="$(cd "$(dirname "$0")/../.." && pwd)"
-ofdrw_rust_root="$ofdrw_root/ofdrw-rs"
+ofdrw_rust_root="$(cd "$(dirname "$0")/.." && pwd)"
 ofdrw_tmp="$(mktemp -d)"
 trap 'rm -rf "$ofdrw_tmp"' EXIT
 
@@ -633,10 +633,29 @@ public class Interop {
                     !new ContentExtractor(reader).getPageContent(1).equals(java.util.List.of("Hairline"))) {
                 throw new AssertionError("Rust hairline PDF text was not recognized");
             }
-            var block = reader.getPage(1).getContent().getLayers().get(0).getPageBlocks().get(0);
-            if (!(block instanceof TextObject) ||
-                    !Double.valueOf(0.1).equals(((TextObject) block).getLineWidth())) {
-                throw new AssertionError("Rust hairline PDF text stroke was not recognized");
+            var blocks = reader.getPage(1).getContent().getLayers().get(0).getPageBlocks();
+            int textRuns = 0, hairlinePaths = 0;
+            for (var block : blocks) {
+                if (block instanceof TextObject) {
+                    var text = (TextObject) block;
+                    if (text.getFill() || text.getStroke()) {
+                        throw new AssertionError("Hairline semantic text must not paint twice");
+                    }
+                    textRuns++;
+                } else if (block instanceof PathObject) {
+                    var path = (PathObject) block;
+                    if (!path.getStroke() || path.getFill() ||
+                            !Double.valueOf(0.0).equals(path.getLineWidth()) ||
+                            path.getAbbreviatedData() == null || path.getAbbreviatedData().isEmpty()) {
+                        throw new AssertionError("Rust glyph path lost its zero-width pen or outline");
+                    }
+                    hairlinePaths++;
+                } else {
+                    throw new AssertionError("Rust hairline text must retain vector outlines");
+                }
+            }
+            if (textRuns != 1 || hairlinePaths == 0) {
+                throw new AssertionError("Rust hairline text semantics or vectors were missing");
             }
         }
         try (OFDReader reader = new OFDReader(Paths.get(args[37]))) {

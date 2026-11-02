@@ -1930,8 +1930,8 @@ Rust 路径写入与更新接受 `line_width: 0`，表示一个设备像素宽�
 原生渲染器通过保留的 `ofd-device-hairline-` ID 前缀识别设备描边。
 PDF 导出写入零线宽操作符；导入不再将路径零线宽替换成固定毫米值。
 
-此项属于 0.5.0 发布候选。文字描边仍要求正线宽；
-PDF 导入仍不支持非均匀或倾斜变换下的虚线描边。
+路径设备细线属于 0.5.0。后续开发版本还支持非均匀或倾斜变换下的
+PDF 路径虚线及文字描边；公共文字写入接口仍要求正线宽。
 Python 和 Node.js 使用 `line_width: 0`；Go 写入接口使用
 `PathStyle{Stroke: true, Hairline: true}` 保留零值。Go 未设置 `Hairline`
 时仍采用原有的 0.4 mm 默认值，显式正线宽始终优先。
@@ -2778,6 +2778,24 @@ Ghostscript for ordinary strokes and Poppler for translucent fill/stroke and
 hairlines; the generator records renderer versions and arguments. Ghostscript's
 `GraphicsAlphaBits` has documented compatibility limits with PDF transparency
 ([Ghostscript FAQ](https://www.ghostscript.com/faq/index.html)).
+In development after 0.5.0, stroked PDF text with unequal scale, shear,
+reflection or horizontal text scaling retains its full graphics-state pen as
+vector glyph outlines. A separate invisible text run preserves Unicode,
+ligatures, extraction and PDF export semantics. Glyph geometry follows the
+text matrix while line width and dash lengths follow the graphics matrix.
+Embedded TrueType, OpenType/CFF and available named-font substitutes are
+supported. Fill/stroke modes, text clipping and zero-width device strokes are
+preserved on this outline route; no page image replaces the text.
+
+Twelve source PDF fixtures cover these matrices, dashed outlines, CFF fonts,
+fill/stroke and clipping. Tests check vector and pen metadata, independent
+raster geometry at 72 DPI, strict raster comparisons at 288 and 576 DPI,
+OFD round trips and exported PDF text extraction. Ghostscript supplies the
+ordinary references, with aliased target-device hairlines; Poppler supplies
+the dashed text reference because the recorded Ghostscript version renders
+that source with a solid pen. Two further tests cover unembedded fonts and
+nonpainting text exported as selectable text. Reference generation and
+renderer versions are recorded in `scripts/generate_pdf_text_affine_reference.py`.
 Singular affine stroke transforms remain unsupported.
 
 PDF Info Title, Author, Subject, Creator, Keywords, CreationDate, and ModDate
@@ -3077,8 +3095,8 @@ PDF `Ts` text rise and `Tr` modes 0–3 map to OFD text position, fill, stroke,
 and no-paint text; RGB/gray text colors and separate fill/stroke alpha are
 preserved. Modes 4–7 also preserve glyph clipping after `ET`, including the
 union of multiple text runs and `q`/`Q` clip restoration. Zero-width text
-strokes currently use a 0.1 mm display width; zero-width path strokes use
-a device hairline.
+strokes use vector glyph outlines with device hairlines, including uniform
+text transforms. Zero-width path strokes also use device hairlines.
 
 Transparent non-isolated/knockout Form paints, unsupported soft-mask configurations, and other
 unsupported painting operators currently return an error; this importer is
