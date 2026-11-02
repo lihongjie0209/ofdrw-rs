@@ -1,4 +1,4 @@
-import { Document, createSesSeal, type ActionInfo, type ArchiveViolation, type AttachmentInfo, type AttachmentMetadata, type ColorSpaceInfo, type ColorSpaceSpec, type CustomTagInfo, type DocumentPermissions, type DrawParamInfo, type DrawParamStyle, type ExtensionInfo, type FlowSpan, type FlowStart, type FlowTextOptions, type FontInfo, type KeywordPosition, type MediaActionRequest, type MultimediaResourceInfo, type OutlineInfo, type PageArea, type PageInfo, type PageLayerInfo, type PageObjectClipsInfo, type PageObjectInfo, type PageObjectPaintInfo, type PageObjectStrokeStyleInfo, type PathStrokeStyle, type SesSealSpec, type TableBlock, type TableCell, type TableOptions, type TextCodeLayout, type TextObjectOptions, type TextTypographyStyle, type VersionInfo, type ViewPreferences } from '../index';
+import { Document, createSesSeal, parseCanvasColor, type ActionInfo, type ArchiveViolation, type AttachmentInfo, type AttachmentMetadata, type ColorSpaceInfo, type ColorSpaceSpec, type CustomTagInfo, type DocumentPermissions, type DrawParamInfo, type DrawParamStyle, type ExtensionInfo, type FlowSpan, type FlowStart, type FlowTextOptions, type FontInfo, type KeywordPosition, type MediaActionRequest, type MultimediaResourceInfo, type OutlineInfo, type PageArea, type PageInfo, type PageLayerInfo, type PageObjectClipsInfo, type PageObjectInfo, type PageObjectPaintInfo, type PageObjectStrokeStyleInfo, type PathStrokeStyle, type SesSealSpec, type TableBlock, type TableCell, type TableOptions, type TextCodeLayout, type TextObjectOptions, type TextTypographyStyle, type VersionInfo, type ViewPreferences } from '../index';
 import type { IntegrityTrustedVerificationInfo, SignatureChainVerificationInfo, SignatureDirectTrustVerificationInfo, SignatureTrustVerificationInfo } from '../index';
 import type { GradientPaintStyle, GouraudPaintStyle, ImageBorderStyle, PatternPaintStyle, SolidPaintStyle } from '../index';
 
@@ -547,3 +547,8 @@ function exerciseCanvasArea(document: Document): void {
   const canvasBoxes: [number, number, number, number][] = canvasArea.char_areas;
   void canvasBoxes;
 }
+
+const canvasColor: SolidPaintStyle | null = parseCanvasColor('rgba(10,20,30,0.5)');
+if (canvasColor) { const byteAlpha: number | undefined = canvasColor.alpha; void byteAlpha; }
+// @ts-expect-error Canvas colors must be strings
+parseCanvasColor(123);

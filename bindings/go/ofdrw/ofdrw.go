@@ -328,6 +328,7 @@ type nativeAPI struct {
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	drawCanvas                      func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureCanvasText               func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	parseCanvasColor                func(*byte, *nativeBuffer) int32
 	measureCanvasTextArea           func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFixedContainers              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowContainers               func(uintptr, uintptr, *byte, *nativeBuffer) int32
@@ -596,6 +597,7 @@ func loadAPI() error {
 			{"ofd_add_ses_signature_with_distids", &api.addSESWithIDs},
 			{"ofd_add_ses_signature_with_stamp_json", &api.addSESWithStamp},
 			{"ofd_create_ses_seal_json", &api.createSESSeal},
+			{"ofd_parse_canvas_color_json", &api.parseCanvasColor},
 			{"ofd_get_entry", &api.getEntry}, {"ofd_set_entry", &api.setEntry}, {"ofd_remove_entry", &api.removeEntry},
 			{"ofd_add_text_page", &api.addTextPage}, {"ofd_save", &api.save},
 			{"ofd_write_text_page_json", &api.writeTextPage},
@@ -2142,6 +2144,36 @@ func FromPDF(data []byte) (*Document, error) {
 	doc := &Document{handle: handle}
 	runtime.SetFinalizer(doc, (*Document).Close)
 	return doc, nil
+}
+
+// ParseCanvasColor returns a paint with byte opacity, or nil for an invalid color.
+// It does not require a document handle.
+func ParseCanvasColor(value string) (*SolidPaintStyle, error) {
+	if err := loadAPI(); err != nil {
+		return nil, err
+	}
+	input, err := cString(value)
+	if err != nil {
+		return nil, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var output nativeBuffer
+	status := api.parseCanvasColor(&input[0], &output)
+	runtime.KeepAlive(input)
+	if err := nativeError(status); err != nil {
+		return nil, fmt.Errorf("parse Canvas color: %w", err)
+	}
+	defer api.bufferFree(output)
+	data, err := bytesAt(output)
+	if err != nil {
+		return nil, err
+	}
+	var paint *SolidPaintStyle
+	if err := json.Unmarshal(data, &paint); err != nil {
+		return nil, fmt.Errorf("decode Canvas color: %w", err)
+	}
+	return paint, nil
 }
 
 // CreateSESSeal returns a signed SES v4/v5 electronic seal in DER form.

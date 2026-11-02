@@ -494,3 +494,15 @@ func measureArea() error {
 	return nil
 }
 ```
+
+## Canvas 颜色字符串（0.5.0 后的开发版本）
+
+无需文档句柄即可解析 Java 命名颜色、十六进制、`rgb()` 和 `rgba()`。
+透明度按 Java 规则截断为字节；未知或非法颜色返回空结果。
+返回值可直接用于现有 Canvas 绘制参数的填充或描边。
+
+```go
+paint, err := ofdrw.ParseCanvasColor("rgba(10,20,30,0.5)")
+if err != nil { panic(err) }
+// paint.Color == [3]uint8{10, 20, 30}; *paint.Alpha == 127
+```

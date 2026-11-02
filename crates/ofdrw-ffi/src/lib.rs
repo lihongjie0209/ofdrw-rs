@@ -100,6 +100,26 @@ unsafe fn input_string<'a>(ptr: *const c_char) -> Result<&'a str, String> {
     CStr::from_ptr(ptr).to_str().map_err(|e| e.to_string())
 }
 
+/// Parse a Canvas color without a document handle, returning a paint JSON object
+/// or JSON null for an unknown or malformed color. Free the buffer normally.
+///
+/// # Safety
+/// `input` must be a NUL-terminated UTF-8 string and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_parse_canvas_color_json(
+    input: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        let value = ofdrw::parse_canvas_color(input_string(input)?)
+            .map(|paint| serde_json::json!({"color": paint.color, "alpha": paint.alpha}));
+        output_buffer(
+            serde_json::to_vec(&value).map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
 unsafe fn input_bytes<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], String> {
     if len == 0 {
         return Ok(&[]);
@@ -22957,5 +22977,60 @@ mod tests {
             1
         );
         unsafe { ofd_close(handle) };
+    }
+}
+
+#[cfg(test)]
+mod canvas_color_binding_tests {
+    use super::*;
+
+    #[test]
+    fn color_json_matches_java_without_a_document_handle() {
+        let reference: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/canvas-color-java.json"
+        ))
+        .unwrap();
+        for case in reference["cases"].as_array().unwrap() {
+            let input = CString::new(case["input"].as_str().unwrap()).unwrap();
+            let mut output = OfdBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            unsafe {
+                assert_eq!(ofd_parse_canvas_color_json(input.as_ptr(), &mut output), 0);
+                let actual: serde_json::Value =
+                    serde_json::from_slice(std::slice::from_raw_parts(output.data, output.len))
+                        .unwrap();
+                ofd_buffer_free(output);
+                let expected = case["expected"].as_array().map(|values| {
+                    serde_json::json!({
+                        "color": &values[..3], "alpha": values.get(3).cloned().unwrap_or(255.into())
+                    })
+                });
+                assert_eq!(actual, serde_json::to_value(expected).unwrap(), "{input:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn color_json_rejects_invalid_pointers_and_utf8() {
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            assert_eq!(ofd_parse_canvas_color_json(ptr::null(), &mut output), 2);
+            assert_eq!(
+                ofd_parse_canvas_color_json(c"red".as_ptr(), ptr::null_mut()),
+                2
+            );
+            let invalid = [255u8, 0];
+            assert_eq!(
+                ofd_parse_canvas_color_json(invalid.as_ptr().cast(), &mut output),
+                2
+            );
+            assert!(output.data.is_null());
+            assert_eq!(output.len, 0);
+        }
     }
 }

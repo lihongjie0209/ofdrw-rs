@@ -18,6 +18,8 @@ typedef struct OfdBuffer {
 } OfdBuffer;
 
 uint32_t ofd_abi_version(void);
+/* No document needed. Returns paint JSON or JSON null; free with ofd_buffer_free. */
+int32_t ofd_parse_canvas_color_json(const char *input, OfdBuffer *output);
 const char *ofd_last_error(void);
 int32_t ofd_open(const char *path, OfdDocument **output);
 int32_t ofd_from_bytes(const uint8_t *data, size_t len, OfdDocument **output);
