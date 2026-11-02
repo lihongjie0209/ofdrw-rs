@@ -420,8 +420,15 @@ int32_t ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, co
 /* Mixed flow returns {pages, next}; images use base64 data and tables use nested grids. */
 int32_t ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
 /* Measured box rows return {pages, placements, next}; all distances are millimeters. */
+/* Adds required content_ranges:[{source_index,ranges:[[start,end],...]}]. */
+int32_t ofd_add_box_layout_with_content_ranges_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
+/* Atomic vector canvas: {boundary:[x,y,w,h], commands:[{type:...}]}; returns object IDs.
+   Coordinates are mm, angles degrees, boolean flags default false. Unknown fields fail. */
+int32_t ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
+/* Measure text with optional canvas font settings; does not modify the document. */
+int32_t ofd_measure_canvas_text_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
 /* Fixed mixed containers on one existing global page; returns a placement array. */
 int32_t ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);

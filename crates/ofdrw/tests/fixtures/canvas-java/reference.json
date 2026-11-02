@@ -1,0 +1,315 @@
+{
+  "java_revision": "84e9eb260ba6fd351ecccf08a01a40305d4af635",
+  "page_size": [
+    40,
+    30
+  ],
+  "boundary": [
+    4,
+    3,
+    24,
+    20
+  ],
+  "cases": [
+    {
+      "name": "path-state",
+      "objects": [
+        {
+          "path": "M 9 8 L 11 8 L 11 10 L 9 10 C",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        },
+        {
+          "path": "M 2 4 L 8 4 L 8 7 L 2 7 C",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        },
+        {
+          "path": "M 1 2 L 9 2",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        },
+        {
+          "path": "M 1 12 L 5 12 L 5 14 L 1 14 C",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": true,
+          "stroke": true,
+          "alpha": 255
+        },
+        {
+          "path": "M 1 2 L 9 2",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        }
+      ]
+    },
+    {
+      "name": "deferred-transform",
+      "objects": [
+        {
+          "path": "M 1 1 L 4 2",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            2.0,
+            0.0,
+            0.0,
+            3.0,
+            3.0,
+            4.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        },
+        {
+          "path": "M 1 1 L 4 2",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            0.0,
+            1.0,
+            -1.0,
+            0.0,
+            15.0,
+            1.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        }
+      ]
+    },
+    {
+      "name": "curves",
+      "objects": [
+        {
+          "path": "M 2 2 Q 4 0 6 2 B 6 4 8 4 8 2 A 3 2 25 1 0 12 8 C",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        },
+        {
+          "path": "M 13 10 A 3 3 360 1 1 7 10 A 3 3 360 1 1 13 10",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 255
+        }
+      ]
+    },
+    {
+      "name": "fill-alpha",
+      "objects": [
+        {
+          "path": "M 2 2 L 12 2 L 12 10 L 2 10 C",
+          "line_width": 0.0,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": true,
+          "stroke": true,
+          "alpha": 127
+        },
+        {
+          "path": "M 14 2 L 18 2 L 18 8 L 14 8 C",
+          "line_width": 0.7,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": true,
+          "stroke": true,
+          "alpha": 127
+        },
+        {
+          "path": "M 2 2 L 12 2 L 12 10 L 2 10 C",
+          "line_width": 0.7,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          "fill": false,
+          "stroke": true,
+          "alpha": 127
+        }
+      ]
+    },
+    {
+      "name": "frozen-clip",
+      "objects": [
+        {
+          "path": "M 0 0 L 14 0 L 14 14 L 0 14 C",
+          "line_width": 0.353,
+          "boundary": [
+            4.0,
+            3.0,
+            24.0,
+            20.0
+          ],
+          "ctm": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            10.0,
+            0.0
+          ],
+          "fill": true,
+          "stroke": true,
+          "alpha": 255
+        }
+      ],
+      "render_reference": "frozen-clip-transflag.ofd",
+      "normalization": "Only set Clips TransFlag=true for Java's existing inverse-CTM clip encoding; preserve original OFD alongside it."
+    }
+  ]
+}

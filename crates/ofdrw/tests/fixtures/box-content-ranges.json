@@ -1,0 +1,371 @@
+{
+  "reference": "Manual millimeter ranges: protect complete intervals within a 10 mm page content height; columns consume independently.",
+  "cases": [
+    {
+      "name": "protected-lines",
+      "request": {
+        "page_size": [
+          20,
+          14
+        ],
+        "margins": [
+          2,
+          2,
+          2,
+          2
+        ],
+        "items": [
+          {
+            "type": "box",
+            "size": [
+              8,
+              15
+            ],
+            "background_color": [
+              240,
+              230,
+              220
+            ]
+          }
+        ],
+        "content_ranges": [
+          {
+            "source_index": 0,
+            "ranges": [
+              [
+                0,
+                5
+              ],
+              [
+                5,
+                11
+              ],
+              [
+                11,
+                15
+              ]
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "pages": [
+          0,
+          1
+        ],
+        "placements": [
+          {
+            "source_index": 0,
+            "page_index": 0,
+            "allocation": [
+              2,
+              2,
+              8,
+              5
+            ],
+            "border_box": [
+              2,
+              2,
+              8,
+              5
+            ],
+            "padding_box": [
+              2,
+              2,
+              8,
+              5
+            ],
+            "content_box": [
+              2,
+              2,
+              8,
+              5
+            ],
+            "borders": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "source_offset": 0,
+            "first": true,
+            "last": false
+          },
+          {
+            "source_index": 0,
+            "page_index": 1,
+            "allocation": [
+              2,
+              2,
+              8,
+              10
+            ],
+            "border_box": [
+              2,
+              2,
+              8,
+              10
+            ],
+            "padding_box": [
+              2,
+              2,
+              8,
+              10
+            ],
+            "content_box": [
+              2,
+              2,
+              8,
+              10
+            ],
+            "borders": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "source_offset": 5,
+            "first": false,
+            "last": true
+          }
+        ],
+        "next": {
+          "page_index": 1,
+          "y": 12
+        }
+      }
+    },
+    {
+      "name": "independent-columns",
+      "request": {
+        "page_size": [
+          20,
+          14
+        ],
+        "margins": [
+          2,
+          2,
+          2,
+          2
+        ],
+        "items": [
+          {
+            "type": "box",
+            "size": [
+              6,
+              15
+            ],
+            "clear": "none",
+            "background_color": [
+              240,
+              230,
+              220
+            ]
+          },
+          {
+            "type": "box",
+            "size": [
+              6,
+              15
+            ],
+            "clear": "none",
+            "float": "right",
+            "background_color": [
+              220,
+              230,
+              240
+            ]
+          }
+        ],
+        "content_ranges": [
+          {
+            "source_index": 0,
+            "ranges": [
+              [
+                0,
+                5
+              ],
+              [
+                5,
+                11
+              ]
+            ]
+          },
+          {
+            "source_index": 1,
+            "ranges": [
+              [
+                0,
+                8
+              ],
+              [
+                8,
+                15
+              ]
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "pages": [
+          0,
+          1
+        ],
+        "placements": [
+          {
+            "source_index": 0,
+            "page_index": 0,
+            "allocation": [
+              2,
+              2,
+              6,
+              5
+            ],
+            "border_box": [
+              2,
+              2,
+              6,
+              5
+            ],
+            "padding_box": [
+              2,
+              2,
+              6,
+              5
+            ],
+            "content_box": [
+              2,
+              2,
+              6,
+              5
+            ],
+            "borders": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "source_offset": 0,
+            "first": true,
+            "last": false
+          },
+          {
+            "source_index": 1,
+            "page_index": 0,
+            "allocation": [
+              12,
+              2,
+              6,
+              8
+            ],
+            "border_box": [
+              12,
+              2,
+              6,
+              8
+            ],
+            "padding_box": [
+              12,
+              2,
+              6,
+              8
+            ],
+            "content_box": [
+              12,
+              2,
+              6,
+              8
+            ],
+            "borders": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "source_offset": 0,
+            "first": true,
+            "last": false
+          },
+          {
+            "source_index": 0,
+            "page_index": 1,
+            "allocation": [
+              2,
+              2,
+              6,
+              10
+            ],
+            "border_box": [
+              2,
+              2,
+              6,
+              10
+            ],
+            "padding_box": [
+              2,
+              2,
+              6,
+              10
+            ],
+            "content_box": [
+              2,
+              2,
+              6,
+              10
+            ],
+            "borders": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "source_offset": 5,
+            "first": false,
+            "last": true
+          },
+          {
+            "source_index": 1,
+            "page_index": 1,
+            "allocation": [
+              12,
+              2,
+              6,
+              7
+            ],
+            "border_box": [
+              12,
+              2,
+              6,
+              7
+            ],
+            "padding_box": [
+              12,
+              2,
+              6,
+              7
+            ],
+            "content_box": [
+              12,
+              2,
+              6,
+              7
+            ],
+            "borders": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "source_offset": 8,
+            "first": false,
+            "last": true
+          }
+        ],
+        "next": {
+          "page_index": 1,
+          "y": 12
+        }
+      }
+    }
+  ]
+}

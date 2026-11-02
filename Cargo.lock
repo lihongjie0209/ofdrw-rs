@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "cbc",
@@ -933,7 +933,7 @@ dependencies = [
  "justbig2",
  "lopdf",
  "moxcms",
- "ofdrw-resvg 0.48.1-ofdrw.1",
+ "ofdrw-resvg 0.48.1-ofdrw.2",
  "ofdrw-svg2pdf",
  "oxiri",
  "pdf-writer",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-ffi"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "ofdrw",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-resvg"
-version = "0.45.1-ofdrw.1"
+version = "0.45.1-ofdrw.2"
 dependencies = [
  "bytemuck",
  "gif 0.13.3",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-resvg"
-version = "0.48.1-ofdrw.1"
+version = "0.48.1-ofdrw.2"
 dependencies = [
  "bytemuck",
  "gif 0.14.2",
@@ -1007,13 +1007,13 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-svg2pdf"
-version = "0.13.0-ofdrw.2"
+version = "0.13.0-ofdrw.3"
 dependencies = [
  "fontdb 0.23.0",
  "image",
  "log",
  "miniz_oxide 0.8.9",
- "ofdrw-resvg 0.45.1-ofdrw.1",
+ "ofdrw-resvg 0.45.1-ofdrw.2",
  "once_cell",
  "pdf-writer",
  "siphasher",

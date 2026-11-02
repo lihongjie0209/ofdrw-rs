@@ -1,12 +1,14 @@
 # ofdrw-rs for Node.js
 
+This README targets 0.5.0. Check the [release workflow](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml) for distribution status; build matching bindings and native libraries from source while publication is pending. The previous [v0.4.0 release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) remains available.
+
 Node.js wrapper for the Rust OFD core. It uses the versioned C ABI through
 [Koffi](https://koffi.dev/).
 
 Check npm and GitHub Releases for version availability. Install from npm:
 
 ```sh
-npm install ofdrw-rs@0.4.0
+npm install ofdrw-rs@0.5.0
 ```
 
 For development from this source tree, build the native library and install
@@ -29,7 +31,7 @@ staged package binary is also present under `native/`.
 The CI-built npm tarball includes the native library for Linux, macOS, and
 Windows on x64 and ARM64. Linux binaries are built on Ubuntu 24.04, so older
 glibc distributions may need a native build. Install the tarball with
-`npm install /path/to/ofdrw-rs-0.4.0.tgz`;
+`npm install /path/to/ofdrw-rs-0.5.0.tgz`;
 the library is loaded automatically. To use a custom native build, set
 `OFDRW_LIB_PATH` to its absolute path. Packing from a source checkout requires
 all six release libraries under `native/<platform>-<arch>/`. Stage each one
@@ -382,7 +384,7 @@ currently supported OFD-A rules, and `prepareArchive()` returns a separate
 package with supported archival normalizations applied. Check the returned
 package again because complete OFD-A conversion is not yet implemented.
 
-## 混合流布局（0.4.0 起）
+## 混合流布局（0.5.0 起）
 
 ```js
 const document = Document.create();
@@ -402,7 +404,7 @@ try {
 和 `FlowLayoutResult` TypeScript 类型。图片使用 `data_base64`。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（0.4.0 起）
+## 盒模型与浮动行（0.5.0 起）
 
 ```js
 const document = Document.create();
@@ -423,7 +425,7 @@ try {
 自动测量文本盒与嵌套混合容器见下文的布局接口。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（0.4.0 起）
+## 文本自动测量（0.5.0 起）
 
 ```js
 const document = Document.create();
@@ -631,4 +633,105 @@ The same spans work in styled flow, text boxes, flow blocks and fixed/flow
 containers. Geometry participates in wrapping and line height while text omits
 the placeholders. A leading placeholder absorbs a configured first-line indent
 once. Character-count reservations use `count * (font_size + letter_spacing)`.
-Use matching bindings and native library (0.4.0 or later).
+Use matching bindings and native library (0.5.0 or later).
+
+### Protected content ranges (unreleased source API)
+
+Use matching source bindings and native library; this addition is outside 0.5.0.
+`BoxContentRanges` protects indivisible intervals while placing/decorating boxes:
+
+```js
+const metrics = doc.measureFlowedSpans(0, [{text: 'A\nB\nC\nD'}], 8,
+  {font_size: 2, line_height: 3});
+const policies = [{source_index: 0, ranges: metrics.lines.map(line => [line.y, line.y+line.height])}];
+const result = doc.addBoxLayoutWithContentRanges(0,
+  [{type: 'box', size: [8, metrics.height]}], policies,
+  {page_size: [20,14], margins: [2,2,2,2]});
+```
+
+Intervals use original content coordinates and must be ordered, positive,
+disjoint and inside the box. Empty policies retain geometric cuts. The result
+uses ordinary box-layout geometry and continuation; child drawing remains with
+the caller. Invalid policies roll back the entire call.
+
+## Device hairlines (0.5.0 candidate)
+
+Pass `{line_width: 0}` to `addPathObject`, `addCompositePathObject`, or
+`addPathAnnotation`. Existing paths accept
+`doc.setPagePathStrokeStyle(0, objectId, {line_width: 0})`.
+PNG retains one device pixel across DPI and transforms; PDF preserves a
+native zero-width stroke. Use the matching unreleased native library.
+
+## Vector canvas batches (0.5.0 candidate)
+
+Use a matching native library built from the same unreleased source.
+
+```js
+const {Document} = require('ofdrw-rs');
+const fs = require('node:fs');
+const document = Document.create();
+try {
+  document.addBlankPage(40, 30);
+  const ids = document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_stroke_color', color: [0, 80, 200]},
+    {type: 'rect', rect: [2, 3, 12, 8]},
+    {type: 'stroke'},
+  ]);
+  fs.writeFileSync('canvas.ofd', document.toBytes());
+} finally {document.close();}
+```
+
+`CanvasCommand` is a TypeScript discriminated union. The batch commits
+atomically and returns string object IDs. Coordinates are millimeters and
+angles are degrees. Unknown fields and nonfinite numbers are rejected.
+A null or omitted `set_global_alpha.alpha` clears global opacity.
+See the [command reference](../../docs/FEATURES.md#有状态向量画布) for vector operations and remaining text limitations.
+
+### Canvas images (0.5.0 candidate)
+
+Use Buffer or Uint8Array in `data`, or use `data_base64`, never both. Offset
+Uint8Array views are supported without changing the input. `draw_image_at`
+uses natural pixel dimensions divided by `pixels_per_mm` (default 3.78).
+`draw_image_region` converts source millimeters to pixels by truncation and
+pads portions outside the source with transparency, matching Java. Negative
+target dimensions mirror images; zero dimensions collapse them.
+
+```js
+const {readFileSync} = require('node:fs');
+const {Document} = require('ofdrw-rs');
+const image = readFileSync('picture.png');
+const document = Document.create();
+try {
+  document.addBlankPage(40, 30);
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'draw_image', data: image, format: 'png', rect: [2, 2, 12, 8]},
+    {type: 'draw_image_region', data: image, format: 'png',
+      source: [0, 0, 1, 1], rect: [20, 2, 8, 8], pixels_per_mm: 2},
+  ]);
+  document.save('canvas-images.ofd');
+} finally {document.close();}
+```
+
+### Canvas text (0.5.0 candidate)
+
+`set_font` accepts CanvasFont settings for size, tracking, weight, italic,
+alignment and quarter-turn reading/character directions. Defaults are SimSun,
+1 mm, weight 400 and start alignment. `measureCanvasText` returns logical width,
+first glyph offset and signed advances without changing the document. Metrics
+exclude kerning and shaping; embed a font for reproducible measurements.
+
+```js
+const {Document} = require('ofdrw-rs');
+const document = Document.create();
+const font = {size: 4, align: 'center'};
+try {
+  document.addBlankPage(40, 30);
+  const metrics = document.measureCanvasText(0, 'Canvas', font);
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_font', font},
+    {type: 'fill_text', text: 'Canvas', point: [20, 10]},
+  ]);
+  document.save('canvas-text.ofd');
+  console.log(metrics.width);
+} finally {document.close();}
+```

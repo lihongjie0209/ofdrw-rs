@@ -9,6 +9,10 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const ranges: import('../index').BoxContentRanges[] = [{source_index: 0, ranges: [[0, 5]]}];
+  document.addBoxLayoutWithContentRanges(0, [{type: 'box', size: [10, 5]}], ranges);
+  // @ts-expect-error protected intervals require two endpoints
+  document.addBoxLayoutWithContentRanges(0, [], [{source_index: 0, ranges: [[1]]}]);
   const placeholder: import('../index').FlowSpan = {text: '', placeholder_width: 0, font_size: 4};
   document.measureFlowedSpans(0, [placeholder], 20, {shape: true});
   // @ts-expect-error placeholder width is numeric
@@ -508,3 +512,32 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
 }
 
 void exercise;
+
+function exerciseCanvas(document: Document): void {
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'draw_image', data: Buffer.alloc(1), format: 'png', rect: [0, 0, -1, 1]},
+    {type: 'draw_image_at', data: new Uint8Array(1), format: 'png', point: [0, 0]},
+    {type: 'draw_image_region', data_base64: '', format: 'png', source: [0, 0, 1, 1], rect: [0, 0, 1, 1], pixels_per_mm: 2},
+  ]);
+  // @ts-expect-error Image commands require one encoding, never both.
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: 'draw_image', data: Buffer.alloc(1), data_base64: '', format: 'png', rect: [0, 0, 1, 1]}]);
+  const canvasMetrics = document.measureCanvasText(0, 'Canvas', {size: 4, align: 'center', read_direction: 90});
+  const canvasWidth: number = canvasMetrics.width;
+  void canvasWidth;
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_font', font: {size: 4, weight: 700}},
+    {type: 'fill_text', text: '', point: [2, 8]},
+  ]);
+  // @ts-expect-error Canvas directions are quarter turns.
+  document.measureCanvasText(0, 'Canvas', {char_direction: 45});
+  const ids: string[] = document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_line_width', width: 0},
+    {type: 'rect', rect: [1, 2, 12, 8]},
+    {type: 'stroke'},
+  ]);
+  void ids;
+  // @ts-expect-error move_to requires two coordinates
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: 'move_to', point: [1]}]);
+  // @ts-expect-error unknown command tags are rejected
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: 'unknown'}]);
+}

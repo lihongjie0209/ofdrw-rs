@@ -5990,7 +5990,7 @@ fn rejects_invalid_pattern_styles_and_resources_atomically() {
                 commands: "M 0 0 L 4 4".into(),
                 boundary: [0.0, 0.0, 4.0, 4.0],
                 style: PathStyle {
-                    line_width: 0.0,
+                    line_width: -0.1,
                     ..PathStyle::default()
                 },
             }],
@@ -27499,7 +27499,7 @@ fn rejects_invalid_positioned_paths_without_mutation() {
             "M 0 0",
             boundary,
             PathStyle {
-                line_width: 0.0,
+                line_width: -0.1,
                 ..PathStyle::default()
             }
         )

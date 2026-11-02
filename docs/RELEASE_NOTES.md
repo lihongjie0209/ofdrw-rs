@@ -1,3 +1,63 @@
+# v0.5.0
+
+Distribution becomes available after the release workflow completes. The previous
+v0.4.0 release and its tags remain immutable.
+
+## Upgrade notes
+
+Use matching 0.5.0 bindings and native libraries. C ABI major version remains 1;
+three additive JSON exports bring the total to 335: protected content-range box
+pagination, atomic canvas drawing, and read-only canvas text measurement.
+Python wheels and the npm tarball bundle matching native libraries. Go will use
+`bindings/go/v0.5.0` with the corresponding native release ZIP.
+
+Paths without an explicit or inherited line width now use the OFD default of
+0.353 mm. Explicit widths are preserved. Path writers accept zero as a device
+hairline; Go callers use `PathStyle{Hairline: true}` to preserve an explicit zero
+through helpers whose default width is 0.4 mm. Positive widths retain their value.
+
+The candidate requires unpublished renderer forks `ofdrw-resvg`
+0.45.1-ofdrw.2 and 0.48.1-ofdrw.2, followed by `ofdrw-svg2pdf`
+0.13.0-ofdrw.3. Publish these from the verified main commit before publishing
+the 0.5.0 core. Existing package versions and release tags remain immutable.
+
+## Changes since v0.4.0
+
+- Expose protected content-range box pagination through C, Python, Go and
+  Node.js, including strict policies, exact fragment geometry, independent
+  column offsets, atomic rollback, and Go measured-line conversion helpers.
+- Render zero-width vector paths as one device pixel at multiple resolutions,
+  including transformed paths, inherited drawing parameters, clips, annotations,
+  composite objects, patterns, alpha and dashes. Preserve zero-width PDF strokes
+  during export and supported undashed PDF import.
+- Add atomic stateful canvas batches for paths, curves, rectangles, transforms,
+  clipping, drawing parameters, save/restore, opacity, gradients and patterns.
+- Add canvas image placement at explicit or natural size, cropping with Java's
+  millimeter-to-pixel truncation, transparent padding, negative-size mirroring,
+  and degenerate destination matrices.
+- Add canvas text with font resources, tracking, alignment, weight, italic and
+  all sixteen reading/character direction combinations. Measure logical widths,
+  first-glyph offsets and signed advances without changing document resources.
+- Preserve fonts, tracking and drawing parameters during restore. Keep full
+  precision for measurement and Java-compatible precision when serializing text.
+  Tabs, line feeds and carriage returns have zero advance; supplementary Unicode
+  characters occupy one scalar advance rather than two surrogate advances.
+- Provide C, Python, Go and Node.js interfaces, typed Go/TypeScript settings,
+  byte-array image helpers, public header declarations and runnable README examples.
+
+## Validation and remaining scope
+
+Independent pinned Java fixtures cover vector state, images, sixteen text
+orientations, numeric serialization and 33 control-character measurements.
+Tests cover DPI-dependent hairlines, PDF round trips, resource and ID rollback,
+input immutability, read-only measurements and saved-document reopening.
+The candidate must pass the complete six-platform CI before merging or release.
+
+Full Java OFDRW replacement is still incomplete. Canvas CSS font/color parsing,
+character ink-area measurement, standalone pixel-unit helpers, text hairlines,
+and complex affine dashed PDF stroke import remain unfinished. Broader layout,
+PDF, certificate-trust and OFD-A limitations are listed in docs/FEATURES.md.
+
 # v0.4.0
 
 ## Upgrade notes

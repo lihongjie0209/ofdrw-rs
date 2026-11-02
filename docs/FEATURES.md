@@ -13,6 +13,7 @@
 - [批注与图章](#批注与图章)
 - [多媒体资源与动作](#多媒体资源与动作)
 - [页面对象与文字编辑](#页面对象与文字编辑)
+- [有状态向量画布](#有状态向量画布)
 - [文本流式布局](#文本流式布局)
 - [文本自动测量](#文本自动测量)
 - [行内占位符](#行内占位符)
@@ -717,6 +718,97 @@ wrappers.
 empty pages without a placeholder text object. Existing document bodies can
 receive blank pages without requiring a font resource.
 
+## 有状态向量画布
+
+**0.5.0。分发状态见发布工作流。**
+
+Rust 的 `draw_canvas(page_index, boundary, &[CanvasCommand])` 在已有全局页号上
+按顺序执行路径绘图，返回绘制对象 ID。整个批次原子提交；任何参数、资源或绘制失败
+都会回滚对象、公共资源和 ID 分配。每次调用从独立状态开始，最多 10,000 条命令，
+保存状态最多 256 层，路径与保存路径另有内存上限。
+
+支持移动、直线、二次/三次贝塞尔、端点椭圆弧、圆心圆弧、矩形、闭合、描边、填充，
+以及平移、缩放、角度旋转、累积/替换 CTM、全局透明度和裁剪。
+`SetDrawParam` 可使用现有的实色、渐变、网格和图案绘制参数。
+与 Java DrawContext 一样，路径在绘制时应用 CTM；保存状态包括当前路径，
+矩形绘制助手不改动当前路径。`Fill` 保留 Java 的零线宽轮廓，`FillRect`
+沿用当前描边。裁剪替换此前裁剪，并保存当时的路径和 CTM。
+未指定线宽的读取默认值已修正为 OFD 的 0.353 mm；显式写入线宽保持原值。
+
+独立 Java 生成器见 `scripts/generate_canvas_reference.py`。
+五组原始 OFD 样本覆盖路径保存、矩形助手、延后变换、曲线、透明度和裁剪。
+`frozen-clip-transflag.ofd` 只补写原始 Java 文件缺失的 `Clips TransFlag=true`，
+保留其全部路径与逆 CTM；JSON 记录此修正，原始文件同时保留。
+另外，Rust 的 restore 正确保留绘制参数，不复制 Java CanvasState.clone
+把参数克隆写回原对象的缺陷。
+
+此项属于 0.5.0 发布候选。C 使用 `ofd_draw_canvas_json`，Python 使用 `draw_canvas`，
+Go 使用 `DrawCanvas` 和 `CanvasCommand`，Node.js 使用 `drawCanvas` 和 TypeScript 命令联合类型。
+C 请求为 `{"boundary":[x,y,width,height],"commands":[...]}`，返回 JSON 字符串 ID 数组。
+请求最多 16 MiB；各命令使用 `type` 区分，未知字段和未知类型均被拒绝。
+布尔标志缺省为 false；`set_global_alpha` 的 alpha 为 null 或省略时清除全局透明度。
+Go 使用指针字段保留显式零坐标、零线宽和零透明度。三个语言接口均不改动调用者的命令。
+
+| 命令 type | 其余字段 |
+| --- | --- |
+| `begin_path`、`close_path`、`stroke`、`save`、`restore` | 无 |
+| `move_to`、`line_to` | `point:[x,y]` |
+| `quadratic_curve_to` | `control:[x,y]`、`end:[x,y]` |
+| `bezier_curve_to` | `control1:[x,y]`、`control2:[x,y]`、`end:[x,y]` |
+| `arc_to` | `radii:[rx,ry]`、`angle`、`large?`、`sweep?`、`end:[x,y]` |
+| `circle_arc` | `center:[x,y]`、`radius`、`start_angle`、`end_angle`、`sweep?` |
+| `rect`、`fill_rect`、`stroke_rect` | `rect:[x,y,width,height]` |
+| `fill`、`clip` | `even_odd?` |
+| `translate`、`scale`、`rotate` | 分别为 `offset:[x,y]`、`factors:[x,y]`、`angle` |
+| `transform`、`set_transform` | `matrix:[a,b,c,d,e,f]` |
+| `set_draw_param` | `style:DrawParamStyle` |
+| `set_line_width` | `width`，允许 0 |
+| `set_fill_color`、`set_stroke_color` | `color:[r,g,b]` |
+| `set_global_alpha` | `alpha?`，0..1 或 null |
+
+Rust 核心另支持 `DrawImage`（指定目标矩形）、`DrawImageAt`（按像素尺寸和
+`pixels_per_mm` 绘制）与 `DrawImageRegion`（裁剪后绘制）。它们使用同一画布边界，
+组合目标矩形与当前 CTM，并沿用透明度、绘制参数和冻结裁剪；不改变当前路径。
+Java 的默认像素比例为 3.78，Rust 的原尺寸与裁剪命令显式传入该比例。
+裁剪源矩形按毫米乘像素比例并向零截断，与 Java 实现一致；超出原图的区域透明填充，
+目标宽高可为负数（镜像）或零（退化矩阵），裁剪结果最多 1600 万像素。六组独立 Java 样本由
+`scripts/generate_canvas_image_reference.py` 生成。C 的同一 `ofd_draw_canvas_json` 请求已支持这三个图片命令，编码图像使用
+`data_base64` 与 `format` 字段；`draw_image` 使用 `rect`，`draw_image_at` 使用
+`point`，`draw_image_region` 使用 `source` 和 `rect`。后两者可选
+`pixels_per_mm`，缺省为 3.78。Python/Node.js 可直接传入同一 JSON 命令，
+Python 图片命令可使用 `data: bytes|bytearray|memoryview`，Node.js 使用
+`data: Buffer|Uint8Array`（支持带偏移的视图）；也可直接使用 `data_base64`，
+但两种编码不能同时提供。Go 的 `CanvasCommand.Data []byte` 自动编码为
+`data_base64`，并提供 `Format`、`Source`、`PixelsPerMM` 字段。三个语言接口
+均不修改调用者命令或图像数据；六组 Java 样例覆盖两种 DPI 的像素对比与保存后重读。
+
+Rust 核心的 `SetFont { font: CanvasFont }`、`FillText { text, point }`
+提供非整形文字绘制；`measure_canvas_text(page_index, text, &font)` 返回逻辑宽度、
+首字偏移与阅读轴上的有符号字距，不修改文档。字体设置包括资源 ID、字号、字距、
+粗细、斜体、阅读/字符方向以及 start/end/left/right/center 对齐；方向支持
+0/90/180/270 的全部 16 种组合，字距不含 kerning。缺省字号为 1 mm，
+缺省选择 SimSun/宋体；若未定义，则仅在实际绘制时原子补建资源。
+空串和仅含 Java trim 范围空白（U+0000..U+0020）的字符串不绘制。
+文字坐标、字号、字距的 OFD 数值序列化与 Java STBase 的精度规则一致；
+测量保留完整精度。制表符、换行与回车使用零字宽，与 Java AWT 一致；
+33 组独立 Java 控制字符测量值由 `scripts/generate_canvas_text_controls_reference.py` 生成。
+未嵌入字体依赖本机字体回退，嵌入字体可用于稳定对比。
+`scripts/generate_canvas_text_reference.py` 生成独立 Java 测量值和 OFD，覆盖
+16 种方向组合、对齐、粗斜体、CTM 和透明度。Rust 保存/恢复保留字距，
+不复制 Java FontSetting.clone 遗漏字距的缺陷；补充平面 Unicode 按标量处理，
+不复制 Java 按两个 UTF-16 代理项计算字距的行为。C 使用 `ofd_measure_canvas_text_json` 测量，请求为 `{"text":"...","font":{...}}`；
+返回 `width`、`first_offset:[x,y]` 与阅读轴上的有符号 `offsets`。绘制命令为
+`set_font`（`font` 对象）和 `fill_text`（`text`、`point:[x,y]`）。Python 使用
+`measure_canvas_text`，Node.js 使用 `measureCanvasText`，Go 使用
+`MeasureCanvasText`、`CanvasFont` 与 `CanvasTextMetrics`。Go 的 `CanvasCommand.Text`
+是字符串指针，可保留显式空串；`CanvasFont` 的数值指针保留显式零值供原生层校验。
+省略字体设置时使用核心默认值；未知字段、未知对齐和非法方向被拒绝。
+测量请求最多 16 MiB，解码后的文字最多 1 MB。三个语言接口均不修改调用者的字体配置。
+
+Canvas CSS 字体/颜色解析、measureTextArea 字符包围盒与独立像素单位助手仍待实现。
+复杂变换裁剪的 Java 像素一致性尚未证明；
+Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
+
 ## 文本流式布局
 
 **v0.3.0:** `FlowTextStyle.start = Some(FlowStart { page_index, y })` starts
@@ -1012,7 +1104,19 @@ whole operation. Ordinary `add_box_layout()` retains geometric splitting.
 This low-level API places and decorates fragments; callers draw child content
 in the returned rectangles. Automatic text boxes and mixed containers below
 provide styled child drawing and nested pagination. Direct range policies
-remain Rust-only.
+are Rust-only in 0.4.0.
+
+**未发布（源码接口）：** C adds `ofd_add_box_layout_with_content_ranges_json`,
+Python `add_box_layout_with_content_ranges`, Go `AddBoxLayoutWithContentRanges`,
+and Node.js `addBoxLayoutWithContentRanges`. The request combines ordinary box
+items and options with `content_ranges: [{source_index, ranges: [[start, end]]}]`.
+An empty policy list retains ordinary geometric cuts. The ordinary box-layout
+entry point still rejects this extra option. Go provides `BoxContentRanges`
+and `BoxContentRangesFromText`; other callers build ranges from measured line
+`y` and `height` values. Policy objects reject unknown fields, and invalid later
+policies roll back all geometry and decoration. Limits are 10,000 policies and
+100,000 total intervals. Matching source bindings and native library are
+required; this addition is outside the 0.4.0 release candidate.
 
 
 ### Dashed box borders (since v0.4.0)
@@ -1794,6 +1898,22 @@ use this outline path, with a temporary sfnt wrapper and the original resource
 bytes retained. Raw
 CFF text without glyph mappings still uses the text fallback. The PDF importer
 encapsulates supported raw programs in deterministic sfnt wrappers.
+
+### 路径设备发丝线（0.5.0）
+
+Rust 路径写入与更新接受 `line_width: 0`，表示一个设备像素宽的线。
+页面路径、批注、组合对象、重复图案和描边裁剪共用此行为；
+继承的 DrawParam 零线宽也会保留。PNG 输出在不同 DPI 和非均匀 CTM 下保持设备宽度，
+虚线间隔仍按路径坐标计算。SVG 使用 `vector-effect="non-scaling-stroke"`，
+原生渲染器通过保留的 `ofd-device-hairline-` ID 前缀识别设备描边。
+PDF 导出写入零线宽操作符；导入不再将路径零线宽替换成固定毫米值。
+
+此项属于 0.5.0 发布候选。文字描边仍要求正线宽；
+PDF 导入仍不支持非均匀或倾斜变换下的虚线描边。
+Python 和 Node.js 使用 `line_width: 0`；Go 写入接口使用
+`PathStyle{Stroke: true, Hairline: true}` 保留零值。Go 未设置 `Hairline`
+时仍采用原有的 0.4 mm 默认值，显式正线宽始终优先。
+C 的路径 JSON 写入和更新接口同样接受 `"line_width": 0`。
 
 ## PNG 渲染
 

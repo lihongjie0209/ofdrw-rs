@@ -348,7 +348,8 @@ func TestPrepareArchiveFlattensAnnotationAppearanceBlocksAcrossBinding(t *testin
 	if err := doc.SetEntry(path, annotation); err != nil {
 		t.Fatal(err)
 	}
-	before, err := doc.PageSVG(0)
+	// Disabled stroke metadata may be removed during archive normalization.
+	before, err := doc.PagePNG(0, 101.6)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,8 +362,8 @@ func TestPrepareArchiveFlattensAnnotationAppearanceBlocksAcrossBinding(t *testin
 	if err != nil || bytes.Contains(preparedAnnotation, []byte("PageBlock")) {
 		t.Fatalf("prepared annotation: %s, %v", preparedAnnotation, err)
 	}
-	after, err := prepared.PageSVG(0)
-	if err != nil || before != after {
+	after, err := prepared.PagePNG(0, 101.6)
+	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("annotation appearance changed: %v", err)
 	}
 	issues, err := prepared.ArchiveViolations()

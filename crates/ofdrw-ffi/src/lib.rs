@@ -1,6 +1,7 @@
 //! Versioned C ABI for OFD package operations.
 
 mod box_layout;
+mod canvas;
 mod flow_blocks;
 mod flow_container;
 mod text_box;
@@ -11043,6 +11044,34 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
     layout_json: *const c_char,
     output: *mut OfdBuffer,
 ) -> i32 {
+    add_box_layout_request(handle, document_index, layout_json, output, false)
+}
+
+/// Arrange measured boxes while protecting indivisible content ranges from page cuts.
+///
+/// JSON uses the ordinary box-layout request and a required `content_ranges`
+/// array of `{source_index, ranges: [[start, end], ...]}` policies. Ranges use
+/// original content coordinates. Returns ordinary fragment geometry and continuation.
+///
+/// # Safety
+/// `handle` must be live, `layout_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_add_box_layout_with_content_ranges_json(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    add_box_layout_request(handle, document_index, layout_json, output, true)
+}
+
+unsafe fn add_box_layout_request(
+    handle: *mut OfdDocument,
+    document_index: usize,
+    layout_json: *const c_char,
+    output: *mut OfdBuffer,
+    with_content_ranges: bool,
+) -> i32 {
     run(|| {
         if output.is_null() {
             return Err("output buffer is null".into());
@@ -11053,7 +11082,8 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
             .as_object()
             .ok_or("box layout request must be an object")?;
         for key in object.keys() {
-            if !matches!(key.as_str(), "items" | "page_size" | "margins" | "start") {
+            let ordinary = matches!(key.as_str(), "items" | "page_size" | "margins" | "start");
+            if !(ordinary || with_content_ranges && key == "content_ranges") {
                 return Err(format!("unsupported box layout option: {key}"));
             }
         }
@@ -11080,8 +11110,13 @@ pub unsafe extern "C" fn ofd_add_box_layout_json(
             .iter()
             .map(box_layout::parse_item)
             .collect::<Result<Vec<_>, _>>()?;
+        let policies = if with_content_ranges {
+            box_layout::parse_content_ranges(&input)?
+        } else {
+            Vec::new()
+        };
         let result = document_mut(handle)?
-            .add_box_layout(document_index, &items, style)
+            .add_box_layout_with_content_ranges(document_index, &items, &policies, style)
             .map_err(|e| e.to_string())?;
         output_buffer(
             serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
@@ -11150,6 +11185,63 @@ pub unsafe extern "C" fn ofd_add_text_boxes_json(
             serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
             output,
         )
+    })
+}
+
+/// Execute an atomic vector canvas batch on an existing global page.
+///
+/// JSON requires `boundary:[x,y,width,height]` and `commands:[{type:...}]`.
+/// Returns painted object IDs as a JSON string array. Unknown fields and command
+/// types are rejected. Angles are degrees; omitted boolean flags default false.
+/// `set_global_alpha` with null or absent alpha clears global opacity.
+///
+/// # Safety
+/// `handle` must be live, `request_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_draw_canvas_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    request_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let (boundary, commands) = canvas::parse(input_string(request_json)?)?;
+        let ids = document_mut(handle)?
+            .draw_canvas(page_index, boundary, &commands)
+            .map_err(|e| e.to_string())?;
+        output_buffer(serde_json::to_vec(&ids).map_err(|e| e.to_string())?, output)
+    })
+}
+
+/// Measure canvas text without changing the document or allocating resources.
+///
+/// JSON requires `text` and accepts optional `font` settings. Returns logical
+/// `width`, `first_offset:[x,y]` and signed `offsets` along the reading axis.
+/// Unknown fields are rejected; omitted settings use CanvasFont defaults.
+///
+/// # Safety
+/// `handle` must be live, `request_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_measure_canvas_text_json(
+    handle: *const OfdDocument,
+    page_index: usize,
+    request_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let (text, font) = canvas::parse_measure(input_string(request_json)?)?;
+        let metrics = document_ref(handle)?
+            .measure_canvas_text(page_index, &text, &font)
+            .map_err(|e| e.to_string())?;
+        output_buffer(serde_json::to_vec(&serde_json::json!({
+            "width": metrics.width, "first_offset": metrics.first_offset, "offsets": metrics.offsets,
+        })).map_err(|e| e.to_string())?, output)
     })
 }
 
@@ -22079,6 +22171,55 @@ mod tests {
         assert_ne!(
             unsafe { ofd_page_objects_json(handle, 0, ptr::null_mut()) },
             0
+        );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_writes_and_updates_device_hairlines_and_rejects_negative_widths_atomically() {
+        let mut handle = ptr::null_mut();
+        assert_eq!(unsafe { ofd_new(&mut handle) }, 0);
+        assert_eq!(unsafe { ofd_add_blank_page(handle, 20., 20.) }, 0);
+        let payload =
+            CString::new(r#"{"commands":"M 2 5 L 18 5","boundary":[0,0,20,20],"line_width":0}"#)
+                .unwrap();
+        let mut id = 0;
+        assert_eq!(
+            unsafe { ofd_add_path_object_json(handle, 0, payload.as_ptr(), &mut id) },
+            0
+        );
+        let id = CString::new(id.to_string()).unwrap();
+        let inspect = || {
+            let doc = unsafe { document_ref(handle).unwrap() };
+            assert_eq!(
+                doc.page_object_stroke_styles(0).unwrap()[0]
+                    .style
+                    .line_width,
+                0.
+            );
+            assert!(doc.page_svg(0).unwrap().contains("ofd-device-hairline-"));
+            for dpi in [25.4, 101.6, 300.] {
+                assert!(!doc.page_png(0, dpi).unwrap().is_empty());
+            }
+        };
+        inspect();
+        let update = CString::new(r#"{"line_width":0,"dash_pattern":[2,2]}"#).unwrap();
+        assert_eq!(
+            unsafe { ofd_set_page_path_stroke_style_json(handle, 0, id.as_ptr(), update.as_ptr()) },
+            0
+        );
+        inspect();
+        let before = unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap();
+        let negative = CString::new(r#"{"line_width":-1}"#).unwrap();
+        assert_ne!(
+            unsafe {
+                ofd_set_page_path_stroke_style_json(handle, 0, id.as_ptr(), negative.as_ptr())
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
         );
         unsafe { ofd_close(handle) };
     }

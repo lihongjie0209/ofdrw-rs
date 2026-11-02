@@ -307,9 +307,12 @@ const api = {
   addFlowedText: library.func('int ofd_add_flowed_text_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowedSpans: library.func('int ofd_add_flowed_spans_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowBlocks: library.func('int ofd_add_flow_blocks_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
+  drawCanvas: library.func('int ofd_draw_canvas_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
+  measureCanvasText: library.func('int ofd_measure_canvas_text_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
   addFixedContainers: library.func('int ofd_add_fixed_containers_json(OfdDocument handle, size_t page_index, str layout, _Out_ OfdBuffer *output)'),
   addFlowContainers: library.func('int ofd_add_flow_containers_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addTextBoxes: library.func('int ofd_add_text_boxes_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
+  addBoxLayoutWithContentRanges: library.func('int ofd_add_box_layout_with_content_ranges_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addBoxLayout: library.func('int ofd_add_box_layout_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   measureFlowedSpans: library.func('int ofd_measure_flowed_spans_json(OfdDocument handle, size_t document_index, str measure, _Out_ OfdBuffer *output)'),
   addTable: library.func('int ofd_add_table_json(OfdDocument handle, size_t document_index, str table, _Out_ OfdBuffer *output)'),
@@ -388,6 +391,15 @@ function utf8(value, name) {
 function textValue(value) {
   if (typeof value !== 'string') throw new TypeError('text must be a string');
   return value;
+}
+
+function canvasJson(value) {
+  return JSON.stringify(value, (_key, item) => {
+    if (typeof item === 'number' && !Number.isFinite(item)) {
+      throw new RangeError('canvas numbers must be finite');
+    }
+    return item;
+  });
 }
 
 function bytes(value) {
@@ -1669,6 +1681,28 @@ class Document {
     return this._json(api.measureFlowedSpans, index(documentIndex, 'documentIndex'), JSON.stringify(request));
   }
 
+  measureCanvasText(pageIndex, text, font = {}) {
+    const payload = canvasJson({text: textValue(text), font: optionsObject(font)});
+    return this._json(api.measureCanvasText, index(pageIndex, 'pageIndex'), payload);
+  }
+
+  drawCanvas(pageIndex, box, commands) {
+    if (!Array.isArray(commands)) throw new TypeError('commands must be an array');
+    const encodedCommands = commands.map(command => {
+      if (command && ['draw_image', 'draw_image_at', 'draw_image_region'].includes(command.type)
+          && Object.hasOwn(command, 'data')) {
+        if (Object.hasOwn(command, 'data_base64')) {
+          throw new TypeError('canvas image requires either data or data_base64');
+        }
+        const {data, ...encoded} = command;
+        return {...encoded, data_base64: bytes(data).toString('base64')};
+      }
+      return command;
+    });
+    const payload = canvasJson({boundary: boundary(box), commands: encodedCommands});
+    return this._json(api.drawCanvas, index(pageIndex, 'pageIndex'), payload);
+  }
+
   addFixedContainers(pageIndex, containers) {
     if (!Array.isArray(containers)) throw new TypeError('containers must be an array');
     const payload = JSON.stringify({containers}, (_key, value) => {
@@ -1702,6 +1736,18 @@ class Document {
       return value;
     });
     return this._json(api.addTextBoxes, index(documentIndex, 'documentIndex'), payload);
+  }
+
+  addBoxLayoutWithContentRanges(documentIndex, items, contentRanges, options = {}) {
+    if (!Array.isArray(items) || !Array.isArray(contentRanges)) throw new TypeError('items and contentRanges must be arrays');
+    const request = { ...optionsObject(options), items, content_ranges: contentRanges };
+    const payload = JSON.stringify(request, (_key, value) => {
+      if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new RangeError('box layout numbers must be finite');
+      }
+      return value;
+    });
+    return this._json(api.addBoxLayoutWithContentRanges, index(documentIndex, 'documentIndex'), payload);
   }
 
   addBoxLayout(documentIndex, items, options = {}) {

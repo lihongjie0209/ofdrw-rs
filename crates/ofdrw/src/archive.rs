@@ -4111,7 +4111,9 @@ mod tests {
         source
             .set_entry(&path, annotation.as_bytes().to_vec())
             .unwrap();
-        let before = source.page_svg(0).unwrap();
+        // Archive normalization removes irrelevant stroke attributes when
+        // Stroke=false; compare rendered appearance rather than SVG metadata.
+        let before = source.page_png(0, 101.6).unwrap();
         assert!(source.archive_violations().unwrap().iter().any(|issue| {
             issue.rule == "ANNOTATION" && issue.actual.as_deref() == Some("PageBlock")
         }));
@@ -4119,7 +4121,7 @@ mod tests {
         let prepared_annotation =
             std::str::from_utf8(prepared.entry(&path).unwrap().unwrap()).unwrap();
         assert!(!prepared_annotation.contains("PageBlock"));
-        assert_eq!(prepared.page_svg(0).unwrap(), before);
+        assert_eq!(prepared.page_png(0, 101.6).unwrap(), before);
         assert!(prepared
             .archive_violations()
             .unwrap()

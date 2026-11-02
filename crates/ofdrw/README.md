@@ -1,5 +1,7 @@
 # ofdrw
 
+These examples target 0.5.0. Check [crates.io](https://crates.io/crates/ofdrw) for availability; the previous [0.4.0 release](https://crates.io/crates/ofdrw/0.4.0) remains available.
+
 Rust OFD document core: package reading/writing, text and graphics, layout,
 SVG/PNG/PDF output, supported PDF import, annotations, SM2 signatures and encryption.
 This is an early subset of Java OFDRW; full standards compatibility is still in progress.
@@ -69,3 +71,26 @@ fn main() -> Result<(), ofdrw::OfdError> {
 This input is available since 0.4.0. C/Python/Go/Node.js
 accept `placeholder_width`, empty `text` and a `font_size` height in span inputs. See the feature reference for validation and
 leading-indent rules.
+
+## Stateful vector canvas (unreleased; after 0.4.0)
+
+```rust
+use ofdrw::{CanvasCommand, OfdDocument};
+
+let mut doc = OfdDocument::new();
+doc.add_blank_page(40., 30.)?;
+let objects = doc.draw_canvas(0, [4., 3., 24., 20.], &[
+    CanvasCommand::SetStrokeColor { color: [0, 80, 200] },
+    CanvasCommand::SetLineWidth { width: 0.5 },
+    CanvasCommand::Rect { rect: [1., 2., 12., 8.] },
+    CanvasCommand::Stroke,
+])?;
+```
+
+The batch commits atomically and returns painted object IDs. Paths, drawing
+parameters, transforms, opacity and clipping participate in save/restore.
+Path coordinates are transformed when painted; rectangle helpers preserve the
+current path. See the feature reference for the Java clip fixture normalization
+and remaining canvas text/image work. C, Python, Go and Node.js expose the
+same batch through `ofd_draw_canvas_json`, `draw_canvas`, `DrawCanvas` and
+`drawCanvas`, respectively. See each binding README for examples.

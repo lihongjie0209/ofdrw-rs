@@ -1,16 +1,18 @@
 # ofdrw-rs for Python
 
+This README targets 0.5.0. Check the [release workflow](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml) for distribution status; build matching bindings and native libraries from source while publication is pending. The previous [v0.4.0 release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) remains available.
+
 Python 3.10+ bindings to the Rust OFD core through CFFI.
 Install the matching version from [PyPI](https://pypi.org/project/ofdrw-rs/):
 
 ```sh
-python -m pip install ofdrw-rs==0.4.0
+python -m pip install ofdrw-rs==0.5.0
 ```
 
 Check the registry and release pages for version availability.
 The wheel includes the native library; a Rust toolchain is not needed.
 Wheels for all six supported platforms are also available from
-[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0).
+[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.5.0).
 
 ```python
 from ofdrw_rs import Document
@@ -30,7 +32,7 @@ Set `OFDRW_LIB_PATH` to an absolute shared-library path for a custom build.
 Supported behavior and limitations are documented in the
 [repository README](https://github.com/lihongjie0209/ofdrw-rs#python).
 
-## 混合流布局（0.4.0 起）
+## 混合流布局（0.5.0 起）
 
 ```python
 with Document.new() as document:
@@ -48,7 +50,7 @@ with Document.new() as document:
 `next` 包含全局 `page_index` 和相对页面顶端的 `y`。整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（0.4.0 起）
+## 盒模型与浮动行（0.5.0 起）
 
 ```python
 with Document.new() as document:
@@ -66,7 +68,7 @@ with Document.new() as document:
 `result["next"]` 可作为下一次调用的 `start`。接口布局已测量尺寸的盒子并绘制装饰；
 自动测量文本盒与嵌套混合容器见下文的布局接口。详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（0.4.0 起）
+## 文本自动测量（0.5.0 起）
 
 ```python
 with Document.new() as document:
@@ -279,3 +281,102 @@ measured/extracted text omits placeholders. Invalid later input rolls back the
 call. A leading placeholder absorbs a configured first-line indent once.
 For character-count reservations use `count * (font_size + letter_spacing)` as
 the width. Available since 0.4.0; use matching bindings and native library.
+
+### Protected content ranges (unreleased source API)
+
+Use matching source bindings and native library; this addition is outside 0.5.0.
+Protect complete measured lines while placing/decorating a box:
+
+```python
+metrics = doc.measure_flowed_spans(0, [{"text": "A\nB\nC\nD"}], 8,
+                                   font_size=2, line_height=3)
+policies = [{"source_index": 0, "ranges": [[line["y"], line["y"] + line["height"]]
+             for line in metrics["lines"]]}]
+result = doc.add_box_layout_with_content_ranges(0,
+    [{"type": "box", "size": [8, metrics["height"]]}], policies,
+    page_size=[20, 14], margins=[2] * 4)
+```
+
+Intervals use original content coordinates and must be ordered, positive,
+disjoint and inside the box. A cut inside an interval moves it intact to the
+next page. The result uses ordinary box-layout fragment fields and continuation;
+callers draw child content separately. Empty policies retain geometric cuts.
+Invalid policies roll back the entire call.
+
+## Device hairlines (0.5.0 candidate)
+
+Pass `line_width=0` to `add_path_object`, `add_composite_path_object`, or
+`add_path_annotation` for a one-device-pixel path stroke. Existing paths
+accept `set_page_path_stroke_style(0, object_id, {"line_width": 0})`.
+PNG retains device width across DPI and transforms; PDF preserves a native
+zero-width stroke. Use the matching unreleased native library.
+
+## Vector canvas batches (0.5.0 candidate)
+
+Use a matching native library built from the same unreleased source.
+
+```python
+from ofdrw_rs import Document
+
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    ids = document.draw_canvas(0, (0, 0, 40, 30), [
+        {"type": "set_stroke_color", "color": [0, 80, 200]},
+        {"type": "rect", "rect": [2, 3, 12, 8]},
+        {"type": "stroke"},
+    ])
+    document.save("canvas.ofd")
+```
+
+The batch commits atomically and returns painted object IDs as strings.
+Coordinates are millimeters; angles are degrees. Use `save`/`restore` for
+paths and drawing state, and `begin_path` to clear the path. Unknown commands
+and fields are rejected. Set global alpha to `None` to clear it.
+See the [command reference](../../docs/FEATURES.md#有状态向量画布) for all vector operations and remaining text limitations.
+
+### Canvas images (0.5.0 candidate)
+
+Image commands accept bytes, bytearray or memoryview in `data`. Alternatively,
+use `data_base64`; providing both is an error. `draw_image_at` uses natural
+pixel dimensions divided by `pixels_per_mm` (default 3.78). `draw_image_region`
+converts its source rectangle from millimeters to integer pixels by truncation,
+matching Java; portions outside the source are transparent. Negative target
+widths/heights mirror the image, and zero dimensions collapse it.
+
+```python
+from pathlib import Path
+from ofdrw_rs import Document
+
+image = Path("picture.png").read_bytes()
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    document.draw_canvas(0, (0, 0, 40, 30), [
+        {"type": "draw_image", "data": image, "format": "png", "rect": [2, 2, 12, 8]},
+        {"type": "draw_image_region", "data": image, "format": "png",
+         "source": [0, 0, 1, 1], "rect": [20, 2, 8, 8], "pixels_per_mm": 2},
+    ])
+    document.save("canvas-images.ofd")
+```
+
+### Canvas text (0.5.0 candidate)
+
+`set_font` configures size, tracking, weight, italic, alignment and quarter-turn
+reading/character directions. Omitted fields use SimSun, 1 mm, weight 400 and
+start alignment. `measure_canvas_text` returns logical width, first glyph offset
+and signed advances without modifying the document. These metrics exclude
+kerning and shaping. Embedded fonts provide reproducible measurements.
+
+```python
+from ofdrw_rs import Document
+
+font = {"size": 4, "align": "center"}
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    metrics = document.measure_canvas_text(0, "Canvas", font)
+    document.draw_canvas(0, (0, 0, 40, 30), [
+        {"type": "set_font", "font": font},
+        {"type": "fill_text", "text": "Canvas", "point": [20, 10]},
+    ])
+    document.save("canvas-text.ofd")
+    print(metrics["width"])
+```

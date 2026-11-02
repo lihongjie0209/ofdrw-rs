@@ -318,9 +318,12 @@ _ffi.cdef(
     int ofd_add_table_json(OfdDocument *handle, size_t document_index, const char *table_json, OfdBuffer *output);
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
+    int ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
+    int ofd_measure_canvas_text_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
+    int ofd_add_box_layout_with_content_ranges_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_box_layout_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_measure_flowed_spans_json(const OfdDocument *handle, size_t document_index, const char *measure_json, OfdBuffer *output);
     int ofd_append_text_page_with_font(OfdDocument *handle, size_t document_index, const char *text, double width_mm, double height_mm, size_t font_id);
@@ -4347,6 +4350,29 @@ class Document:
         finally:
             _lib.ofd_buffer_free(output[0])
 
+    def add_box_layout_with_content_ranges(self, document_index: int, items: list[dict],
+                                          content_ranges: list[dict], **options) -> dict:
+        """Place and decorate measured boxes without cutting protected content intervals.
+
+        Policies contain source_index and ordered disjoint [start, end] ranges
+        relative to the original content top. Options and results match add_box_layout.
+        Children are drawn separately in the returned fragment rectangles.
+        """
+        self._require_open()
+        if document_index < 0:
+            raise IndexError(document_index)
+        if not isinstance(items, list) or not isinstance(content_ranges, list):
+            raise TypeError("items and content_ranges must be lists")
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_add_box_layout_with_content_ranges_json(
+            self._handle, document_index,
+            _utf8(json.dumps({**options, "items": items, "content_ranges": content_ranges}, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
     def add_box_layout(self, document_index: int, items: list[dict], **options) -> dict:
         """Arrange measured boxes and draw their backgrounds/borders atomically.
 
@@ -4363,6 +4389,69 @@ class Document:
         _check(_lib.ofd_add_box_layout_json(
             self._handle, document_index,
             _utf8(json.dumps({**options, "items": items}, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def measure_canvas_text(self, page_index: int, text: str, font: dict | None = None) -> dict:
+        """Measure logical canvas text without modifying pages or font resources."""
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        if font is not None and not isinstance(font, dict):
+            raise TypeError("font must be a dictionary")
+        settings = dict(font) if font is not None else {}
+        if settings.get("font_id") is not None:
+            settings["font_id"] = str(settings["font_id"])
+        payload = json.dumps({"text": text, "font": settings}, allow_nan=False)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_measure_canvas_text_json(self._handle, page_index, _utf8(payload), output))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def draw_canvas(self, page_index: int,
+                    boundary: tuple[float, float, float, float],
+                    commands: list[dict]) -> list[str]:
+        """Execute an atomic vector canvas batch; return painted object IDs.
+
+        Commands use a snake_case ``type`` tag. Angles are degrees, coordinates
+        are millimeters. Image commands accept bytes-like ``data`` or encoded
+        ``data_base64``. Empty commands leave the selected page unchanged.
+        """
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if not isinstance(commands, list):
+            raise TypeError("commands must be a list")
+        encoded_commands = []
+        for command in commands:
+            if (isinstance(command, dict) and command.get("type") == "set_font"
+                    and isinstance(command.get("font"), dict)):
+                font = dict(command["font"])
+                if font.get("font_id") is not None:
+                    font["font_id"] = str(font["font_id"])
+                command = {**command, "font": font}
+            if (isinstance(command, dict)
+                    and command.get("type") in ("draw_image", "draw_image_at", "draw_image_region")
+                    and "data" in command):
+                if "data_base64" in command:
+                    raise ValueError("canvas image requires either data or data_base64")
+                data = command["data"]
+                if not isinstance(data, (bytes, bytearray, memoryview)):
+                    raise TypeError("canvas image data must be bytes-like")
+                command = {key: value for key, value in command.items() if key != "data"}
+                command["data_base64"] = base64.b64encode(bytes(data)).decode("ascii")
+            encoded_commands.append(command)
+        payload = json.dumps({"boundary": boundary, "commands": encoded_commands}, allow_nan=False)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_draw_canvas_json(
+            self._handle, page_index, _utf8(payload), output,
         ))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))

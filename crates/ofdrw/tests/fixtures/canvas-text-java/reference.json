@@ -1,0 +1,276 @@
+{
+  "java_revision": "84e9eb260ba6fd351ecccf08a01a40305d4af635",
+  "text": "WiA",
+  "cases": [
+    {
+      "read_direction": 0,
+      "char_direction": 0,
+      "align": "start",
+      "width": 8.302734375,
+      "first_offset": [
+        0.0,
+        0.0
+      ],
+      "offsets": [
+        4.205078125,
+        1.361328125
+      ]
+    },
+    {
+      "read_direction": 0,
+      "char_direction": 90,
+      "align": "start",
+      "width": 12.5,
+      "first_offset": [
+        0.0,
+        -4.0
+      ],
+      "offsets": [
+        4.25,
+        4.25
+      ]
+    },
+    {
+      "read_direction": 0,
+      "char_direction": 180,
+      "align": "start",
+      "width": 8.302734375,
+      "first_offset": [
+        3.955078125,
+        -4.0
+      ],
+      "offsets": [
+        1.361328125,
+        2.986328125
+      ]
+    },
+    {
+      "read_direction": 0,
+      "char_direction": 270,
+      "align": "start",
+      "width": 12.5,
+      "first_offset": [
+        4.0,
+        0.0
+      ],
+      "offsets": [
+        4.25,
+        4.25
+      ]
+    },
+    {
+      "read_direction": 90,
+      "char_direction": 0,
+      "align": "center",
+      "width": 12.5,
+      "first_offset": [
+        0.0,
+        4.0
+      ],
+      "offsets": [
+        4.25,
+        4.25
+      ]
+    },
+    {
+      "read_direction": 90,
+      "char_direction": 90,
+      "align": "center",
+      "width": 8.302734375,
+      "first_offset": [
+        0.0,
+        0.0
+      ],
+      "offsets": [
+        4.205078125,
+        1.361328125
+      ]
+    },
+    {
+      "read_direction": 90,
+      "char_direction": 180,
+      "align": "center",
+      "width": 12.5,
+      "first_offset": [
+        4.0,
+        0.0
+      ],
+      "offsets": [
+        4.25,
+        4.25
+      ]
+    },
+    {
+      "read_direction": 90,
+      "char_direction": 270,
+      "align": "center",
+      "width": 8.302734375,
+      "first_offset": [
+        4.0,
+        3.955078125
+      ],
+      "offsets": [
+        1.361328125,
+        2.986328125
+      ]
+    },
+    {
+      "read_direction": 180,
+      "char_direction": 0,
+      "align": "end",
+      "width": 8.302734375,
+      "first_offset": [
+        -3.955078125,
+        0.0
+      ],
+      "offsets": [
+        -1.361328125,
+        -2.986328125
+      ]
+    },
+    {
+      "read_direction": 180,
+      "char_direction": 90,
+      "align": "end",
+      "width": 12.5,
+      "first_offset": [
+        -4.0,
+        -4.0
+      ],
+      "offsets": [
+        -4.25,
+        -4.25
+      ]
+    },
+    {
+      "read_direction": 180,
+      "char_direction": 180,
+      "align": "end",
+      "width": 8.302734375,
+      "first_offset": [
+        0.0,
+        -4.0
+      ],
+      "offsets": [
+        -4.205078125,
+        -1.361328125
+      ]
+    },
+    {
+      "read_direction": 180,
+      "char_direction": 270,
+      "align": "end",
+      "width": 12.5,
+      "first_offset": [
+        0.0,
+        0.0
+      ],
+      "offsets": [
+        -4.25,
+        -4.25
+      ]
+    },
+    {
+      "read_direction": 270,
+      "char_direction": 0,
+      "align": "right",
+      "width": 12.5,
+      "first_offset": [
+        0.0,
+        0.0
+      ],
+      "offsets": [
+        -4.25,
+        -4.25
+      ]
+    },
+    {
+      "read_direction": 270,
+      "char_direction": 90,
+      "align": "right",
+      "width": 8.302734375,
+      "first_offset": [
+        0.0,
+        -3.955078125
+      ],
+      "offsets": [
+        -1.361328125,
+        -2.986328125
+      ]
+    },
+    {
+      "read_direction": 270,
+      "char_direction": 180,
+      "align": "right",
+      "width": 12.5,
+      "first_offset": [
+        4.0,
+        -4.0
+      ],
+      "offsets": [
+        -4.25,
+        -4.25
+      ]
+    },
+    {
+      "read_direction": 270,
+      "char_direction": 270,
+      "align": "right",
+      "width": 8.302734375,
+      "first_offset": [
+        4.0,
+        0.0
+      ],
+      "offsets": [
+        -4.205078125,
+        -1.361328125
+      ]
+    }
+  ],
+  "number_format": [
+    {
+      "value": 1.0625,
+      "formatted": "1.063"
+    },
+    {
+      "value": -1.0625,
+      "formatted": "-1.063"
+    },
+    {
+      "value": 1.0005,
+      "formatted": "1.001"
+    },
+    {
+      "value": 1.0015,
+      "formatted": "1.002"
+    },
+    {
+      "value": 0.001953125,
+      "formatted": "0.00195"
+    },
+    {
+      "value": 5e-09,
+      "formatted": "0.00000001"
+    },
+    {
+      "value": 0.999999995,
+      "formatted": "1.0"
+    },
+    {
+      "value": -0.999999995,
+      "formatted": "-1.0"
+    },
+    {
+      "value": 1.2345,
+      "formatted": "1.235"
+    },
+    {
+      "value": 1e+30,
+      "formatted": "1000000000000000000000000000000.000"
+    },
+    {
+      "value": 1e-20,
+      "formatted": "0"
+    }
+  ]
+}

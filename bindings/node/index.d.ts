@@ -99,6 +99,7 @@ export interface AnnotationPath {
   even_odd?: boolean;
   alpha?: number;
   stroke?: boolean;
+  /** Path width in millimeters; zero selects one device pixel (after 0.4.0). */
   line_width?: number;
   cap?: 'butt' | 'round' | 'square';
   join?: 'miter' | 'round' | 'bevel';
@@ -440,6 +441,8 @@ export interface BoxPlacement {
   first: boolean;
   last: boolean;
 }
+/** Ordered indivisible intervals in original content coordinates for one box. */
+export interface BoxContentRanges { source_index: number; ranges: [number, number][] }
 export interface BoxLayoutResult { pages: number[]; placements: BoxPlacement[]; next: FlowStart | null }
 
 export type TextObjectOptions = {
@@ -751,6 +754,7 @@ export interface PageObjectStrokeStyleInfo {
 }
 
 export interface PathStrokeStyle {
+  /** Zero selects one device pixel (after 0.4.0). */
   line_width: number;
   cap?: 'butt' | 'round' | 'square';
   join?: 'miter' | 'round' | 'bevel';
@@ -1079,9 +1083,12 @@ export class Document {
   addFlowedText(documentIndex: number, text: string, options?: FlowTextOptions): number[];
   measureFlowedSpans(documentIndex: number, spans: FlowSpan[], contentWidth: number, options?: FlowTextOptions): FlowTextMetrics;
   /** Draw absolute mixed containers on an existing page; never adds pages. */
+  drawCanvas(pageIndex: number, boundary: [number, number, number, number], commands: readonly CanvasCommand[]): string[];
+  measureCanvasText(pageIndex: number, text: string, font?: CanvasFont): CanvasTextMetrics;
   addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];
   addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;
   addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
+  addBoxLayoutWithContentRanges(documentIndex: number, items: BoxLayoutItem[], contentRanges: BoxContentRanges[], options?: BoxLayoutOptions): BoxLayoutResult;
   addBoxLayout(documentIndex: number, items: BoxLayoutItem[], options?: BoxLayoutOptions): BoxLayoutResult;
   addFlowBlocks(documentIndex: number, blocks: FlowBlock[], options?: FlowDocumentOptions): FlowLayoutResult;
   addFlowedSpans(documentIndex: number, spans: FlowSpan[], options?: FlowTextOptions): number[];
@@ -1168,6 +1175,42 @@ export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTex
 
 /** Mixed children with measured height, nested floating rows and repeated table headers. */
 /** Absolute allocation position and mixed content; positive heights are retained. */
+/** Atomic vector drawing commands; coordinates are mm and angles are degrees. */
+export interface CanvasFont {
+  font_id?: string; size?: number; letter_spacing?: number; weight?: number; italic?: boolean;
+  read_direction?: 0 | 90 | 180 | 270; char_direction?: 0 | 90 | 180 | 270;
+  align?: 'start' | 'end' | 'left' | 'right' | 'center';
+}
+export interface CanvasTextMetrics { width: number; first_offset: [number, number]; offsets: number[] }
+
+export type CanvasImageData =
+  | {data: Buffer | Uint8Array; data_base64?: never}
+  | {data_base64: string; data?: never};
+
+export type CanvasCommand =
+  | {type: 'set_font'; font: CanvasFont}
+  | {type: 'fill_text'; text: string; point: [number, number]}
+  | (CanvasImageData & {type: 'draw_image'; format: string; rect: [number, number, number, number]})
+  | (CanvasImageData & {type: 'draw_image_at'; format: string; point: [number, number]; pixels_per_mm?: number})
+  | (CanvasImageData & {type: 'draw_image_region'; format: string; source: [number, number, number, number];
+      rect: [number, number, number, number]; pixels_per_mm?: number})
+  | {type: 'begin_path' | 'close_path' | 'stroke' | 'save' | 'restore'}
+  | {type: 'move_to' | 'line_to'; point: [number, number]}
+  | {type: 'quadratic_curve_to'; control: [number, number]; end: [number, number]}
+  | {type: 'bezier_curve_to'; control1: [number, number]; control2: [number, number]; end: [number, number]}
+  | {type: 'arc_to'; radii: [number, number]; angle: number; large?: boolean; sweep?: boolean; end: [number, number]}
+  | {type: 'circle_arc'; center: [number, number]; radius: number; start_angle: number; end_angle: number; sweep?: boolean}
+  | {type: 'rect' | 'fill_rect' | 'stroke_rect'; rect: [number, number, number, number]}
+  | {type: 'fill' | 'clip'; even_odd?: boolean}
+  | {type: 'translate'; offset: [number, number]}
+  | {type: 'scale'; factors: [number, number]}
+  | {type: 'rotate'; angle: number}
+  | {type: 'transform' | 'set_transform'; matrix: [number, number, number, number, number, number]}
+  | {type: 'set_draw_param'; style: DrawParamStyle}
+  | {type: 'set_line_width'; width: number}
+  | {type: 'set_fill_color' | 'set_stroke_color'; color: [number, number, number]}
+  | {type: 'set_global_alpha'; alpha?: number | null};
+
 export interface FixedContainer { position: [number, number]; container: FlowContainer }
 export interface FlowContainer { layout: LayoutBox; children?: FlowContainerChild[]; gap?: number }
 export type FlowContainerChild =

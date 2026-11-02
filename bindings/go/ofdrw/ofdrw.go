@@ -326,9 +326,12 @@ type nativeAPI struct {
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	drawCanvas                      func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	measureCanvasText               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFixedContainers              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowContainers               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addTextBoxes                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	addBoxLayoutWithContentRanges   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addBoxLayout                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureFlowedSpans              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	appendTextWithFont              func(uintptr, uintptr, *byte, float64, float64, uintptr) int32
@@ -698,8 +701,11 @@ func loadAPI() error {
 			{"ofd_add_table_json", &api.addTable},
 			{"ofd_add_flowed_spans_json", &api.addFlowedSpans},
 			{"ofd_add_flow_blocks_json", &api.addFlowBlocks},
+			{"ofd_add_box_layout_with_content_ranges_json", &api.addBoxLayoutWithContentRanges},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
 			{"ofd_add_text_boxes_json", &api.addTextBoxes},
+			{"ofd_draw_canvas_json", &api.drawCanvas},
+			{"ofd_measure_canvas_text_json", &api.measureCanvasText},
 			{"ofd_add_fixed_containers_json", &api.addFixedContainers},
 			{"ofd_add_flow_containers_json", &api.addFlowContainers},
 			{"ofd_measure_flowed_spans_json", &api.measureFlowedSpans},
@@ -1215,6 +1221,22 @@ type BoxPlacement struct {
 	SourceOffset float64    `json:"source_offset"`
 	First        bool       `json:"first"`
 	Last         bool       `json:"last"`
+}
+
+// BoxContentRanges protects ordered disjoint vertical intervals from page cuts.
+// SourceIndex identifies a box item; intervals use its original content coordinates.
+type BoxContentRanges struct {
+	SourceIndex int          `json:"source_index"`
+	Ranges      [][2]float64 `json:"ranges"`
+}
+
+// BoxContentRangesFromText protects each measured line, including its leading.
+func BoxContentRangesFromText(sourceIndex int, metrics FlowTextMetrics) BoxContentRanges {
+	ranges := make([][2]float64, len(metrics.Lines))
+	for i, line := range metrics.Lines {
+		ranges[i] = [2]float64{line.Y, line.Y + line.Height}
+	}
+	return BoxContentRanges{SourceIndex: sourceIndex, Ranges: ranges}
 }
 
 // BoxLayoutResult gives global page indexes, fragment coordinates, and a continuation.
@@ -5593,7 +5615,7 @@ func (doc *Document) AppendAnnotationObjects(pageIndex int, annotationID string,
 	prepared := make([]AnnotationGraphic, len(objects))
 	copy(prepared, objects)
 	for index := range prepared {
-		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 {
+		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 && !prepared[index].Hairline {
 			prepared[index].LineWidth = 0.4
 		}
 	}
@@ -8866,10 +8888,13 @@ func (doc *Document) RemovePageLayer(pageIndex int, layerID string) error {
 
 // PathStyle controls the appearance of a positioned vector path.
 type PathStyle struct {
-	Fill         bool        `json:"fill"`
-	EvenOdd      bool        `json:"even_odd"`
-	Alpha        *uint8      `json:"alpha,omitempty"`
-	Stroke       bool        `json:"stroke"`
+	Fill    bool   `json:"fill"`
+	EvenOdd bool   `json:"even_odd"`
+	Alpha   *uint8 `json:"alpha,omitempty"`
+	Stroke  bool   `json:"stroke"`
+	// Hairline preserves a zero LineWidth instead of applying the writer's default.
+	// A nonzero LineWidth is always honored.
+	Hairline     bool        `json:"-"`
 	LineWidth    float64     `json:"line_width"`
 	Cap          string      `json:"cap,omitempty"`
 	Join         string      `json:"join,omitempty"`
@@ -8909,7 +8934,7 @@ type AnnotationGraphic struct {
 }
 
 // AddPathObject adds a vector path to a page and returns its OFD object ID.
-// A zero LineWidth selects the default width of 0.4 mm.
+// A zero LineWidth selects 0.4 mm unless Hairline is true.
 func (doc *Document) AddPathObject(pageIndex int, commands string, boundary [4]float64, style PathStyle) (int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -8919,7 +8944,7 @@ func (doc *Document) AddPathObject(pageIndex int, commands string, boundary [4]f
 	if pageIndex < 0 {
 		return 0, errors.New("negative page index")
 	}
-	if style.LineWidth == 0 {
+	if style.LineWidth == 0 && !style.Hairline {
 		style.LineWidth = 0.4
 	}
 	payload, err := json.Marshal(struct {
@@ -8984,7 +9009,7 @@ func (doc *Document) AddCompositePathObject(pageIndex int, commands string, boun
 	if pageIndex < 0 {
 		return 0, errors.New("negative page index")
 	}
-	if style.LineWidth == 0 {
+	if style.LineWidth == 0 && !style.Hairline {
 		style.LineWidth = 0.4
 	}
 	payload, err := json.Marshal(struct {
@@ -9227,7 +9252,7 @@ func (doc *Document) addImageAnnotation(pageIndex int, boundary [4]float64, opac
 }
 
 // AddPathAnnotation adds a styled vector Path annotation and returns its ID.
-// A zero LineWidth selects the default width of 0.4 mm.
+// A zero LineWidth selects 0.4 mm unless Hairline is true.
 func (doc *Document) AddPathAnnotation(pageIndex int, commands string, boundary [4]float64, style PathStyle) (int, error) {
 	doc.mu.Lock()
 	defer doc.mu.Unlock()
@@ -9237,7 +9262,7 @@ func (doc *Document) AddPathAnnotation(pageIndex int, commands string, boundary 
 	if pageIndex < 0 {
 		return 0, errors.New("negative page index")
 	}
-	if style.LineWidth == 0 {
+	if style.LineWidth == 0 && !style.Hairline {
 		style.LineWidth = 0.4
 	}
 	payload, err := json.Marshal(struct {
@@ -9274,7 +9299,7 @@ func (doc *Document) AddMultiPathAnnotation(pageIndex int, boundary [4]float64, 
 	prepared := make([]AnnotationPath, len(paths))
 	copy(prepared, paths)
 	for index := range prepared {
-		if prepared[index].LineWidth == 0 {
+		if prepared[index].LineWidth == 0 && !prepared[index].Hairline {
 			prepared[index].LineWidth = 0.4
 		}
 	}
@@ -9321,7 +9346,7 @@ func (doc *Document) addMixedAnnotation(pageIndex int, boundary [4]float64, obje
 	prepared := make([]AnnotationGraphic, len(objects))
 	copy(prepared, objects)
 	for index := range prepared {
-		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 {
+		if prepared[index].Kind == "path" && prepared[index].LineWidth == 0 && !prepared[index].Hairline {
 			prepared[index].LineWidth = 0.4
 		}
 	}
@@ -10374,6 +10399,71 @@ func (doc *Document) AddTextBoxes(documentIndex int, boxes []TextBox, style BoxL
 	var result BoxLayoutResult
 	if err := json.Unmarshal(data, &result); err != nil {
 		return BoxLayoutResult{}, fmt.Errorf("decode text boxes result: %w", err)
+	}
+	return result, nil
+}
+
+// AddBoxLayoutWithContentRanges protects indivisible intervals while arranging and painting boxes.
+// It returns fragment coordinates and a continuation. A zero style selects A4 geometry.
+// Invalid later input leaves the document unchanged.
+func (doc *Document) AddBoxLayoutWithContentRanges(
+	documentIndex int,
+	items []BoxLayoutItem,
+	contentRanges []BoxContentRanges,
+	style BoxLayoutStyle,
+) (BoxLayoutResult, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return BoxLayoutResult{}, err
+	}
+	if documentIndex < 0 {
+		return BoxLayoutResult{}, errors.New("negative document index")
+	}
+	if style == (BoxLayoutStyle{}) {
+		style = DefaultBoxLayoutStyle()
+	}
+	if items == nil {
+		items = []BoxLayoutItem{}
+	}
+	policies := make([]BoxContentRanges, len(contentRanges))
+	for i, policy := range contentRanges {
+		policies[i] = policy
+		if policies[i].Ranges == nil {
+			policies[i].Ranges = [][2]float64{}
+		}
+	}
+	payload, err := json.Marshal(struct {
+		Items         []BoxLayoutItem    `json:"items"`
+		ContentRanges []BoxContentRanges `json:"content_ranges"`
+		BoxLayoutStyle
+	}{Items: items, ContentRanges: policies, BoxLayoutStyle: style})
+	if err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("encode box layout: %w", err)
+	}
+	payloadBytes, err := cString(string(payload))
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.addBoxLayoutWithContentRanges(
+		doc.handle,
+		uintptr(documentIndex),
+		&payloadBytes[0],
+		&buffer,
+	)); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("add box layout: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return BoxLayoutResult{}, err
+	}
+	var result BoxLayoutResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return BoxLayoutResult{}, fmt.Errorf("decode box layout result: %w", err)
 	}
 	return result, nil
 }
