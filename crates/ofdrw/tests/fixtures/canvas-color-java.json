@@ -1,0 +1,3651 @@
+{
+  "java_commit": "84e9eb260ba6fd351ecccf08a01a40305d4af635",
+  "source_sha256": "ab55a145be575c820a8e8f1a6f27625c2cb59785268834f70371f6459f238250",
+  "cases": [
+    {
+      "input": "aliceblue",
+      "expected": [
+        240,
+        248,
+        255
+      ]
+    },
+    {
+      "input": "ALICEBLUE",
+      "expected": [
+        240,
+        248,
+        255
+      ]
+    },
+    {
+      "input": "  aliceblue\t",
+      "expected": [
+        240,
+        248,
+        255
+      ]
+    },
+    {
+      "input": "antiquewhite",
+      "expected": [
+        250,
+        235,
+        215
+      ]
+    },
+    {
+      "input": "ANTIQUEWHITE",
+      "expected": [
+        250,
+        235,
+        215
+      ]
+    },
+    {
+      "input": "  antiquewhite\t",
+      "expected": [
+        250,
+        235,
+        215
+      ]
+    },
+    {
+      "input": "aqua",
+      "expected": [
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "AQUA",
+      "expected": [
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "  aqua\t",
+      "expected": [
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "aquamarine",
+      "expected": [
+        127,
+        255,
+        212
+      ]
+    },
+    {
+      "input": "AQUAMARINE",
+      "expected": [
+        127,
+        255,
+        212
+      ]
+    },
+    {
+      "input": "  aquamarine\t",
+      "expected": [
+        127,
+        255,
+        212
+      ]
+    },
+    {
+      "input": "azure",
+      "expected": [
+        240,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "AZURE",
+      "expected": [
+        240,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "  azure\t",
+      "expected": [
+        240,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "beige",
+      "expected": [
+        245,
+        245,
+        220
+      ]
+    },
+    {
+      "input": "BEIGE",
+      "expected": [
+        245,
+        245,
+        220
+      ]
+    },
+    {
+      "input": "  beige\t",
+      "expected": [
+        245,
+        245,
+        220
+      ]
+    },
+    {
+      "input": "bisque",
+      "expected": [
+        255,
+        228,
+        196
+      ]
+    },
+    {
+      "input": "BISQUE",
+      "expected": [
+        255,
+        228,
+        196
+      ]
+    },
+    {
+      "input": "  bisque\t",
+      "expected": [
+        255,
+        228,
+        196
+      ]
+    },
+    {
+      "input": "black",
+      "expected": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "BLACK",
+      "expected": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "  black\t",
+      "expected": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "blanchedalmond",
+      "expected": [
+        255,
+        235,
+        205
+      ]
+    },
+    {
+      "input": "BLANCHEDALMOND",
+      "expected": [
+        255,
+        235,
+        205
+      ]
+    },
+    {
+      "input": "  blanchedalmond\t",
+      "expected": [
+        255,
+        235,
+        205
+      ]
+    },
+    {
+      "input": "blue",
+      "expected": [
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "BLUE",
+      "expected": [
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "  blue\t",
+      "expected": [
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "blueviolet",
+      "expected": [
+        138,
+        43,
+        226
+      ]
+    },
+    {
+      "input": "BLUEVIOLET",
+      "expected": [
+        138,
+        43,
+        226
+      ]
+    },
+    {
+      "input": "  blueviolet\t",
+      "expected": [
+        138,
+        43,
+        226
+      ]
+    },
+    {
+      "input": "brown",
+      "expected": [
+        165,
+        42,
+        42
+      ]
+    },
+    {
+      "input": "BROWN",
+      "expected": [
+        165,
+        42,
+        42
+      ]
+    },
+    {
+      "input": "  brown\t",
+      "expected": [
+        165,
+        42,
+        42
+      ]
+    },
+    {
+      "input": "burlywood",
+      "expected": [
+        222,
+        184,
+        135
+      ]
+    },
+    {
+      "input": "BURLYWOOD",
+      "expected": [
+        222,
+        184,
+        135
+      ]
+    },
+    {
+      "input": "  burlywood\t",
+      "expected": [
+        222,
+        184,
+        135
+      ]
+    },
+    {
+      "input": "cadetblue",
+      "expected": [
+        95,
+        158,
+        160
+      ]
+    },
+    {
+      "input": "CADETBLUE",
+      "expected": [
+        95,
+        158,
+        160
+      ]
+    },
+    {
+      "input": "  cadetblue\t",
+      "expected": [
+        95,
+        158,
+        160
+      ]
+    },
+    {
+      "input": "chartreuse",
+      "expected": [
+        127,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "CHARTREUSE",
+      "expected": [
+        127,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "  chartreuse\t",
+      "expected": [
+        127,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "chocolate",
+      "expected": [
+        210,
+        105,
+        30
+      ]
+    },
+    {
+      "input": "CHOCOLATE",
+      "expected": [
+        210,
+        105,
+        30
+      ]
+    },
+    {
+      "input": "  chocolate\t",
+      "expected": [
+        210,
+        105,
+        30
+      ]
+    },
+    {
+      "input": "coral",
+      "expected": [
+        255,
+        127,
+        80
+      ]
+    },
+    {
+      "input": "CORAL",
+      "expected": [
+        255,
+        127,
+        80
+      ]
+    },
+    {
+      "input": "  coral\t",
+      "expected": [
+        255,
+        127,
+        80
+      ]
+    },
+    {
+      "input": "cornflowerblue",
+      "expected": [
+        100,
+        149,
+        237
+      ]
+    },
+    {
+      "input": "CORNFLOWERBLUE",
+      "expected": [
+        100,
+        149,
+        237
+      ]
+    },
+    {
+      "input": "  cornflowerblue\t",
+      "expected": [
+        100,
+        149,
+        237
+      ]
+    },
+    {
+      "input": "cornsilk",
+      "expected": [
+        255,
+        248,
+        220
+      ]
+    },
+    {
+      "input": "CORNSILK",
+      "expected": [
+        255,
+        248,
+        220
+      ]
+    },
+    {
+      "input": "  cornsilk\t",
+      "expected": [
+        255,
+        248,
+        220
+      ]
+    },
+    {
+      "input": "crimson",
+      "expected": [
+        220,
+        20,
+        60
+      ]
+    },
+    {
+      "input": "CRIMSON",
+      "expected": [
+        220,
+        20,
+        60
+      ]
+    },
+    {
+      "input": "  crimson\t",
+      "expected": [
+        220,
+        20,
+        60
+      ]
+    },
+    {
+      "input": "cyan",
+      "expected": [
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "CYAN",
+      "expected": [
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "  cyan\t",
+      "expected": [
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "darkblue",
+      "expected": [
+        0,
+        0,
+        139
+      ]
+    },
+    {
+      "input": "DARKBLUE",
+      "expected": [
+        0,
+        0,
+        139
+      ]
+    },
+    {
+      "input": "  darkblue\t",
+      "expected": [
+        0,
+        0,
+        139
+      ]
+    },
+    {
+      "input": "darkcyan",
+      "expected": [
+        0,
+        139,
+        139
+      ]
+    },
+    {
+      "input": "DARKCYAN",
+      "expected": [
+        0,
+        139,
+        139
+      ]
+    },
+    {
+      "input": "  darkcyan\t",
+      "expected": [
+        0,
+        139,
+        139
+      ]
+    },
+    {
+      "input": "darkgoldenrod",
+      "expected": [
+        184,
+        134,
+        11
+      ]
+    },
+    {
+      "input": "DARKGOLDENROD",
+      "expected": [
+        184,
+        134,
+        11
+      ]
+    },
+    {
+      "input": "  darkgoldenrod\t",
+      "expected": [
+        184,
+        134,
+        11
+      ]
+    },
+    {
+      "input": "darkgray",
+      "expected": [
+        169,
+        169,
+        169
+      ]
+    },
+    {
+      "input": "DARKGRAY",
+      "expected": [
+        169,
+        169,
+        169
+      ]
+    },
+    {
+      "input": "  darkgray\t",
+      "expected": [
+        169,
+        169,
+        169
+      ]
+    },
+    {
+      "input": "darkgreen",
+      "expected": [
+        0,
+        100,
+        0
+      ]
+    },
+    {
+      "input": "DARKGREEN",
+      "expected": [
+        0,
+        100,
+        0
+      ]
+    },
+    {
+      "input": "  darkgreen\t",
+      "expected": [
+        0,
+        100,
+        0
+      ]
+    },
+    {
+      "input": "darkkhaki",
+      "expected": [
+        189,
+        183,
+        107
+      ]
+    },
+    {
+      "input": "DARKKHAKI",
+      "expected": [
+        189,
+        183,
+        107
+      ]
+    },
+    {
+      "input": "  darkkhaki\t",
+      "expected": [
+        189,
+        183,
+        107
+      ]
+    },
+    {
+      "input": "darkmagenta",
+      "expected": [
+        139,
+        0,
+        139
+      ]
+    },
+    {
+      "input": "DARKMAGENTA",
+      "expected": [
+        139,
+        0,
+        139
+      ]
+    },
+    {
+      "input": "  darkmagenta\t",
+      "expected": [
+        139,
+        0,
+        139
+      ]
+    },
+    {
+      "input": "darkolivegreen",
+      "expected": [
+        85,
+        107,
+        47
+      ]
+    },
+    {
+      "input": "DARKOLIVEGREEN",
+      "expected": [
+        85,
+        107,
+        47
+      ]
+    },
+    {
+      "input": "  darkolivegreen\t",
+      "expected": [
+        85,
+        107,
+        47
+      ]
+    },
+    {
+      "input": "darkorange",
+      "expected": [
+        255,
+        140,
+        0
+      ]
+    },
+    {
+      "input": "DARKORANGE",
+      "expected": [
+        255,
+        140,
+        0
+      ]
+    },
+    {
+      "input": "  darkorange\t",
+      "expected": [
+        255,
+        140,
+        0
+      ]
+    },
+    {
+      "input": "darkorchid",
+      "expected": [
+        153,
+        50,
+        204
+      ]
+    },
+    {
+      "input": "DARKORCHID",
+      "expected": [
+        153,
+        50,
+        204
+      ]
+    },
+    {
+      "input": "  darkorchid\t",
+      "expected": [
+        153,
+        50,
+        204
+      ]
+    },
+    {
+      "input": "darkred",
+      "expected": [
+        139,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "DARKRED",
+      "expected": [
+        139,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "  darkred\t",
+      "expected": [
+        139,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "darksalmon",
+      "expected": [
+        233,
+        150,
+        122
+      ]
+    },
+    {
+      "input": "DARKSALMON",
+      "expected": [
+        233,
+        150,
+        122
+      ]
+    },
+    {
+      "input": "  darksalmon\t",
+      "expected": [
+        233,
+        150,
+        122
+      ]
+    },
+    {
+      "input": "darkseagreen",
+      "expected": [
+        143,
+        188,
+        143
+      ]
+    },
+    {
+      "input": "DARKSEAGREEN",
+      "expected": [
+        143,
+        188,
+        143
+      ]
+    },
+    {
+      "input": "  darkseagreen\t",
+      "expected": [
+        143,
+        188,
+        143
+      ]
+    },
+    {
+      "input": "darkslateblue",
+      "expected": [
+        72,
+        61,
+        139
+      ]
+    },
+    {
+      "input": "DARKSLATEBLUE",
+      "expected": [
+        72,
+        61,
+        139
+      ]
+    },
+    {
+      "input": "  darkslateblue\t",
+      "expected": [
+        72,
+        61,
+        139
+      ]
+    },
+    {
+      "input": "darkslategray",
+      "expected": [
+        47,
+        79,
+        79
+      ]
+    },
+    {
+      "input": "DARKSLATEGRAY",
+      "expected": [
+        47,
+        79,
+        79
+      ]
+    },
+    {
+      "input": "  darkslategray\t",
+      "expected": [
+        47,
+        79,
+        79
+      ]
+    },
+    {
+      "input": "darkturquoise",
+      "expected": [
+        0,
+        206,
+        209
+      ]
+    },
+    {
+      "input": "DARKTURQUOISE",
+      "expected": [
+        0,
+        206,
+        209
+      ]
+    },
+    {
+      "input": "  darkturquoise\t",
+      "expected": [
+        0,
+        206,
+        209
+      ]
+    },
+    {
+      "input": "darkviolet",
+      "expected": [
+        148,
+        0,
+        211
+      ]
+    },
+    {
+      "input": "DARKVIOLET",
+      "expected": [
+        148,
+        0,
+        211
+      ]
+    },
+    {
+      "input": "  darkviolet\t",
+      "expected": [
+        148,
+        0,
+        211
+      ]
+    },
+    {
+      "input": "deeppink",
+      "expected": [
+        255,
+        20,
+        147
+      ]
+    },
+    {
+      "input": "DEEPPINK",
+      "expected": [
+        255,
+        20,
+        147
+      ]
+    },
+    {
+      "input": "  deeppink\t",
+      "expected": [
+        255,
+        20,
+        147
+      ]
+    },
+    {
+      "input": "deepskyblue",
+      "expected": [
+        0,
+        191,
+        255
+      ]
+    },
+    {
+      "input": "DEEPSKYBLUE",
+      "expected": [
+        0,
+        191,
+        255
+      ]
+    },
+    {
+      "input": "  deepskyblue\t",
+      "expected": [
+        0,
+        191,
+        255
+      ]
+    },
+    {
+      "input": "dimgray",
+      "expected": [
+        105,
+        105,
+        105
+      ]
+    },
+    {
+      "input": "DIMGRAY",
+      "expected": [
+        105,
+        105,
+        105
+      ]
+    },
+    {
+      "input": "  dimgray\t",
+      "expected": [
+        105,
+        105,
+        105
+      ]
+    },
+    {
+      "input": "dodgerblue",
+      "expected": [
+        30,
+        144,
+        255
+      ]
+    },
+    {
+      "input": "DODGERBLUE",
+      "expected": [
+        30,
+        144,
+        255
+      ]
+    },
+    {
+      "input": "  dodgerblue\t",
+      "expected": [
+        30,
+        144,
+        255
+      ]
+    },
+    {
+      "input": "feldspar",
+      "expected": [
+        209,
+        146,
+        117
+      ]
+    },
+    {
+      "input": "FELDSPAR",
+      "expected": [
+        209,
+        146,
+        117
+      ]
+    },
+    {
+      "input": "  feldspar\t",
+      "expected": [
+        209,
+        146,
+        117
+      ]
+    },
+    {
+      "input": "firebrick",
+      "expected": [
+        178,
+        34,
+        34
+      ]
+    },
+    {
+      "input": "FIREBRICK",
+      "expected": [
+        178,
+        34,
+        34
+      ]
+    },
+    {
+      "input": "  firebrick\t",
+      "expected": [
+        178,
+        34,
+        34
+      ]
+    },
+    {
+      "input": "floralwhite",
+      "expected": [
+        255,
+        250,
+        240
+      ]
+    },
+    {
+      "input": "FLORALWHITE",
+      "expected": [
+        255,
+        250,
+        240
+      ]
+    },
+    {
+      "input": "  floralwhite\t",
+      "expected": [
+        255,
+        250,
+        240
+      ]
+    },
+    {
+      "input": "forestgreen",
+      "expected": [
+        34,
+        139,
+        34
+      ]
+    },
+    {
+      "input": "FORESTGREEN",
+      "expected": [
+        34,
+        139,
+        34
+      ]
+    },
+    {
+      "input": "  forestgreen\t",
+      "expected": [
+        34,
+        139,
+        34
+      ]
+    },
+    {
+      "input": "fuchsia",
+      "expected": [
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "FUCHSIA",
+      "expected": [
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "  fuchsia\t",
+      "expected": [
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "gainsboro",
+      "expected": [
+        220,
+        220,
+        220
+      ]
+    },
+    {
+      "input": "GAINSBORO",
+      "expected": [
+        220,
+        220,
+        220
+      ]
+    },
+    {
+      "input": "  gainsboro\t",
+      "expected": [
+        220,
+        220,
+        220
+      ]
+    },
+    {
+      "input": "ghostwhite",
+      "expected": [
+        248,
+        248,
+        255
+      ]
+    },
+    {
+      "input": "GHOSTWHITE",
+      "expected": [
+        248,
+        248,
+        255
+      ]
+    },
+    {
+      "input": "  ghostwhite\t",
+      "expected": [
+        248,
+        248,
+        255
+      ]
+    },
+    {
+      "input": "gold",
+      "expected": [
+        255,
+        215,
+        0
+      ]
+    },
+    {
+      "input": "GOLD",
+      "expected": [
+        255,
+        215,
+        0
+      ]
+    },
+    {
+      "input": "  gold\t",
+      "expected": [
+        255,
+        215,
+        0
+      ]
+    },
+    {
+      "input": "goldenrod",
+      "expected": [
+        218,
+        165,
+        32
+      ]
+    },
+    {
+      "input": "GOLDENROD",
+      "expected": [
+        218,
+        165,
+        32
+      ]
+    },
+    {
+      "input": "  goldenrod\t",
+      "expected": [
+        218,
+        165,
+        32
+      ]
+    },
+    {
+      "input": "gray",
+      "expected": [
+        128,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "GRAY",
+      "expected": [
+        128,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "  gray\t",
+      "expected": [
+        128,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "green",
+      "expected": [
+        0,
+        128,
+        0
+      ]
+    },
+    {
+      "input": "GREEN",
+      "expected": [
+        0,
+        128,
+        0
+      ]
+    },
+    {
+      "input": "  green\t",
+      "expected": [
+        0,
+        128,
+        0
+      ]
+    },
+    {
+      "input": "greenyellow",
+      "expected": [
+        173,
+        255,
+        47
+      ]
+    },
+    {
+      "input": "GREENYELLOW",
+      "expected": [
+        173,
+        255,
+        47
+      ]
+    },
+    {
+      "input": "  greenyellow\t",
+      "expected": [
+        173,
+        255,
+        47
+      ]
+    },
+    {
+      "input": "honeydew",
+      "expected": [
+        240,
+        255,
+        240
+      ]
+    },
+    {
+      "input": "HONEYDEW",
+      "expected": [
+        240,
+        255,
+        240
+      ]
+    },
+    {
+      "input": "  honeydew\t",
+      "expected": [
+        240,
+        255,
+        240
+      ]
+    },
+    {
+      "input": "hotpink",
+      "expected": [
+        255,
+        105,
+        180
+      ]
+    },
+    {
+      "input": "HOTPINK",
+      "expected": [
+        255,
+        105,
+        180
+      ]
+    },
+    {
+      "input": "  hotpink\t",
+      "expected": [
+        255,
+        105,
+        180
+      ]
+    },
+    {
+      "input": "indianred",
+      "expected": [
+        205,
+        92,
+        92
+      ]
+    },
+    {
+      "input": "INDIANRED",
+      "expected": [
+        205,
+        92,
+        92
+      ]
+    },
+    {
+      "input": "  indianred\t",
+      "expected": [
+        205,
+        92,
+        92
+      ]
+    },
+    {
+      "input": "indigo",
+      "expected": [
+        75,
+        0,
+        130
+      ]
+    },
+    {
+      "input": "INDIGO",
+      "expected": [
+        75,
+        0,
+        130
+      ]
+    },
+    {
+      "input": "  indigo\t",
+      "expected": [
+        75,
+        0,
+        130
+      ]
+    },
+    {
+      "input": "ivory",
+      "expected": [
+        255,
+        255,
+        240
+      ]
+    },
+    {
+      "input": "IVORY",
+      "expected": [
+        255,
+        255,
+        240
+      ]
+    },
+    {
+      "input": "  ivory\t",
+      "expected": [
+        255,
+        255,
+        240
+      ]
+    },
+    {
+      "input": "khaki",
+      "expected": [
+        240,
+        230,
+        140
+      ]
+    },
+    {
+      "input": "KHAKI",
+      "expected": [
+        240,
+        230,
+        140
+      ]
+    },
+    {
+      "input": "  khaki\t",
+      "expected": [
+        240,
+        230,
+        140
+      ]
+    },
+    {
+      "input": "lavender",
+      "expected": [
+        230,
+        230,
+        250
+      ]
+    },
+    {
+      "input": "LAVENDER",
+      "expected": [
+        230,
+        230,
+        250
+      ]
+    },
+    {
+      "input": "  lavender\t",
+      "expected": [
+        230,
+        230,
+        250
+      ]
+    },
+    {
+      "input": "lavenderblush",
+      "expected": [
+        255,
+        240,
+        245
+      ]
+    },
+    {
+      "input": "LAVENDERBLUSH",
+      "expected": [
+        255,
+        240,
+        245
+      ]
+    },
+    {
+      "input": "  lavenderblush\t",
+      "expected": [
+        255,
+        240,
+        245
+      ]
+    },
+    {
+      "input": "lawngreen",
+      "expected": [
+        124,
+        252,
+        0
+      ]
+    },
+    {
+      "input": "LAWNGREEN",
+      "expected": [
+        124,
+        252,
+        0
+      ]
+    },
+    {
+      "input": "  lawngreen\t",
+      "expected": [
+        124,
+        252,
+        0
+      ]
+    },
+    {
+      "input": "lemonchiffon",
+      "expected": [
+        255,
+        250,
+        205
+      ]
+    },
+    {
+      "input": "LEMONCHIFFON",
+      "expected": [
+        255,
+        250,
+        205
+      ]
+    },
+    {
+      "input": "  lemonchiffon\t",
+      "expected": [
+        255,
+        250,
+        205
+      ]
+    },
+    {
+      "input": "lightblue",
+      "expected": [
+        173,
+        216,
+        230
+      ]
+    },
+    {
+      "input": "LIGHTBLUE",
+      "expected": [
+        173,
+        216,
+        230
+      ]
+    },
+    {
+      "input": "  lightblue\t",
+      "expected": [
+        173,
+        216,
+        230
+      ]
+    },
+    {
+      "input": "lightcoral",
+      "expected": [
+        240,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "LIGHTCORAL",
+      "expected": [
+        240,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "  lightcoral\t",
+      "expected": [
+        240,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "lightcyan",
+      "expected": [
+        224,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "LIGHTCYAN",
+      "expected": [
+        224,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "  lightcyan\t",
+      "expected": [
+        224,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "lightgoldenrodyellow",
+      "expected": [
+        250,
+        250,
+        210
+      ]
+    },
+    {
+      "input": "LIGHTGOLDENRODYELLOW",
+      "expected": [
+        250,
+        250,
+        210
+      ]
+    },
+    {
+      "input": "  lightgoldenrodyellow\t",
+      "expected": [
+        250,
+        250,
+        210
+      ]
+    },
+    {
+      "input": "lightgrey",
+      "expected": [
+        211,
+        211,
+        211
+      ]
+    },
+    {
+      "input": "LIGHTGREY",
+      "expected": [
+        211,
+        211,
+        211
+      ]
+    },
+    {
+      "input": "  lightgrey\t",
+      "expected": [
+        211,
+        211,
+        211
+      ]
+    },
+    {
+      "input": "lightgreen",
+      "expected": [
+        144,
+        238,
+        144
+      ]
+    },
+    {
+      "input": "LIGHTGREEN",
+      "expected": [
+        144,
+        238,
+        144
+      ]
+    },
+    {
+      "input": "  lightgreen\t",
+      "expected": [
+        144,
+        238,
+        144
+      ]
+    },
+    {
+      "input": "lightpink",
+      "expected": [
+        255,
+        182,
+        193
+      ]
+    },
+    {
+      "input": "LIGHTPINK",
+      "expected": [
+        255,
+        182,
+        193
+      ]
+    },
+    {
+      "input": "  lightpink\t",
+      "expected": [
+        255,
+        182,
+        193
+      ]
+    },
+    {
+      "input": "lightsalmon",
+      "expected": [
+        255,
+        160,
+        122
+      ]
+    },
+    {
+      "input": "LIGHTSALMON",
+      "expected": [
+        255,
+        160,
+        122
+      ]
+    },
+    {
+      "input": "  lightsalmon\t",
+      "expected": [
+        255,
+        160,
+        122
+      ]
+    },
+    {
+      "input": "lightseagreen",
+      "expected": [
+        32,
+        178,
+        170
+      ]
+    },
+    {
+      "input": "LIGHTSEAGREEN",
+      "expected": [
+        32,
+        178,
+        170
+      ]
+    },
+    {
+      "input": "  lightseagreen\t",
+      "expected": [
+        32,
+        178,
+        170
+      ]
+    },
+    {
+      "input": "lightskyblue",
+      "expected": [
+        135,
+        206,
+        250
+      ]
+    },
+    {
+      "input": "LIGHTSKYBLUE",
+      "expected": [
+        135,
+        206,
+        250
+      ]
+    },
+    {
+      "input": "  lightskyblue\t",
+      "expected": [
+        135,
+        206,
+        250
+      ]
+    },
+    {
+      "input": "lightslateblue",
+      "expected": [
+        132,
+        112,
+        255
+      ]
+    },
+    {
+      "input": "LIGHTSLATEBLUE",
+      "expected": [
+        132,
+        112,
+        255
+      ]
+    },
+    {
+      "input": "  lightslateblue\t",
+      "expected": [
+        132,
+        112,
+        255
+      ]
+    },
+    {
+      "input": "lightslategray",
+      "expected": [
+        119,
+        136,
+        153
+      ]
+    },
+    {
+      "input": "LIGHTSLATEGRAY",
+      "expected": [
+        119,
+        136,
+        153
+      ]
+    },
+    {
+      "input": "  lightslategray\t",
+      "expected": [
+        119,
+        136,
+        153
+      ]
+    },
+    {
+      "input": "lightsteelblue",
+      "expected": [
+        176,
+        196,
+        222
+      ]
+    },
+    {
+      "input": "LIGHTSTEELBLUE",
+      "expected": [
+        176,
+        196,
+        222
+      ]
+    },
+    {
+      "input": "  lightsteelblue\t",
+      "expected": [
+        176,
+        196,
+        222
+      ]
+    },
+    {
+      "input": "lightyellow",
+      "expected": [
+        255,
+        255,
+        224
+      ]
+    },
+    {
+      "input": "LIGHTYELLOW",
+      "expected": [
+        255,
+        255,
+        224
+      ]
+    },
+    {
+      "input": "  lightyellow\t",
+      "expected": [
+        255,
+        255,
+        224
+      ]
+    },
+    {
+      "input": "lime",
+      "expected": [
+        0,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "LIME",
+      "expected": [
+        0,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "  lime\t",
+      "expected": [
+        0,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "limegreen",
+      "expected": [
+        50,
+        205,
+        50
+      ]
+    },
+    {
+      "input": "LIMEGREEN",
+      "expected": [
+        50,
+        205,
+        50
+      ]
+    },
+    {
+      "input": "  limegreen\t",
+      "expected": [
+        50,
+        205,
+        50
+      ]
+    },
+    {
+      "input": "linen",
+      "expected": [
+        250,
+        240,
+        230
+      ]
+    },
+    {
+      "input": "LINEN",
+      "expected": [
+        250,
+        240,
+        230
+      ]
+    },
+    {
+      "input": "  linen\t",
+      "expected": [
+        250,
+        240,
+        230
+      ]
+    },
+    {
+      "input": "magenta",
+      "expected": [
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "MAGENTA",
+      "expected": [
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "  magenta\t",
+      "expected": [
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "input": "maroon",
+      "expected": [
+        128,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "MAROON",
+      "expected": [
+        128,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "  maroon\t",
+      "expected": [
+        128,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "mediumaquamarine",
+      "expected": [
+        102,
+        205,
+        170
+      ]
+    },
+    {
+      "input": "MEDIUMAQUAMARINE",
+      "expected": [
+        102,
+        205,
+        170
+      ]
+    },
+    {
+      "input": "  mediumaquamarine\t",
+      "expected": [
+        102,
+        205,
+        170
+      ]
+    },
+    {
+      "input": "mediumblue",
+      "expected": [
+        0,
+        0,
+        205
+      ]
+    },
+    {
+      "input": "MEDIUMBLUE",
+      "expected": [
+        0,
+        0,
+        205
+      ]
+    },
+    {
+      "input": "  mediumblue\t",
+      "expected": [
+        0,
+        0,
+        205
+      ]
+    },
+    {
+      "input": "mediumorchid",
+      "expected": [
+        186,
+        85,
+        211
+      ]
+    },
+    {
+      "input": "MEDIUMORCHID",
+      "expected": [
+        186,
+        85,
+        211
+      ]
+    },
+    {
+      "input": "  mediumorchid\t",
+      "expected": [
+        186,
+        85,
+        211
+      ]
+    },
+    {
+      "input": "mediumpurple",
+      "expected": [
+        147,
+        112,
+        216
+      ]
+    },
+    {
+      "input": "MEDIUMPURPLE",
+      "expected": [
+        147,
+        112,
+        216
+      ]
+    },
+    {
+      "input": "  mediumpurple\t",
+      "expected": [
+        147,
+        112,
+        216
+      ]
+    },
+    {
+      "input": "mediumseagreen",
+      "expected": [
+        60,
+        179,
+        113
+      ]
+    },
+    {
+      "input": "MEDIUMSEAGREEN",
+      "expected": [
+        60,
+        179,
+        113
+      ]
+    },
+    {
+      "input": "  mediumseagreen\t",
+      "expected": [
+        60,
+        179,
+        113
+      ]
+    },
+    {
+      "input": "mediumslateblue",
+      "expected": [
+        123,
+        104,
+        238
+      ]
+    },
+    {
+      "input": "MEDIUMSLATEBLUE",
+      "expected": [
+        123,
+        104,
+        238
+      ]
+    },
+    {
+      "input": "  mediumslateblue\t",
+      "expected": [
+        123,
+        104,
+        238
+      ]
+    },
+    {
+      "input": "mediumspringgreen",
+      "expected": [
+        0,
+        250,
+        154
+      ]
+    },
+    {
+      "input": "MEDIUMSPRINGGREEN",
+      "expected": [
+        0,
+        250,
+        154
+      ]
+    },
+    {
+      "input": "  mediumspringgreen\t",
+      "expected": [
+        0,
+        250,
+        154
+      ]
+    },
+    {
+      "input": "mediumturquoise",
+      "expected": [
+        72,
+        209,
+        204
+      ]
+    },
+    {
+      "input": "MEDIUMTURQUOISE",
+      "expected": [
+        72,
+        209,
+        204
+      ]
+    },
+    {
+      "input": "  mediumturquoise\t",
+      "expected": [
+        72,
+        209,
+        204
+      ]
+    },
+    {
+      "input": "mediumvioletred",
+      "expected": [
+        199,
+        21,
+        133
+      ]
+    },
+    {
+      "input": "MEDIUMVIOLETRED",
+      "expected": [
+        199,
+        21,
+        133
+      ]
+    },
+    {
+      "input": "  mediumvioletred\t",
+      "expected": [
+        199,
+        21,
+        133
+      ]
+    },
+    {
+      "input": "midnightblue",
+      "expected": [
+        25,
+        25,
+        112
+      ]
+    },
+    {
+      "input": "MIDNIGHTBLUE",
+      "expected": [
+        25,
+        25,
+        112
+      ]
+    },
+    {
+      "input": "  midnightblue\t",
+      "expected": [
+        25,
+        25,
+        112
+      ]
+    },
+    {
+      "input": "mintcream",
+      "expected": [
+        245,
+        255,
+        250
+      ]
+    },
+    {
+      "input": "MINTCREAM",
+      "expected": [
+        245,
+        255,
+        250
+      ]
+    },
+    {
+      "input": "  mintcream\t",
+      "expected": [
+        245,
+        255,
+        250
+      ]
+    },
+    {
+      "input": "mistyrose",
+      "expected": [
+        255,
+        228,
+        225
+      ]
+    },
+    {
+      "input": "MISTYROSE",
+      "expected": [
+        255,
+        228,
+        225
+      ]
+    },
+    {
+      "input": "  mistyrose\t",
+      "expected": [
+        255,
+        228,
+        225
+      ]
+    },
+    {
+      "input": "moccasin",
+      "expected": [
+        255,
+        228,
+        181
+      ]
+    },
+    {
+      "input": "MOCCASIN",
+      "expected": [
+        255,
+        228,
+        181
+      ]
+    },
+    {
+      "input": "  moccasin\t",
+      "expected": [
+        255,
+        228,
+        181
+      ]
+    },
+    {
+      "input": "navajowhite",
+      "expected": [
+        255,
+        222,
+        173
+      ]
+    },
+    {
+      "input": "NAVAJOWHITE",
+      "expected": [
+        255,
+        222,
+        173
+      ]
+    },
+    {
+      "input": "  navajowhite\t",
+      "expected": [
+        255,
+        222,
+        173
+      ]
+    },
+    {
+      "input": "navy",
+      "expected": [
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "input": "NAVY",
+      "expected": [
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "input": "  navy\t",
+      "expected": [
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "input": "oldlace",
+      "expected": [
+        253,
+        245,
+        230
+      ]
+    },
+    {
+      "input": "OLDLACE",
+      "expected": [
+        253,
+        245,
+        230
+      ]
+    },
+    {
+      "input": "  oldlace\t",
+      "expected": [
+        253,
+        245,
+        230
+      ]
+    },
+    {
+      "input": "olive",
+      "expected": [
+        128,
+        128,
+        0
+      ]
+    },
+    {
+      "input": "OLIVE",
+      "expected": [
+        128,
+        128,
+        0
+      ]
+    },
+    {
+      "input": "  olive\t",
+      "expected": [
+        128,
+        128,
+        0
+      ]
+    },
+    {
+      "input": "olivedrab",
+      "expected": [
+        107,
+        142,
+        35
+      ]
+    },
+    {
+      "input": "OLIVEDRAB",
+      "expected": [
+        107,
+        142,
+        35
+      ]
+    },
+    {
+      "input": "  olivedrab\t",
+      "expected": [
+        107,
+        142,
+        35
+      ]
+    },
+    {
+      "input": "orange",
+      "expected": [
+        255,
+        165,
+        0
+      ]
+    },
+    {
+      "input": "ORANGE",
+      "expected": [
+        255,
+        165,
+        0
+      ]
+    },
+    {
+      "input": "  orange\t",
+      "expected": [
+        255,
+        165,
+        0
+      ]
+    },
+    {
+      "input": "orangered",
+      "expected": [
+        255,
+        69,
+        0
+      ]
+    },
+    {
+      "input": "ORANGERED",
+      "expected": [
+        255,
+        69,
+        0
+      ]
+    },
+    {
+      "input": "  orangered\t",
+      "expected": [
+        255,
+        69,
+        0
+      ]
+    },
+    {
+      "input": "orchid",
+      "expected": [
+        218,
+        112,
+        214
+      ]
+    },
+    {
+      "input": "ORCHID",
+      "expected": [
+        218,
+        112,
+        214
+      ]
+    },
+    {
+      "input": "  orchid\t",
+      "expected": [
+        218,
+        112,
+        214
+      ]
+    },
+    {
+      "input": "palegoldenrod",
+      "expected": [
+        238,
+        232,
+        170
+      ]
+    },
+    {
+      "input": "PALEGOLDENROD",
+      "expected": [
+        238,
+        232,
+        170
+      ]
+    },
+    {
+      "input": "  palegoldenrod\t",
+      "expected": [
+        238,
+        232,
+        170
+      ]
+    },
+    {
+      "input": "palegreen",
+      "expected": [
+        152,
+        251,
+        152
+      ]
+    },
+    {
+      "input": "PALEGREEN",
+      "expected": [
+        152,
+        251,
+        152
+      ]
+    },
+    {
+      "input": "  palegreen\t",
+      "expected": [
+        152,
+        251,
+        152
+      ]
+    },
+    {
+      "input": "paleturquoise",
+      "expected": [
+        175,
+        238,
+        238
+      ]
+    },
+    {
+      "input": "PALETURQUOISE",
+      "expected": [
+        175,
+        238,
+        238
+      ]
+    },
+    {
+      "input": "  paleturquoise\t",
+      "expected": [
+        175,
+        238,
+        238
+      ]
+    },
+    {
+      "input": "palevioletred",
+      "expected": [
+        216,
+        112,
+        147
+      ]
+    },
+    {
+      "input": "PALEVIOLETRED",
+      "expected": [
+        216,
+        112,
+        147
+      ]
+    },
+    {
+      "input": "  palevioletred\t",
+      "expected": [
+        216,
+        112,
+        147
+      ]
+    },
+    {
+      "input": "papayawhip",
+      "expected": [
+        255,
+        239,
+        213
+      ]
+    },
+    {
+      "input": "PAPAYAWHIP",
+      "expected": [
+        255,
+        239,
+        213
+      ]
+    },
+    {
+      "input": "  papayawhip\t",
+      "expected": [
+        255,
+        239,
+        213
+      ]
+    },
+    {
+      "input": "peachpuff",
+      "expected": [
+        255,
+        218,
+        185
+      ]
+    },
+    {
+      "input": "PEACHPUFF",
+      "expected": [
+        255,
+        218,
+        185
+      ]
+    },
+    {
+      "input": "  peachpuff\t",
+      "expected": [
+        255,
+        218,
+        185
+      ]
+    },
+    {
+      "input": "peru",
+      "expected": [
+        205,
+        133,
+        63
+      ]
+    },
+    {
+      "input": "PERU",
+      "expected": [
+        205,
+        133,
+        63
+      ]
+    },
+    {
+      "input": "  peru\t",
+      "expected": [
+        205,
+        133,
+        63
+      ]
+    },
+    {
+      "input": "pink",
+      "expected": [
+        255,
+        192,
+        203
+      ]
+    },
+    {
+      "input": "PINK",
+      "expected": [
+        255,
+        192,
+        203
+      ]
+    },
+    {
+      "input": "  pink\t",
+      "expected": [
+        255,
+        192,
+        203
+      ]
+    },
+    {
+      "input": "plum",
+      "expected": [
+        221,
+        160,
+        221
+      ]
+    },
+    {
+      "input": "PLUM",
+      "expected": [
+        221,
+        160,
+        221
+      ]
+    },
+    {
+      "input": "  plum\t",
+      "expected": [
+        221,
+        160,
+        221
+      ]
+    },
+    {
+      "input": "powderblue",
+      "expected": [
+        176,
+        224,
+        230
+      ]
+    },
+    {
+      "input": "POWDERBLUE",
+      "expected": [
+        176,
+        224,
+        230
+      ]
+    },
+    {
+      "input": "  powderblue\t",
+      "expected": [
+        176,
+        224,
+        230
+      ]
+    },
+    {
+      "input": "purple",
+      "expected": [
+        128,
+        0,
+        128
+      ]
+    },
+    {
+      "input": "PURPLE",
+      "expected": [
+        128,
+        0,
+        128
+      ]
+    },
+    {
+      "input": "  purple\t",
+      "expected": [
+        128,
+        0,
+        128
+      ]
+    },
+    {
+      "input": "red",
+      "expected": [
+        255,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "RED",
+      "expected": [
+        255,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "  red\t",
+      "expected": [
+        255,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "rosybrown",
+      "expected": [
+        188,
+        143,
+        143
+      ]
+    },
+    {
+      "input": "ROSYBROWN",
+      "expected": [
+        188,
+        143,
+        143
+      ]
+    },
+    {
+      "input": "  rosybrown\t",
+      "expected": [
+        188,
+        143,
+        143
+      ]
+    },
+    {
+      "input": "royalblue",
+      "expected": [
+        65,
+        105,
+        225
+      ]
+    },
+    {
+      "input": "ROYALBLUE",
+      "expected": [
+        65,
+        105,
+        225
+      ]
+    },
+    {
+      "input": "  royalblue\t",
+      "expected": [
+        65,
+        105,
+        225
+      ]
+    },
+    {
+      "input": "saddlebrown",
+      "expected": [
+        139,
+        69,
+        19
+      ]
+    },
+    {
+      "input": "SADDLEBROWN",
+      "expected": [
+        139,
+        69,
+        19
+      ]
+    },
+    {
+      "input": "  saddlebrown\t",
+      "expected": [
+        139,
+        69,
+        19
+      ]
+    },
+    {
+      "input": "salmon",
+      "expected": [
+        250,
+        128,
+        114
+      ]
+    },
+    {
+      "input": "SALMON",
+      "expected": [
+        250,
+        128,
+        114
+      ]
+    },
+    {
+      "input": "  salmon\t",
+      "expected": [
+        250,
+        128,
+        114
+      ]
+    },
+    {
+      "input": "sandybrown",
+      "expected": [
+        244,
+        164,
+        96
+      ]
+    },
+    {
+      "input": "SANDYBROWN",
+      "expected": [
+        244,
+        164,
+        96
+      ]
+    },
+    {
+      "input": "  sandybrown\t",
+      "expected": [
+        244,
+        164,
+        96
+      ]
+    },
+    {
+      "input": "seagreen",
+      "expected": [
+        46,
+        139,
+        87
+      ]
+    },
+    {
+      "input": "SEAGREEN",
+      "expected": [
+        46,
+        139,
+        87
+      ]
+    },
+    {
+      "input": "  seagreen\t",
+      "expected": [
+        46,
+        139,
+        87
+      ]
+    },
+    {
+      "input": "seashell",
+      "expected": [
+        255,
+        245,
+        238
+      ]
+    },
+    {
+      "input": "SEASHELL",
+      "expected": [
+        255,
+        245,
+        238
+      ]
+    },
+    {
+      "input": "  seashell\t",
+      "expected": [
+        255,
+        245,
+        238
+      ]
+    },
+    {
+      "input": "sienna",
+      "expected": [
+        160,
+        82,
+        45
+      ]
+    },
+    {
+      "input": "SIENNA",
+      "expected": [
+        160,
+        82,
+        45
+      ]
+    },
+    {
+      "input": "  sienna\t",
+      "expected": [
+        160,
+        82,
+        45
+      ]
+    },
+    {
+      "input": "silver",
+      "expected": [
+        192,
+        192,
+        192
+      ]
+    },
+    {
+      "input": "SILVER",
+      "expected": [
+        192,
+        192,
+        192
+      ]
+    },
+    {
+      "input": "  silver\t",
+      "expected": [
+        192,
+        192,
+        192
+      ]
+    },
+    {
+      "input": "skyblue",
+      "expected": [
+        135,
+        206,
+        235
+      ]
+    },
+    {
+      "input": "SKYBLUE",
+      "expected": [
+        135,
+        206,
+        235
+      ]
+    },
+    {
+      "input": "  skyblue\t",
+      "expected": [
+        135,
+        206,
+        235
+      ]
+    },
+    {
+      "input": "slateblue",
+      "expected": [
+        106,
+        90,
+        205
+      ]
+    },
+    {
+      "input": "SLATEBLUE",
+      "expected": [
+        106,
+        90,
+        205
+      ]
+    },
+    {
+      "input": "  slateblue\t",
+      "expected": [
+        106,
+        90,
+        205
+      ]
+    },
+    {
+      "input": "slategray",
+      "expected": [
+        112,
+        128,
+        144
+      ]
+    },
+    {
+      "input": "SLATEGRAY",
+      "expected": [
+        112,
+        128,
+        144
+      ]
+    },
+    {
+      "input": "  slategray\t",
+      "expected": [
+        112,
+        128,
+        144
+      ]
+    },
+    {
+      "input": "snow",
+      "expected": [
+        255,
+        250,
+        250
+      ]
+    },
+    {
+      "input": "SNOW",
+      "expected": [
+        255,
+        250,
+        250
+      ]
+    },
+    {
+      "input": "  snow\t",
+      "expected": [
+        255,
+        250,
+        250
+      ]
+    },
+    {
+      "input": "springgreen",
+      "expected": [
+        0,
+        255,
+        127
+      ]
+    },
+    {
+      "input": "SPRINGGREEN",
+      "expected": [
+        0,
+        255,
+        127
+      ]
+    },
+    {
+      "input": "  springgreen\t",
+      "expected": [
+        0,
+        255,
+        127
+      ]
+    },
+    {
+      "input": "steelblue",
+      "expected": [
+        70,
+        130,
+        180
+      ]
+    },
+    {
+      "input": "STEELBLUE",
+      "expected": [
+        70,
+        130,
+        180
+      ]
+    },
+    {
+      "input": "  steelblue\t",
+      "expected": [
+        70,
+        130,
+        180
+      ]
+    },
+    {
+      "input": "tan",
+      "expected": [
+        210,
+        180,
+        140
+      ]
+    },
+    {
+      "input": "TAN",
+      "expected": [
+        210,
+        180,
+        140
+      ]
+    },
+    {
+      "input": "  tan\t",
+      "expected": [
+        210,
+        180,
+        140
+      ]
+    },
+    {
+      "input": "teal",
+      "expected": [
+        0,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "TEAL",
+      "expected": [
+        0,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "  teal\t",
+      "expected": [
+        0,
+        128,
+        128
+      ]
+    },
+    {
+      "input": "thistle",
+      "expected": [
+        216,
+        191,
+        216
+      ]
+    },
+    {
+      "input": "THISTLE",
+      "expected": [
+        216,
+        191,
+        216
+      ]
+    },
+    {
+      "input": "  thistle\t",
+      "expected": [
+        216,
+        191,
+        216
+      ]
+    },
+    {
+      "input": "tomato",
+      "expected": [
+        255,
+        99,
+        71
+      ]
+    },
+    {
+      "input": "TOMATO",
+      "expected": [
+        255,
+        99,
+        71
+      ]
+    },
+    {
+      "input": "  tomato\t",
+      "expected": [
+        255,
+        99,
+        71
+      ]
+    },
+    {
+      "input": "turquoise",
+      "expected": [
+        64,
+        224,
+        208
+      ]
+    },
+    {
+      "input": "TURQUOISE",
+      "expected": [
+        64,
+        224,
+        208
+      ]
+    },
+    {
+      "input": "  turquoise\t",
+      "expected": [
+        64,
+        224,
+        208
+      ]
+    },
+    {
+      "input": "violet",
+      "expected": [
+        238,
+        130,
+        238
+      ]
+    },
+    {
+      "input": "VIOLET",
+      "expected": [
+        238,
+        130,
+        238
+      ]
+    },
+    {
+      "input": "  violet\t",
+      "expected": [
+        238,
+        130,
+        238
+      ]
+    },
+    {
+      "input": "violetred",
+      "expected": [
+        208,
+        32,
+        144
+      ]
+    },
+    {
+      "input": "VIOLETRED",
+      "expected": [
+        208,
+        32,
+        144
+      ]
+    },
+    {
+      "input": "  violetred\t",
+      "expected": [
+        208,
+        32,
+        144
+      ]
+    },
+    {
+      "input": "wheat",
+      "expected": [
+        245,
+        222,
+        179
+      ]
+    },
+    {
+      "input": "WHEAT",
+      "expected": [
+        245,
+        222,
+        179
+      ]
+    },
+    {
+      "input": "  wheat\t",
+      "expected": [
+        245,
+        222,
+        179
+      ]
+    },
+    {
+      "input": "white",
+      "expected": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "WHITE",
+      "expected": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "  white\t",
+      "expected": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "whitesmoke",
+      "expected": [
+        245,
+        245,
+        245
+      ]
+    },
+    {
+      "input": "WHITESMOKE",
+      "expected": [
+        245,
+        245,
+        245
+      ]
+    },
+    {
+      "input": "  whitesmoke\t",
+      "expected": [
+        245,
+        245,
+        245
+      ]
+    },
+    {
+      "input": "yellow",
+      "expected": [
+        255,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "YELLOW",
+      "expected": [
+        255,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "  yellow\t",
+      "expected": [
+        255,
+        255,
+        0
+      ]
+    },
+    {
+      "input": "yellowgreen",
+      "expected": [
+        154,
+        205,
+        50
+      ]
+    },
+    {
+      "input": "YELLOWGREEN",
+      "expected": [
+        154,
+        205,
+        50
+      ]
+    },
+    {
+      "input": "  yellowgreen\t",
+      "expected": [
+        154,
+        205,
+        50
+      ]
+    },
+    {
+      "input": "#123",
+      "expected": [
+        17,
+        34,
+        51
+      ]
+    },
+    {
+      "input": "#abc",
+      "expected": [
+        170,
+        187,
+        204
+      ]
+    },
+    {
+      "input": "#ABCDEF",
+      "expected": [
+        171,
+        205,
+        239
+      ]
+    },
+    {
+      "input": "#000000",
+      "expected": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "#ffffff",
+      "expected": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "0x123456",
+      "expected": [
+        18,
+        52,
+        86
+      ]
+    },
+    {
+      "input": "0Xabcdef",
+      "expected": [
+        171,
+        205,
+        239
+      ]
+    },
+    {
+      "input": "16711680",
+      "expected": [
+        255,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "0777",
+      "expected": [
+        0,
+        1,
+        255
+      ]
+    },
+    {
+      "input": "-1",
+      "expected": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "input": "-2147483648",
+      "expected": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "input": "+0x123456",
+      "expected": [
+        18,
+        52,
+        86
+      ]
+    },
+    {
+      "input": "#1234567",
+      "expected": [
+        35,
+        69,
+        103
+      ]
+    },
+    {
+      "input": "rgb(0, 128,255)",
+      "expected": [
+        0,
+        128,
+        255
+      ]
+    },
+    {
+      "input": "RGB(255,0,127)",
+      "expected": [
+        255,
+        0,
+        127
+      ]
+    },
+    {
+      "input": "rgba(1,2,3,0)",
+      "expected": [
+        1,
+        2,
+        3,
+        0
+      ]
+    },
+    {
+      "input": "rgba(1,2,3,1)",
+      "expected": [
+        1,
+        2,
+        3,
+        255
+      ]
+    },
+    {
+      "input": "rgba(1,2,3,0.5)",
+      "expected": [
+        1,
+        2,
+        3,
+        127
+      ]
+    },
+    {
+      "input": "rgba(1,2,3,0.999)",
+      "expected": [
+        1,
+        2,
+        3,
+        254
+      ]
+    },
+    {
+      "input": "rgba(1,2,3,1e-1)",
+      "expected": [
+        1,
+        2,
+        3,
+        25
+      ]
+    },
+    {
+      "input": "",
+      "expected": null
+    },
+    {
+      "input": "  ",
+      "expected": null
+    },
+    {
+      "input": "unknown",
+      "expected": null
+    },
+    {
+      "input": "transparent",
+      "expected": null
+    },
+    {
+      "input": "#ggg",
+      "expected": null
+    },
+    {
+      "input": "#ffffffff",
+      "expected": null
+    },
+    {
+      "input": "2147483648",
+      "expected": null
+    },
+    {
+      "input": "0x",
+      "expected": null
+    },
+    {
+      "input": "08",
+      "expected": null
+    },
+    {
+      "input": "rgb()",
+      "expected": null
+    },
+    {
+      "input": "rgba(1,2,3)",
+      "expected": null
+    },
+    {
+      "input": "rgb(1,2,bad)",
+      "expected": null
+    }
+  ]
+}

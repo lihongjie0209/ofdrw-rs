@@ -12,7 +12,9 @@ pub use box_layout::{
     BoxPlacement, LayoutBox,
 };
 mod canvas;
+mod canvas_color;
 pub use canvas::CanvasCommand;
+pub use canvas_color::parse_canvas_color;
 mod canvas_text;
 pub use canvas_text::{CanvasFont, CanvasTextAlign, CanvasTextAreaMetrics, CanvasTextMetrics};
 mod encryption;
