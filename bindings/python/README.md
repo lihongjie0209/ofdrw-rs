@@ -330,4 +330,28 @@ The batch commits atomically and returns painted object IDs as strings.
 Coordinates are millimeters; angles are degrees. Use `save`/`restore` for
 paths and drawing state, and `begin_path` to clear the path. Unknown commands
 and fields are rejected. Set global alpha to `None` to clear it.
-See the [command reference](../../docs/FEATURES.md#有状态向量画布) for all vector operations and remaining text/image limitations.
+See the [command reference](../../docs/FEATURES.md#有状态向量画布) for all vector operations and remaining text limitations.
+
+### Canvas images (unreleased)
+
+Image commands accept bytes, bytearray or memoryview in `data`. Alternatively,
+use `data_base64`; providing both is an error. `draw_image_at` uses natural
+pixel dimensions divided by `pixels_per_mm` (default 3.78). `draw_image_region`
+converts its source rectangle from millimeters to integer pixels by truncation,
+matching Java; portions outside the source are transparent. Negative target
+widths/heights mirror the image, and zero dimensions collapse it.
+
+```python
+from pathlib import Path
+from ofdrw_rs import Document
+
+image = Path("picture.png").read_bytes()
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    document.draw_canvas(0, (0, 0, 40, 30), [
+        {"type": "draw_image", "data": image, "format": "png", "rect": [2, 2, 12, 8]},
+        {"type": "draw_image_region", "data": image, "format": "png",
+         "source": [0, 0, 1, 1], "rect": [20, 2, 8, 8], "pixels_per_mm": 2},
+    ])
+    document.save("canvas-images.ofd")
+```

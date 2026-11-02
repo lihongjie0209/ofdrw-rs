@@ -1175,7 +1175,15 @@ export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTex
 /** Mixed children with measured height, nested floating rows and repeated table headers. */
 /** Absolute allocation position and mixed content; positive heights are retained. */
 /** Atomic vector drawing commands; coordinates are mm and angles are degrees. */
+export type CanvasImageData =
+  | {data: Buffer | Uint8Array; data_base64?: never}
+  | {data_base64: string; data?: never};
+
 export type CanvasCommand =
+  | (CanvasImageData & {type: 'draw_image'; format: string; rect: [number, number, number, number]})
+  | (CanvasImageData & {type: 'draw_image_at'; format: string; point: [number, number]; pixels_per_mm?: number})
+  | (CanvasImageData & {type: 'draw_image_region'; format: string; source: [number, number, number, number];
+      rect: [number, number, number, number]; pixels_per_mm?: number})
   | {type: 'begin_path' | 'close_path' | 'stroke' | 'save' | 'restore'}
   | {type: 'move_to' | 'line_to'; point: [number, number]}
   | {type: 'quadratic_curve_to'; control: [number, number]; end: [number, number]}

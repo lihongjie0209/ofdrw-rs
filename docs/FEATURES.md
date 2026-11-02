@@ -776,7 +776,11 @@ Java 的默认像素比例为 3.78，Rust 的原尺寸与裁剪命令显式传�
 `data_base64` 与 `format` 字段；`draw_image` 使用 `rect`，`draw_image_at` 使用
 `point`，`draw_image_region` 使用 `source` 和 `rect`。后两者可选
 `pixels_per_mm`，缺省为 3.78。Python/Node.js 可直接传入同一 JSON 命令，
-Go 类型及各语言的原生字节数组助手和集成示例仍待补齐。
+Python 图片命令可使用 `data: bytes|bytearray|memoryview`，Node.js 使用
+`data: Buffer|Uint8Array`（支持带偏移的视图）；也可直接使用 `data_base64`，
+但两种编码不能同时提供。Go 的 `CanvasCommand.Data []byte` 自动编码为
+`data_base64`，并提供 `Format`、`Source`、`PixelsPerMM` 字段。三个语言接口
+均不修改调用者命令或图像数据；六组 Java 样例覆盖两种 DPI 的像素对比与保存后重读。
 
 Canvas 文字、CSS 字体/颜色解析与独立像素单位助手仍待实现。
 复杂变换裁剪的 Java 像素一致性尚未证明；

@@ -59,3 +59,25 @@ func TestCanvasCommandJSONPreservesExplicitZeroesAndOmitsUnusedFields(t *testing
 		t.Fatal("nonfinite opacity must not become a clear-opacity command")
 	}
 }
+
+func TestCanvasImageCommandJSONEncodesBytesAndPreservesZeroPixelScale(t *testing.T) {
+	zero := 0.0
+	command := CanvasCommand{
+		Type: "draw_image_at", Data: []byte{0, 1, 255}, Format: "png",
+		Point: &[2]float64{}, PixelsPerMM: &zero,
+	}
+	data, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["data_base64"]) != `"AAH/"` || string(fields["pixels_per_mm"]) != "0" {
+		t.Fatalf("unexpected image encoding: %s", data)
+	}
+	if _, found := fields["source"]; found {
+		t.Fatal("unused source field encoded")
+	}
+}

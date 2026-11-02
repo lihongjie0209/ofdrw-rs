@@ -76,3 +76,64 @@ test('canvas rejects unknown fields, invalid geometry and nonfinite opacity atom
   } finally {doc.close();}
   assert.throws(() => doc.drawCanvas(0, [0, 0, 40, 30], []));
 });
+
+const imageRoot = path.join(root, '..', 'canvas-images-java');
+const imageRequests = JSON.parse(fs.readFileSync(path.join(imageRoot, 'requests.json')));
+
+test('canvas image Buffers, offset Uint8Arrays and base64 match six independent Java references', () => {
+  for (const entry of imageRequests.cases) {
+    for (const kind of ['buffer', 'uint8', 'base64']) {
+      const commands = structuredClone(entry.commands);
+      const originals = [];
+      for (const command of commands) {
+        if (command.data_base64 && kind !== 'base64') {
+          const data = Buffer.from(command.data_base64, 'base64');
+          const padded = new Uint8Array(data.length + 4);
+          padded.set(data, 2);
+          command.data = kind === 'buffer' ? data : padded.subarray(2, 2 + data.length);
+          delete command.data_base64;
+          originals.push([command, command.data, Buffer.from(command.data)]);
+        }
+        Object.freeze(command);
+      }
+      const doc = Document.create();
+      const java = Document.open(path.join(imageRoot, `${entry.name}.ofd`));
+      try {
+        doc.addBlankPage(40, 30);
+        doc.setPageArea(0, {physical_box: [0, 0, 40, 30], application_box: [0, 0, 40, 30]});
+        const ids = doc.drawCanvas(0, imageRequests.boundary, Object.freeze(commands));
+        assert.equal(ids.length, 1);
+        assert.deepEqual(doc.pageImages(0).map(image => image.id), ids);
+        for (const [command, data, before] of originals) {
+          assert.equal(command.data, data);
+          assert.deepEqual(Buffer.from(data), before);
+          assert.equal(Object.hasOwn(command, 'data_base64'), false);
+        }
+        for (const dpi of [25.4, 101.6]) assert.deepEqual(doc.pagePng(0, dpi), java.pagePng(0, dpi), entry.name);
+        const reopened = Document.fromBytes(doc.toBytes());
+        try {
+          assert.deepEqual(reopened.validateReferences(), []);
+          assert.deepEqual(reopened.pagePng(0, 101.6), doc.pagePng(0, 101.6));
+        } finally {reopened.close();}
+      } finally {doc.close(); java.close();}
+    }
+  }
+});
+
+test('canvas rejects invalid image bytes and conflicting encodings before changing the document', () => {
+  const data = fs.readFileSync(path.join(imageRoot, 'source.png'));
+  const valid = {type: 'draw_image', data, format: 'png', rect: [1, 1, 6, 4]};
+  const doc = Document.create();
+  try {
+    doc.addBlankPage(40, 30);
+    const before = doc.toBytes();
+    for (const bad of [
+      {...valid, data: 'not bytes'}, {...valid, data: null}, {...valid, data_base64: ''},
+      {...valid, data: Buffer.from('bad')},
+      {type: 'draw_image_at', data, format: 'png', point: [0, 0], pixels_per_mm: 0},
+    ]) {
+      assert.throws(() => doc.drawCanvas(0, [0, 0, 40, 30], [valid, bad]));
+      assert.deepEqual(doc.toBytes(), before);
+    }
+  } finally {doc.close();}
+});

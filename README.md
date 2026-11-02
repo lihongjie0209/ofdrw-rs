@@ -197,7 +197,7 @@ Rust 使用 `FlowSpan::placeholder`，Go 使用 `NewPlaceholderSpan`，Python、
 
 ## 向量画布（后续版本，尚未发布）
 
-开发分支新增有状态向量画布，支持路径、曲线、变换、保存恢复、裁剪和绘制参数。
+开发分支新增有状态画布，支持路径、曲线、变换、保存恢复、裁剪、绘制参数与图片绘制/裁剪。
 Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
 [Python](bindings/python/README.md)、[Go](bindings/go/README.md) 和
 [Node.js / TypeScript](bindings/node/README.md) 均提供原子批量调用示例。

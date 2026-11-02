@@ -683,4 +683,29 @@ try {
 atomically and returns string object IDs. Coordinates are millimeters and
 angles are degrees. Unknown fields and nonfinite numbers are rejected.
 A null or omitted `set_global_alpha.alpha` clears global opacity.
-See the [command reference](../../docs/FEATURES.md#有状态向量画布) for vector operations and remaining text/image limitations.
+See the [command reference](../../docs/FEATURES.md#有状态向量画布) for vector operations and remaining text limitations.
+
+### Canvas images (unreleased)
+
+Use Buffer or Uint8Array in `data`, or use `data_base64`, never both. Offset
+Uint8Array views are supported without changing the input. `draw_image_at`
+uses natural pixel dimensions divided by `pixels_per_mm` (default 3.78).
+`draw_image_region` converts source millimeters to pixels by truncation and
+pads portions outside the source with transparency, matching Java. Negative
+target dimensions mirror images; zero dimensions collapse them.
+
+```js
+const {readFileSync} = require('node:fs');
+const {Document} = require('ofdrw-rs');
+const image = readFileSync('picture.png');
+const document = Document.create();
+try {
+  document.addBlankPage(40, 30);
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'draw_image', data: image, format: 'png', rect: [2, 2, 12, 8]},
+    {type: 'draw_image_region', data: image, format: 'png',
+      source: [0, 0, 1, 1], rect: [20, 2, 8, 8], pixels_per_mm: 2},
+  ]);
+  document.save('canvas-images.ofd');
+} finally {document.close();}
+```

@@ -1673,7 +1673,18 @@ class Document {
 
   drawCanvas(pageIndex, box, commands) {
     if (!Array.isArray(commands)) throw new TypeError('commands must be an array');
-    const payload = JSON.stringify({boundary: boundary(box), commands}, (_key, value) => {
+    const encodedCommands = commands.map(command => {
+      if (command && ['draw_image', 'draw_image_at', 'draw_image_region'].includes(command.type)
+          && Object.hasOwn(command, 'data')) {
+        if (Object.hasOwn(command, 'data_base64')) {
+          throw new TypeError('canvas image requires either data or data_base64');
+        }
+        const {data, ...encoded} = command;
+        return {...encoded, data_base64: bytes(data).toString('base64')};
+      }
+      return command;
+    });
+    const payload = JSON.stringify({boundary: boundary(box), commands: encodedCommands}, (_key, value) => {
       if (typeof value === 'number' && !Number.isFinite(value)) {
         throw new RangeError('canvas numbers must be finite');
       }

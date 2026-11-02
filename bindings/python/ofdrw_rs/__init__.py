@@ -4400,14 +4400,28 @@ class Document:
         """Execute an atomic vector canvas batch; return painted object IDs.
 
         Commands use a snake_case ``type`` tag. Angles are degrees, coordinates
-        are millimeters. Empty commands leave the selected page unchanged.
+        are millimeters. Image commands accept bytes-like ``data`` or encoded
+        ``data_base64``. Empty commands leave the selected page unchanged.
         """
         self._require_open()
         if page_index < 0:
             raise IndexError(page_index)
         if not isinstance(commands, list):
             raise TypeError("commands must be a list")
-        payload = json.dumps({"boundary": boundary, "commands": commands}, allow_nan=False)
+        encoded_commands = []
+        for command in commands:
+            if (isinstance(command, dict)
+                    and command.get("type") in ("draw_image", "draw_image_at", "draw_image_region")
+                    and "data" in command):
+                if "data_base64" in command:
+                    raise ValueError("canvas image requires either data or data_base64")
+                data = command["data"]
+                if not isinstance(data, (bytes, bytearray, memoryview)):
+                    raise TypeError("canvas image data must be bytes-like")
+                command = {key: value for key, value in command.items() if key != "data"}
+                command["data_base64"] = base64.b64encode(bytes(data)).decode("ascii")
+            encoded_commands.append(command)
+        payload = json.dumps({"boundary": boundary, "commands": encoded_commands}, allow_nan=False)
         output = _ffi.new("OfdBuffer *")
         _check(_lib.ofd_draw_canvas_json(
             self._handle, page_index, _utf8(payload), output,

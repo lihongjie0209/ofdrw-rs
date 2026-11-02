@@ -74,3 +74,56 @@ def test_canvas_rejects_malformed_unknown_and_late_invalid_commands_atomically()
             doc.draw_canvas(0, (0, 0, 0, 30), [])
     with pytest.raises(OfdError):
         doc.draw_canvas(0, (0, 0, 40, 30), [])
+
+
+IMAGE_ROOT = ROOT.parent / "canvas-images-java"
+IMAGE_REQUESTS = json.loads((IMAGE_ROOT / "requests.json").read_text())
+
+
+@pytest.mark.parametrize("case", IMAGE_REQUESTS["cases"], ids=lambda case: case["name"])
+def test_canvas_image_bytes_and_base64_match_java(case):
+    import base64
+    def strided_view(data):
+        padded = bytearray(len(data) * 2)
+        padded[::2] = data
+        return memoryview(padded)[::2]
+
+    for kind in (bytes, bytearray, memoryview, strided_view, None):
+        commands = copy.deepcopy(case["commands"])
+        original = []
+        for command in commands:
+            if "data_base64" in command and kind is not None:
+                data = kind(base64.b64decode(command.pop("data_base64")))
+                command["data"] = data
+                original.append((command, data, bytes(data)))
+        with Document.new() as doc, Document.open(IMAGE_ROOT / (case["name"] + ".ofd")) as java:
+            doc.add_blank_page(40, 30)
+            doc.set_page_area(0, (0, 0, 40, 30), application_box=(0, 0, 40, 30))
+            ids = doc.draw_canvas(0, IMAGE_REQUESTS["boundary"], commands)
+            assert len(ids) == 1
+            assert [item["id"] for item in doc.page_images(0)] == ids
+            for command, data, before in original:
+                assert command["data"] is data
+                assert bytes(data) == before
+                assert "data_base64" not in command
+            for dpi in (25.4, 101.6):
+                assert doc.page_png(0, dpi) == java.page_png(0, dpi)
+            with Document.from_bytes(doc.to_bytes()) as reopened:
+                assert reopened.validate_references() == []
+                assert reopened.page_png(0, 101.6) == doc.page_png(0, 101.6)
+
+
+def test_canvas_image_rejects_invalid_bytes_and_conflicting_encodings_atomically():
+    data = (IMAGE_ROOT / "source.png").read_bytes()
+    valid = {"type": "draw_image", "data": data, "format": "png", "rect": [1, 1, 6, 4]}
+    with Document.new() as doc:
+        doc.add_blank_page(40, 30)
+        before = doc.to_bytes()
+        for bad in [
+            {**valid, "data": "not bytes"}, {**valid, "data": None},
+            {**valid, "data_base64": ""}, {**valid, "data": b"bad"},
+            {"type": "draw_image_at", "data": data, "format": "png", "point": [0, 0], "pixels_per_mm": 0},
+        ]:
+            with pytest.raises((TypeError, ValueError, OfdError)):
+                doc.draw_canvas(0, (0, 0, 40, 30), [valid, bad])
+            assert doc.to_bytes() == before

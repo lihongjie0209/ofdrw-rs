@@ -377,4 +377,40 @@ Populate only fields belonging to the command type. The batch commits
 atomically and returns string object IDs. Nil commands form an empty batch,
 and nil Alpha clears global opacity. Coordinates are millimeters and angles
 are degrees. See the [command reference](../../docs/FEATURES.md#有状态向量画布)
-for vector operations and remaining text/image limitations.
+for vector operations and remaining text limitations.
+
+### Canvas images (unreleased)
+
+`CanvasCommand.Data` accepts encoded image bytes and serializes them as base64.
+Use `Format`, `Rect` and, for `draw_image_region`, `Source`. Source coordinates
+are millimeters converted to integer pixels by truncation; portions outside the
+source are transparent, matching Java. `draw_image_at` uses `Point` and natural
+pixel dimensions divided by `PixelsPerMM` (nil defaults to 3.78). Negative
+target dimensions mirror images; zero dimensions collapse them.
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+    "github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw"
+)
+
+func main() {
+    image, err := os.ReadFile("picture.png")
+    if err != nil { log.Fatal(err) }
+    document, err := ofdrw.New()
+    if err != nil { log.Fatal(err) }
+    defer document.Close()
+    if err := document.AddBlankPage(40, 30); err != nil { log.Fatal(err) }
+    ppm := 2.0
+    _, err = document.DrawCanvas(0, [4]float64{0, 0, 40, 30}, []ofdrw.CanvasCommand{
+        {Type: "draw_image", Data: image, Format: "png", Rect: &[4]float64{2, 2, 12, 8}},
+        {Type: "draw_image_region", Data: image, Format: "png",
+            Source: &[4]float64{0, 0, 1, 1}, Rect: &[4]float64{20, 2, 8, 8}, PixelsPerMM: &ppm},
+    })
+    if err != nil { log.Fatal(err) }
+    if err := document.Save("canvas-images.ofd"); err != nil { log.Fatal(err) }
+}
+```

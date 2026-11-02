@@ -514,6 +514,13 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
 void exercise;
 
 function exerciseCanvas(document: Document): void {
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'draw_image', data: Buffer.alloc(1), format: 'png', rect: [0, 0, -1, 1]},
+    {type: 'draw_image_at', data: new Uint8Array(1), format: 'png', point: [0, 0]},
+    {type: 'draw_image_region', data_base64: '', format: 'png', source: [0, 0, 1, 1], rect: [0, 0, 1, 1], pixels_per_mm: 2},
+  ]);
+  // @ts-expect-error Image commands require one encoding, never both.
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: 'draw_image', data: Buffer.alloc(1), data_base64: '', format: 'png', rect: [0, 0, 1, 1]}]);
   const ids: string[] = document.drawCanvas(0, [0, 0, 40, 30], [
     {type: 'set_line_width', width: 0},
     {type: 'rect', rect: [1, 2, 12, 8]},

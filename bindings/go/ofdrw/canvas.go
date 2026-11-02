@@ -12,30 +12,35 @@ import (
 // for that operation; the native parser rejects unrelated fields. Coordinates
 // are millimeters and angles are degrees. Pointers preserve explicit zero values.
 // Boolean flags default false. A nil Alpha clears global opacity.
+// Image commands encode Data as base64. A nil PixelsPerMM uses Java's 3.78 default.
 type CanvasCommand struct {
-	Type       string          `json:"type"`
-	Point      *[2]float64     `json:"point,omitempty"`
-	Control    *[2]float64     `json:"control,omitempty"`
-	Control1   *[2]float64     `json:"control1,omitempty"`
-	Control2   *[2]float64     `json:"control2,omitempty"`
-	End        *[2]float64     `json:"end,omitempty"`
-	Radii      *[2]float64     `json:"radii,omitempty"`
-	Angle      *float64        `json:"angle,omitempty"`
-	Large      bool            `json:"large,omitempty"`
-	Sweep      bool            `json:"sweep,omitempty"`
-	Center     *[2]float64     `json:"center,omitempty"`
-	Radius     *float64        `json:"radius,omitempty"`
-	StartAngle *float64        `json:"start_angle,omitempty"`
-	EndAngle   *float64        `json:"end_angle,omitempty"`
-	Rect       *[4]float64     `json:"rect,omitempty"`
-	EvenOdd    bool            `json:"even_odd,omitempty"`
-	Offset     *[2]float64     `json:"offset,omitempty"`
-	Factors    *[2]float64     `json:"factors,omitempty"`
-	Matrix     *[6]float64     `json:"matrix,omitempty"`
-	Style      *DrawParamStyle `json:"style,omitempty"`
-	Width      *float64        `json:"width,omitempty"`
-	Color      *[3]uint8       `json:"color,omitempty"`
-	Alpha      *float64        `json:"alpha,omitempty"`
+	Type        string          `json:"type"`
+	Data        []byte          `json:"data_base64,omitempty"`
+	Format      string          `json:"format,omitempty"`
+	Source      *[4]float64     `json:"source,omitempty"`
+	PixelsPerMM *float64        `json:"pixels_per_mm,omitempty"`
+	Point       *[2]float64     `json:"point,omitempty"`
+	Control     *[2]float64     `json:"control,omitempty"`
+	Control1    *[2]float64     `json:"control1,omitempty"`
+	Control2    *[2]float64     `json:"control2,omitempty"`
+	End         *[2]float64     `json:"end,omitempty"`
+	Radii       *[2]float64     `json:"radii,omitempty"`
+	Angle       *float64        `json:"angle,omitempty"`
+	Large       bool            `json:"large,omitempty"`
+	Sweep       bool            `json:"sweep,omitempty"`
+	Center      *[2]float64     `json:"center,omitempty"`
+	Radius      *float64        `json:"radius,omitempty"`
+	StartAngle  *float64        `json:"start_angle,omitempty"`
+	EndAngle    *float64        `json:"end_angle,omitempty"`
+	Rect        *[4]float64     `json:"rect,omitempty"`
+	EvenOdd     bool            `json:"even_odd,omitempty"`
+	Offset      *[2]float64     `json:"offset,omitempty"`
+	Factors     *[2]float64     `json:"factors,omitempty"`
+	Matrix      *[6]float64     `json:"matrix,omitempty"`
+	Style       *DrawParamStyle `json:"style,omitempty"`
+	Width       *float64        `json:"width,omitempty"`
+	Color       *[3]uint8       `json:"color,omitempty"`
+	Alpha       *float64        `json:"alpha,omitempty"`
 }
 
 // DrawCanvas draws an atomic vector batch on an existing global page and returns
