@@ -6,18 +6,19 @@ C ABI 的六个平台原生 ZIP 和所有语言的备份文件放在 GitHub Rele
 
 ## 当前已发布版本
 
-**0.3.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.3.0)、
-[PyPI](https://pypi.org/project/ofdrw-rs/0.3.0/) 和
-[npm](https://www.npmjs.com/package/ofdrw-rs/v/0.3.0)。
-Go 标签 `bindings/go/v0.3.0` 与根版本标签指向同一源码提交
-[`3e5a3ea`](https://github.com/lihongjie0209/ofdrw-rs/commit/3e5a3ea35812c7418a538d4b90b3bea50fddd632)。
-[v0.3.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)
+**0.4.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.4.0)、
+[PyPI](https://pypi.org/project/ofdrw-rs/0.4.0/) 和
+[npm](https://www.npmjs.com/package/ofdrw-rs/v/0.4.0)。
+Go 标签 `bindings/go/v0.4.0` 与根版本标签指向同一源码提交
+[`bf8ac76`](https://github.com/lihongjie0209/ofdrw-rs/commit/bf8ac762ac9522bac8fff21d7795c75cd0fbdd9e)。
+[v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)
 提供六个平台原生 ZIP、六个 Python wheel、npm tarball、Rust crate、Go 源码包和
-`SHA256SUMS`，共 16 个附件。
+[`SHA256SUMS`](https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/SHA256SUMS)，共 16 个附件。
 
-[发布流水线](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41318789139)
-已完成所有发布步骤及从原生仓库安装运行的验证。
-安装和各语言调用示例见[项目 README](../README.md#安装渠道)。
+[发布流水线](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41375850670)
+已完成全部发布步骤以及从原生仓库安装运行的验证。安装和各语言调用示例见[项目 README](../README.md#安装渠道)。
+历史版本 [v0.3.0](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)
+及其包和标签保持不变。
 
 ## 凭据
 
@@ -139,3 +140,14 @@ git push origin refs/tags/bindings/go/vX.Y.Z
 
 macOS wheel 的架构标记取自内含 Rust 动态库的 Mach-O 头；
 每个平台单独构建的动态库不得标为 `universal2`。发布工具也会校验或修复历史产物的标记。
+
+## CI 构建缓存
+
+六个平台的原生测试任务在选择 Rust 1.96.0 后恢复依赖缓存，工作区映射为
+`ofdrw-rs -> target`。缓存键包含平台、Rust 编译器、Cargo 清单和锁文件及编译环境。
+工作区 crate 和测试结果不进入缓存；测试、覆盖率、打包和分发校验仍按原流程运行。
+仅成功的 main 任务保存缓存，PR 任务只读取可用缓存。首次 main 构建仍需填充缓存。
+
+配置使用固定提交的 [rust-cache v2.9.3](https://github.com/Swatinem/rust-cache/tree/v2.9.3)。
+实际命中率及耗时应从后续 main 工作流的恢复和保存步骤观察，不能把配置通过检查
+视为已经验证构建提速。覆盖率的插桩产物使用独立流程，不与原生构建缓存混用。
