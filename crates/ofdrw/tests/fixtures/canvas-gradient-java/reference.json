@@ -1,0 +1,17 @@
+{
+  "java_revision": "84e9eb260ba6fd351ecccf08a01a40305d4af635",
+  "cases": [
+    "axial-fill",
+    "radial-fill",
+    "stroke-save",
+    "alpha-clip",
+    "text-fill",
+    "transform-fill"
+  ],
+  "reference_overrides": {
+    "stroke-save": "stroke-save-restored-width.ofd"
+  },
+  "known_java_defects": [
+    "CanvasState.clone leaves saved drawParam empty; the override reapplies the known 1.2 mm line width after restore. Raw output is retained."
+  ]
+}
