@@ -6,8 +6,8 @@ import pytest
 from ofdrw_rs import Document, OfdError
 
 ROOT = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures/canvas-java"
-REQUESTS = json.loads((ROOT / "requests.json").read_text())
-REFERENCES = {case["name"]: case for case in json.loads((ROOT / "reference.json").read_text())["cases"]}
+REQUESTS = json.loads((ROOT / "requests.json").read_text(encoding="utf-8"))
+REFERENCES = {case["name"]: case for case in json.loads((ROOT / "reference.json").read_text(encoding="utf-8"))["cases"]}
 
 
 @pytest.mark.parametrize("case", REQUESTS["cases"], ids=lambda case: case["name"])
@@ -77,7 +77,7 @@ def test_canvas_rejects_malformed_unknown_and_late_invalid_commands_atomically()
 
 
 IMAGE_ROOT = ROOT.parent / "canvas-images-java"
-IMAGE_REQUESTS = json.loads((IMAGE_ROOT / "requests.json").read_text())
+IMAGE_REQUESTS = json.loads((IMAGE_ROOT / "requests.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("case", IMAGE_REQUESTS["cases"], ids=lambda case: case["name"])
@@ -130,7 +130,7 @@ def test_canvas_image_rejects_invalid_bytes_and_conflicting_encodings_atomically
 
 
 TEXT_ROOT = ROOT.parent / "canvas-text-java"
-TEXT_REQUESTS = json.loads((TEXT_ROOT / "requests.json").read_text())
+TEXT_REQUESTS = json.loads((TEXT_ROOT / "requests.json").read_text(encoding="utf-8"))
 
 
 def test_canvas_text_metrics_and_drawing_match_all_java_directions():
@@ -149,7 +149,7 @@ def test_canvas_text_metrics_and_drawing_match_all_java_directions():
                 {"type": "set_font", "font": font},
                 {"type": "fill_text", "text": TEXT_REQUESTS["text"], "point": case["point"]},
             ])
-        controls = json.loads((TEXT_ROOT / "controls.json").read_text())
+        controls = json.loads((TEXT_ROOT / "controls.json").read_text(encoding="utf-8"))
         for case in controls["cases"]:
             text = "A" + chr(case["code"]) + "B"
             assert doc.measure_canvas_text(0, text, {"font_id": font_id, "size": 4}) == case["metrics"]
@@ -196,7 +196,7 @@ def test_canvas_text_defaults_empty_input_invalid_settings_and_closed_document()
 
 
 def test_canvas_text_area_matches_all_java_reference_cases():
-    cases = json.loads((TEXT_ROOT / "areas.json").read_text())["cases"]
+    cases = json.loads((TEXT_ROOT / "areas.json").read_text(encoding="utf-8"))["cases"]
     assert len(cases) == 960
     with Document.new() as doc:
         doc.add_blank_page(40, 30)
