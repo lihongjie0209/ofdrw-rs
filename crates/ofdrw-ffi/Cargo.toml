@@ -11,7 +11,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 ofdrw = { path = "../ofdrw" }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde = { version = "1", features = ["derive"] }
 base64 = "0.23.1"
 

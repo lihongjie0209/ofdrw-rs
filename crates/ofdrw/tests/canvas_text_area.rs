@@ -230,7 +230,10 @@ fn cff_area_metrics_retain_exact_font_unit_precision() {
         ..Default::default()
     };
     let area = doc.measure_canvas_text_area(0, "A", &font).unwrap();
-    assert_eq!(area.width, 2.888);
-    assert_eq!(area.height, 4.);
-    assert_eq!(area.char_areas, vec![[0., 0., 2.888, 4.]]);
+    assert_eq!(area.width, 2.887969970703125);
+    assert_eq!(area.height, 3.999948501586914);
+    assert_eq!(
+        area.char_areas,
+        vec![[0., 0., 2.887969970703125, 3.999948501586914]]
+    );
 }

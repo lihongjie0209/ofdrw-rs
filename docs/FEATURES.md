@@ -793,8 +793,8 @@ Rust 核心的 `SetFont { font: CanvasFont }`、`FillText { text, point }`
 有效字距与每个 Unicode 标量的 `[0, 0, width, height]` 逻辑矩形。横向阅读累加宽度，
 纵向阅读累加高度，字形方向为 90/270 度时交换字符宽高；这是逻辑排版区域，
 不包含字形墨迹的定位、kerning、换行或画布变换。字体行高取 `hhea` 的
-ascender − descender + lineGap；结果保留原始字体单位精度。Java AWT 的 CFF
-量化差异单独限制在每字符 0.0001 mm；三份 TrueType 字体使用精确数值比较。
+ascender − descender + lineGap，经下述 Java 参考固定点缩放得到逻辑尺寸，
+不对 CFF 字体重复套用 FontMatrix。TrueType 和 CFF 的独立参考均进行精确数值比较。
 960 组固定 Java 版本对照覆盖四份字体、全部 16 种方向组合、控制字符与字距。
 负字距在画布的测量和文字绘制中统一归零，与 Java `FontSetting` 一致。
 C 使用 `ofd_measure_canvas_text_area_json`，请求格式与原文本测量一致；
@@ -838,7 +838,28 @@ RGB 通道限定为 0–255；RGBA 透明度限定为有限的 0–1，并按 Ja
 Go `ParseCanvasColor` 和 Node.js / TypeScript `parseCanvasColor`。这些函数不需要文档句柄，
 非法颜色返回 JSON null / `None` / nil / null；Go 的非法 UTF-8 和各语言的嵌入 NUL
 属于调用错误。C 返回的 JSON 仍由调用方使用 `ofd_buffer_free` 释放。
-CSS 字体解析与独立像素单位助手仍待实现。
+Rust 开发版本另提供 `parse_canvas_font_style` 和
+`resolve_canvas_font_style(page, input, base, pixels_per_mm)`。支持斜体、100–900 粗细、
+`bold`/`bolder`/`lighter`、mm/px/无单位字号及完整的带空格或引号字体名。
+像素换算显式使用传入 PPM；Java 默认值为 3.78。仅字号和字体时保留基准粗细/斜体；
+按 Java 状态更新规则，只有斜体前缀时粗细重置为 400，只有粗细前缀时保留原来的斜体。
+单独 `normal` 按粗细 400 处理；`normal normal` 才同时清除斜体。
+字距、对齐、阅读方向和字符方向始终保留。解析只接受有限正字号和 PPM，输入上限 4096 字节；
+字号还必须可由参考缩放器表示，超出范围会在资源编辑前报错。
+资源解析会复用页面可见的命名或嵌入字体；缺少时创建所属文档的命名字体资源。
+存在歧义或输入无效时在编辑前报错。该资源解析方法可能修改资源，普通文字测量仍只读。
+986 组 Java 独立对照验证字号、字体和状态更新；另保留四个 Java 原始误解析记录，
+明确验证 Rust 对完整多词字体名、前缀顺序和大小写的处理。
+另保留 Java 字体回查丢失嵌入文件路径的原始 OFD；参考修正版仅在解析后恢复实际字体文件，
+保留字号、粗细、斜体和字距，在 25.4/101.6 DPI 比较两端写入的 OFD 渲染像素。
+此项验证写入数据的一致性，两份 OFD 使用相同 Rust 渲染器，不代表独立 Java 光栅器对照。
+另有 1,296 组独立 Java 度量参考覆盖四种字体、18 个字号、字距和复杂字符。
+Canvas 度量遵循固定的 OpenJDK 21 FreeType 参考：26.6 字号、16.16 位移以及单字符复杂脚本布局；
+不对相邻字符进行整段塑形或字偶距调整。TrueType 与 CFF 使用相同固定点规则，
+JSON 启用浮点往返精度，避免序列化后丢失最低有效位。
+参考缩放和布局接口见 [OpenJDK FreeType scaler](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/freetypeScaler.c)
+及 [HarfBuzz 字体回调](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/hb-jdk-font.cc)。
+完整浏览器 CSS 字体语法（字体列表、转义和行高）、跨语言字体样式接口及独立像素单位助手仍待实现。
 字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
