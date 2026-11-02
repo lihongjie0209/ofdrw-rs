@@ -109,3 +109,63 @@ func TestCanvasFontStyleJavaCases(t *testing.T) {
 		t.Fatal("accepted closed document")
 	}
 }
+
+func TestCanvasResolvedFontDrawsAndSurvivesRoundTrip(t *testing.T) {
+	doc, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	if err := doc.AddBlankPage(40, 30); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "crates", "ofdrw", "tests", "fixtures", "dejavu-sans.ttf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.AddEmbeddedFont("CanvasTest", data); err != nil {
+		t.Fatal(err)
+	}
+	font, err := doc.ResolveCanvasFontStyle(0, "italic bold 4mm CanvasTest", CanvasFont{}, 3.78)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := "Canvas"
+	ids, err := doc.DrawCanvas(0, [4]float64{0, 0, 40, 30}, []CanvasCommand{
+		{Type: "set_font", Font: &font},
+		{Type: "fill_text", Text: &text, Point: &[2]float64{2, 10}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("painted object count: %d", len(ids))
+	}
+	encoded, err := doc.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := FromBytes(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	issues, err := reopened.ValidateReferences()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("invalid references: %+v", issues)
+	}
+	original, err := doc.PagePNG(0, 101.6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := reopened.PagePNG(0, 101.6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, original) {
+		t.Fatal("font rendering changed after saving and reopening")
+	}
+}
