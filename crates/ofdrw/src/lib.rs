@@ -15,6 +15,8 @@ mod canvas;
 mod canvas_color;
 pub use canvas::CanvasCommand;
 pub use canvas_color::parse_canvas_color;
+mod canvas_pattern;
+pub use canvas_pattern::CanvasPattern;
 mod canvas_font_style;
 pub use canvas_font_style::{parse_canvas_font_style, CanvasFontStyle};
 mod canvas_units;
@@ -3411,6 +3413,12 @@ pub enum PatternCell {
         resource_id: String,
         boundary: [f64; 4],
     },
+    /// An image whose unit-square CTM is independent of its clipping boundary.
+    TransformedImage {
+        resource_id: String,
+        boundary: [f64; 4],
+        ctm: [f64; 6],
+    },
     Composite {
         resource_id: String,
         boundary: [f64; 4],
@@ -3514,6 +3522,12 @@ impl PatternStyle {
                 } => {
                     if text.is_empty() || !size.is_finite() || *size <= 0.0 {
                         return Err(OfdError::Invalid("Pattern text is invalid".into()));
+                    }
+                    boundary
+                }
+                PatternCell::TransformedImage { boundary, ctm, .. } => {
+                    if !ctm.iter().all(|value| value.is_finite()) {
+                        return Err(OfdError::Invalid("Pattern image CTM is invalid".into()));
                     }
                     boundary
                 }
@@ -23226,7 +23240,8 @@ impl OfdDocument {
                         delta_x: text_delta_x_attribute(self, font, text, *size)?,
                     }))
                 }
-                PatternCell::Image { resource_id, .. } => {
+                PatternCell::Image { resource_id, .. }
+                | PatternCell::TransformedImage { resource_id, .. } => {
                     if let Some(page_path) = page_path {
                         self.maskable_media_for_page(page_path, document_index, resource_id)?;
                     } else {
@@ -25145,7 +25160,8 @@ impl OfdDocument {
                         delta_x: text_delta_x_attribute(self, font, text, *size)?,
                     }));
                 }
-                PatternCell::Image { resource_id, .. } => {
+                PatternCell::Image { resource_id, .. }
+                | PatternCell::TransformedImage { resource_id, .. } => {
                     self.maskable_media_for_page(&page.path, page.document_index, resource_id)?;
                     text_fonts.push(None);
                 }
@@ -37388,6 +37404,15 @@ fn pattern_paint_xml(
             } => {
                 let [x, y, width, height] = *boundary;
                 paint.push_str(&format!("<{prefix}ImageObject ID=\"{id}\" Boundary=\"{x} {y} {width} {height}\" CTM=\"{width} 0 0 {height} 0 0\" ResourceID=\"{}\"/>", escape_xml(resource_id)));
+            }
+            PatternCell::TransformedImage {
+                resource_id,
+                boundary,
+                ctm,
+            } => {
+                let [x, y, width, height] = *boundary;
+                let ctm = ctm.iter().map(f64::to_string).collect::<Vec<_>>().join(" ");
+                paint.push_str(&format!("<{prefix}ImageObject ID=\"{id}\" Boundary=\"{x} {y} {width} {height}\" CTM=\"{ctm}\" ResourceID=\"{}\"/>", escape_xml(resource_id)));
             }
             PatternCell::Composite {
                 resource_id,
