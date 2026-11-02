@@ -422,3 +422,13 @@ doc.draw_canvas(0, (0, 0, 100, 50), [
 ```
 
 需要先创建对应页面。支持 mm、px 和无单位毫米；已有字体按页面可见字体名/字体族匹配，否则添加命名字体资源。可传入原字体设置以保留跟踪间距、方向和对齐。无样式前缀保留粗细和斜体；仅斜体会将粗细设为 400，仅粗细保留斜体，`normal normal` 清除斜体。默认像素密度为每毫米 3.78 像素（Go 需显式传入）。不支持完整 CSS 字体列表、转义或行高。
+
+### Canvas 像素换算（开发版本，v0.5.0 尚未包含）
+
+```python
+from ofdrw_rs import canvas_pixels_to_mm, canvas_mm_to_pixels
+assert canvas_pixels_to_mm(12, 4) == 3.0
+assert canvas_mm_to_pixels(-0.49, 4) == -1
+```
+
+无需文档句柄，密度必须有限且大于零；Java 默认密度为 3.78 像素/毫米，Python/Node.js 可省略该参数。整数像素限定为有符号 32 位。毫米转像素向零截断，溢出及无穷值饱和到整数边界，NaN 转换为零；极小密度下像素转毫米可能得到无穷值。这些规则与 Java `DrawContext` 一致，不修改页面几何或 CTM。

@@ -15,6 +15,8 @@ _ffi.cdef(
     typedef struct OfdDocument OfdDocument;
     typedef struct { unsigned char *data; size_t len; } OfdBuffer;
     unsigned int ofd_abi_version(void);
+    int ofd_canvas_pixels_to_mm(int32_t pixels, double pixels_per_mm, double *output);
+    int ofd_canvas_mm_to_pixels(double mm, double pixels_per_mm, int32_t *output);
     int ofd_parse_canvas_color_json(const char *input, OfdBuffer *output);
     const char *ofd_last_error(void);
     int ofd_open(const char *path, OfdDocument **output);
@@ -402,6 +404,24 @@ def _utf8(value: str | os.PathLike[str]) -> bytes:
     if b"\x00" in encoded:
         raise ValueError("string contains NUL byte")
     return encoded
+
+
+def canvas_pixels_to_mm(pixels: int, pixels_per_mm: float = 3.78) -> float:
+    """Convert signed 32-bit pixels to millimeters with a positive finite density."""
+    if isinstance(pixels, bool) or not isinstance(pixels, int):
+        raise TypeError("pixels must be an integer")
+    if not -(2**31) <= pixels <= 2**31 - 1:
+        raise ValueError("pixels must fit a signed 32-bit integer")
+    output = _ffi.new("double *")
+    _check(_lib.ofd_canvas_pixels_to_mm(pixels, pixels_per_mm, output))
+    return output[0]
+
+
+def canvas_mm_to_pixels(mm: float, pixels_per_mm: float = 3.78) -> int:
+    """Truncate toward zero and saturate to signed 32-bit pixels; NaN becomes zero."""
+    output = _ffi.new("int32_t *")
+    _check(_lib.ofd_canvas_mm_to_pixels(mm, pixels_per_mm, output))
+    return output[0]
 
 
 def parse_canvas_color(value: str) -> dict | None:
@@ -4991,4 +5011,4 @@ class Document:
             _lib.ofd_buffer_free(output[0])
 
 
-__all__ = ["Document", "OfdError", "create_ses_seal", "parse_canvas_color"]
+__all__ = ["Document", "OfdError", "create_ses_seal", "parse_canvas_color", "canvas_pixels_to_mm", "canvas_mm_to_pixels"]

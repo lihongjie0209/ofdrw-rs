@@ -20,6 +20,10 @@ typedef struct OfdBuffer {
 uint32_t ofd_abi_version(void);
 /* No document needed. Returns paint JSON or JSON null; free with ofd_buffer_free. */
 int32_t ofd_parse_canvas_color_json(const char *input, OfdBuffer *output);
+/* Pure Canvas conversions. Density must be finite and positive. Outputs are scalars.
+   mm_to_pixels truncates toward zero and saturates to int32; NaN becomes zero. */
+int32_t ofd_canvas_pixels_to_mm(int32_t pixels, double pixels_per_mm, double *output);
+int32_t ofd_canvas_mm_to_pixels(double mm, double pixels_per_mm, int32_t *output);
 const char *ofd_last_error(void);
 int32_t ofd_open(const char *path, OfdDocument **output);
 int32_t ofd_from_bytes(const uint8_t *data, size_t len, OfdDocument **output);

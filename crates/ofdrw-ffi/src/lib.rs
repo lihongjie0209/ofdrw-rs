@@ -120,6 +120,44 @@ pub unsafe extern "C" fn ofd_parse_canvas_color_json(
     })
 }
 
+/// Convert integer Canvas pixels to millimeters without a document handle.
+/// Density must be finite and positive. Very small densities may overflow to infinity.
+///
+/// # Safety
+/// `output` must point to writable double storage.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_canvas_pixels_to_mm(
+    pixels: i32,
+    pixels_per_mm: f64,
+    output: *mut f64,
+) -> i32 {
+    run(|| {
+        let output = output.as_mut().ok_or("null output pointer")?;
+        let units = ofdrw::CanvasUnits::new(pixels_per_mm).map_err(|e| e.to_string())?;
+        *output = units.mm(pixels);
+        Ok(())
+    })
+}
+
+/// Convert Canvas millimeters to pixels, truncating toward zero and saturating.
+/// NaN converts to zero, as in Java. Density must be finite and positive.
+///
+/// # Safety
+/// `output` must point to writable signed 32-bit integer storage.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_canvas_mm_to_pixels(
+    mm: f64,
+    pixels_per_mm: f64,
+    output: *mut i32,
+) -> i32 {
+    run(|| {
+        let output = output.as_mut().ok_or("null output pointer")?;
+        let units = ofdrw::CanvasUnits::new(pixels_per_mm).map_err(|e| e.to_string())?;
+        *output = units.pixel(mm);
+        Ok(())
+    })
+}
+
 unsafe fn input_bytes<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], String> {
     if len == 0 {
         return Ok(&[]);
@@ -23063,5 +23101,71 @@ mod canvas_color_binding_tests {
             assert!(output.data.is_null());
             assert_eq!(output.len, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod canvas_units_binding_tests {
+    use super::*;
+
+    fn bits(value: &serde_json::Value) -> f64 {
+        f64::from_bits(u64::from_str_radix(value.as_str().unwrap(), 16).unwrap())
+    }
+
+    #[test]
+    fn conversion_abi_matches_all_java_reference_bits_without_document_handles() {
+        let reference: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/canvas-units-java.json"
+        ))
+        .unwrap();
+        let cases = reference["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 329);
+        for case in cases {
+            let ppm = bits(&case["ppm_bits"]);
+            if case["op"] == "mm" {
+                let mut output = 0.;
+                let pixels = i32::try_from(case["input"].as_i64().unwrap()).unwrap();
+                assert_eq!(
+                    unsafe { ofd_canvas_pixels_to_mm(pixels, ppm, &mut output) },
+                    0
+                );
+                assert_eq!(
+                    output.to_bits(),
+                    bits(&case["expected_bits"]).to_bits(),
+                    "{case}"
+                );
+            } else {
+                let mut output = 0;
+                assert_eq!(
+                    unsafe { ofd_canvas_mm_to_pixels(bits(&case["input_bits"]), ppm, &mut output) },
+                    0
+                );
+                assert_eq!(
+                    i64::from(output),
+                    case["expected"].as_i64().unwrap(),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conversion_abi_rejects_invalid_density_and_null_outputs_without_writing() {
+        for ppm in [0., -0., -1., f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut mm = 123.;
+            let mut pixels = 123;
+            assert_ne!(unsafe { ofd_canvas_pixels_to_mm(4, ppm, &mut mm) }, 0);
+            assert_ne!(unsafe { ofd_canvas_mm_to_pixels(4., ppm, &mut pixels) }, 0);
+            assert_eq!(mm, 123.);
+            assert_eq!(pixels, 123);
+        }
+        assert_ne!(
+            unsafe { ofd_canvas_pixels_to_mm(4, 3.78, ptr::null_mut()) },
+            0
+        );
+        assert_ne!(
+            unsafe { ofd_canvas_mm_to_pixels(4., 3.78, ptr::null_mut()) },
+            0
+        );
     }
 }
