@@ -819,7 +819,15 @@ Node.js 使用 `measureCanvasTextArea`。各接口返回 `width`、`height`、
 省略字体设置时使用核心默认值；未知字段、未知对齐和非法方向被拒绝。
 测量请求最多 16 MiB，解码后的文字最多 1 MB。三个语言接口均不修改调用者的字体配置。
 
-Canvas CSS 字体/颜色解析、measureTextArea 字符包围盒与独立像素单位助手仍待实现。
+`SetDrawParam` 可设置 `fill_gradient` / `stroke_gradient`，支持轴向和径向渐变。
+六组独立 Java OFD 对照在 25.4 与 101.6 DPI 下检查像素一致性，覆盖路径填充、
+径向填充、渐变描边的保存/恢复、透明裁剪、文字填充及仿射变换。
+固定 Java 版本的 `CanvasState.clone` 没有给保存后的状态赋值绘制参数，恢复后会丢失线宽；
+对照保留原始 `stroke-save.ofd`，并通过 Java 显式重设已知线宽生成单独的对照文件。
+Rust 始终恢复完整绘制参数；生成器与元数据显式记录这项差异。
+
+Canvas CSS 字体/颜色解析与独立像素单位助手仍待实现。
+字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
 
