@@ -6,18 +6,20 @@ C ABI 的六个平台原生 ZIP 和所有语言的备份文件放在 GitHub Rele
 
 ## 当前已发布版本
 
-**0.4.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.4.0)、
-[PyPI](https://pypi.org/project/ofdrw-rs/0.4.0/) 和
-[npm](https://www.npmjs.com/package/ofdrw-rs/v/0.4.0)。
-Go 标签 `bindings/go/v0.4.0` 与根版本标签指向同一源码提交
-[`bf8ac76`](https://github.com/lihongjie0209/ofdrw-rs/commit/bf8ac762ac9522bac8fff21d7795c75cd0fbdd9e)。
-[v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)
+**0.5.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.5.0)、
+[PyPI](https://pypi.org/project/ofdrw-rs/0.5.0/) 和
+[npm](https://www.npmjs.com/package/ofdrw-rs/v/0.5.0)。
+Go 标签 `bindings/go/v0.5.0` 与根版本标签指向同一源码提交
+[`e56b88c`](https://github.com/lihongjie0209/ofdrw-rs/commit/e56b88c78b3ec148e816a6e3595ec77be56b9d1b)。
+[v0.5.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.5.0)
 提供六个平台原生 ZIP、六个 Python wheel、npm tarball、Rust crate、Go 源码包和
-[`SHA256SUMS`](https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/SHA256SUMS)，共 16 个附件。
+[`SHA256SUMS`](https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.5.0/SHA256SUMS)，共 16 个附件。
 
-[发布流水线](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41375850670)
-已完成全部发布步骤以及从原生仓库安装运行的验证。安装和各语言调用示例见[项目 README](../README.md#安装渠道)。
-历史版本 [v0.3.0](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)
+[发布流水线](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41396012939)
+已完成全部发布步骤以及从原生仓库安装运行的验证。
+该发布提交的 [12 项主分支 CI 检查](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41387982940)全部通过。
+安装和各语言调用示例见[项目 README](../README.md#安装渠道)。
+历史版本 [v0.4.0](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)
 及其包和标签保持不变。
 
 ## 凭据
@@ -76,11 +78,13 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 公开包的校验和、源码提交、许可证及 Cargo 索引可见性已核验；转换器使用已发布的
 `ofdrw-resvg 0.45.1-ofdrw.1`，发布清单不依赖本地路径。
 
-v0.4.0 使用上述已发布依赖。v0.5.0 候选使用
+v0.4.0 使用上述历史依赖。v0.5.0 使用已发布的
 `ofdrw-resvg 0.45.1-ofdrw.2`、`0.48.1-ofdrw.2` 以及
-`ofdrw-svg2pdf 0.13.0-ofdrw.3`；这些新版本尚未发布。
-该分支合并并通过主分支完整 CI 后，必须按“渲染器 → 转换器 → 新核心版本”
-的顺序发布，不能复用 v0.4.0 标签或替换任何已发布的包。
+`ofdrw-svg2pdf 0.13.0-ofdrw.3`，源提交均为 `e56b88c78b3ec148e816a6e3595ec77be56b9d1b`。
+[渲染器发布](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41395710023)和
+[转换器发布](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41395874412)均已成功。
+后续版本在合并并通过主分支完整 CI 后，仍须按“渲染器 → 转换器 → 新核心版本”
+的顺序发布，已发布的包和标签保持不可变。
 
 转换器依赖 `ofdrw-svg2pdf` 使用独立版本。首次发布或修改该分支时，
 先更新其 Cargo 版本及核心依赖，将提交推送到 main 并等待完整 CI 成功。
