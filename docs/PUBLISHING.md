@@ -6,18 +6,19 @@ C ABI 的六个平台原生 ZIP 和所有语言的备份文件放在 GitHub Rele
 
 ## 当前已发布版本
 
-**0.3.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.3.0)、
-[PyPI](https://pypi.org/project/ofdrw-rs/0.3.0/) 和
-[npm](https://www.npmjs.com/package/ofdrw-rs/v/0.3.0)。
-Go 标签 `bindings/go/v0.3.0` 与根版本标签指向同一源码提交
-[`3e5a3ea`](https://github.com/lihongjie0209/ofdrw-rs/commit/3e5a3ea35812c7418a538d4b90b3bea50fddd632)。
-[v0.3.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)
+**0.4.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.4.0)、
+[PyPI](https://pypi.org/project/ofdrw-rs/0.4.0/) 和
+[npm](https://www.npmjs.com/package/ofdrw-rs/v/0.4.0)。
+Go 标签 `bindings/go/v0.4.0` 与根版本标签指向同一源码提交
+[`bf8ac76`](https://github.com/lihongjie0209/ofdrw-rs/commit/bf8ac762ac9522bac8fff21d7795c75cd0fbdd9e)。
+[v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)
 提供六个平台原生 ZIP、六个 Python wheel、npm tarball、Rust crate、Go 源码包和
-`SHA256SUMS`，共 16 个附件。
+[`SHA256SUMS`](https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/SHA256SUMS)，共 16 个附件。
 
-[发布流水线](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41318789139)
-已完成所有发布步骤及从原生仓库安装运行的验证。
-安装和各语言调用示例见[项目 README](../README.md#安装渠道)。
+[发布流水线](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41375850670)
+已完成全部发布步骤以及从原生仓库安装运行的验证。安装和各语言调用示例见[项目 README](../README.md#安装渠道)。
+历史版本 [v0.3.0](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)
+及其包和标签保持不变。
 
 ## 凭据
 

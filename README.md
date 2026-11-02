@@ -7,7 +7,7 @@
 以 [Java OFDRW](https://github.com/ofdrw/ofdrw) 为兼容性参考，优先实现包读写、页面对象、资源、布局、渲染和文档转换。
 
 本页对应 **0.4.0**；分发状态见 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases) 和 [Release 工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml)。项目已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
-本页安装命令对应此版本；发布工作流完成后可从下表原生仓库安装。
+本页安装命令对应已发布的 0.4.0，可从下表原生仓库安装；预编译文件见 [v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)。
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
 版本变更见 [v0.4.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
