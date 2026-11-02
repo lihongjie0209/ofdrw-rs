@@ -342,3 +342,39 @@ positive `LineWidth` is always honored, even when `Hairline` is true.
 `PathStrokeStyle{LineWidth: 0}` also updates existing paths to device hairlines.
 PNG uses one device pixel at any DPI; PDF exports a native zero-width stroke.
 Use a matching native library built from the same unreleased source.
+
+## Vector canvas batches (unreleased; after 0.4.0)
+
+Use a matching native library built from the same unreleased source.
+
+```go
+package main
+
+import (
+    "log"
+    "github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw"
+)
+
+func main() {
+    document, err := ofdrw.New()
+    if err != nil { log.Fatal(err) }
+    defer document.Close()
+    if err := document.AddBlankPage(40, 30); err != nil { log.Fatal(err) }
+    ids, err := document.DrawCanvas(0, [4]float64{0, 0, 40, 30}, []ofdrw.CanvasCommand{
+        {Type: "set_stroke_color", Color: &[3]uint8{0, 80, 200}},
+        {Type: "rect", Rect: &[4]float64{2, 3, 12, 8}},
+        {Type: "stroke"},
+    })
+    if err != nil { log.Fatal(err) }
+    log.Println(ids)
+    if err := document.Save("canvas.ofd"); err != nil { log.Fatal(err) }
+}
+```
+
+Commands use typed pointer fields to retain explicit zeroes; for example,
+`zero := 0.0` and `CanvasCommand{Type: "set_line_width", Width: &zero}`.
+Populate only fields belonging to the command type. The batch commits
+atomically and returns string object IDs. Nil commands form an empty batch,
+and nil Alpha clears global opacity. Coordinates are millimeters and angles
+are degrees. See the [command reference](../../docs/FEATURES.md#有状态向量画布)
+for vector operations and remaining text/image limitations.

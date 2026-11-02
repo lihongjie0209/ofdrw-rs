@@ -742,8 +742,32 @@ Rust 的 `draw_canvas(page_index, boundary, &[CanvasCommand])` 在已有全局�
 另外，Rust 的 restore 正确保留绘制参数，不复制 Java CanvasState.clone
 把参数克隆写回原对象的缺陷。
 
-此项尚未包含在 v0.4.0。Canvas 专用的 C/Python/Go/Node.js 批量接口、文字、图片裁剪、
-CSS 字体/颜色解析与像素单位助手仍待实现。复杂变换裁剪的 Java 像素一致性尚未证明；
+此项尚未包含在 v0.4.0。C 使用 `ofd_draw_canvas_json`，Python 使用 `draw_canvas`，
+Go 使用 `DrawCanvas` 和 `CanvasCommand`，Node.js 使用 `drawCanvas` 和 TypeScript 命令联合类型。
+C 请求为 `{"boundary":[x,y,width,height],"commands":[...]}`，返回 JSON 字符串 ID 数组。
+请求最多 16 MiB；各命令使用 `type` 区分，未知字段和未知类型均被拒绝。
+布尔标志缺省为 false；`set_global_alpha` 的 alpha 为 null 或省略时清除全局透明度。
+Go 使用指针字段保留显式零坐标、零线宽和零透明度。三个语言接口均不改动调用者的命令。
+
+| 命令 type | 其余字段 |
+| --- | --- |
+| `begin_path`、`close_path`、`stroke`、`save`、`restore` | 无 |
+| `move_to`、`line_to` | `point:[x,y]` |
+| `quadratic_curve_to` | `control:[x,y]`、`end:[x,y]` |
+| `bezier_curve_to` | `control1:[x,y]`、`control2:[x,y]`、`end:[x,y]` |
+| `arc_to` | `radii:[rx,ry]`、`angle`、`large?`、`sweep?`、`end:[x,y]` |
+| `circle_arc` | `center:[x,y]`、`radius`、`start_angle`、`end_angle`、`sweep?` |
+| `rect`、`fill_rect`、`stroke_rect` | `rect:[x,y,width,height]` |
+| `fill`、`clip` | `even_odd?` |
+| `translate`、`scale`、`rotate` | 分别为 `offset:[x,y]`、`factors:[x,y]`、`angle` |
+| `transform`、`set_transform` | `matrix:[a,b,c,d,e,f]` |
+| `set_draw_param` | `style:DrawParamStyle` |
+| `set_line_width` | `width`，允许 0 |
+| `set_fill_color`、`set_stroke_color` | `color:[r,g,b]` |
+| `set_global_alpha` | `alpha?`，0..1 或 null |
+
+Canvas 文字、图片裁剪、CSS 字体/颜色解析与像素单位助手仍待实现。
+复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
 
 ## 文本流式布局

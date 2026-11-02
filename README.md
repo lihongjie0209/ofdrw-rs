@@ -195,6 +195,16 @@ Rust 使用 `FlowSpan::placeholder`，Go 使用 `NewPlaceholderSpan`，Python、
 和 C JSON 使用空 `text`、`placeholder_width` 和 `font_size` 字段。详见
 [行内占位符](docs/FEATURES.md#行内占位符)及各语言 README。
 
+## 向量画布（后续版本，尚未发布）
+
+开发分支新增有状态向量画布，支持路径、曲线、变换、保存恢复、裁剪和绘制参数。
+Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
+[Python](bindings/python/README.md)、[Go](bindings/go/README.md) 和
+[Node.js / TypeScript](bindings/node/README.md) 均提供原子批量调用示例。
+坐标使用毫米，角度使用度，失败时回滚整批绘制。
+此功能不包含在 v0.4.0 发布候选中；文字、图片等 Canvas 功能仍在继续实现。
+协议与限制见[有状态向量画布](docs/FEATURES.md#有状态向量画布)。
+
 ## 测试与发布
 
 CI 在 Linux、macOS、Windows 的 x64/ARM64 上运行 Rust 和三个语言绑定的测试，

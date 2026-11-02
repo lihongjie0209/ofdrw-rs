@@ -59,6 +59,36 @@ public class CanvasReference {
 '''
 
 
+COMMANDS = {
+    'path-state': [
+        {'type':'begin_path'},{'type':'move_to','point':[1,2]},{'type':'line_to','point':[9,2]},{'type':'save'},
+        {'type':'begin_path'},{'type':'rect','rect':[2,4,6,3]},{'type':'stroke_rect','rect':[9,8,2,2]},{'type':'stroke'},
+        {'type':'restore'},{'type':'stroke'},{'type':'fill_rect','rect':[1,12,4,2]},{'type':'stroke'},
+    ],
+    'deferred-transform': [
+        {'type':'begin_path'},{'type':'move_to','point':[1,1]},{'type':'line_to','point':[4,2]},
+        {'type':'translate','offset':[3,4]},{'type':'scale','factors':[2,3]},{'type':'stroke'},
+        {'type':'set_transform','matrix':[1,0,0,1,0,0]},{'type':'transform','matrix':[0,1,-1,0,15,1]},{'type':'stroke'},
+    ],
+    'curves': [
+        {'type':'move_to','point':[2,2]},{'type':'quadratic_curve_to','control':[4,0],'end':[6,2]},
+        {'type':'bezier_curve_to','control1':[6,4],'control2':[8,4],'end':[8,2]},
+        {'type':'arc_to','radii':[3,2],'angle':25,'large':True,'sweep':False,'end':[12,8]},
+        {'type':'close_path'},{'type':'stroke'},{'type':'begin_path'},
+        {'type':'circle_arc','center':[10,10],'radius':3,'start_angle':0,'end_angle':360,'sweep':True},{'type':'stroke'},
+    ],
+    'fill-alpha': [
+        {'type':'set_line_width','width':0.7},{'type':'set_fill_color','color':[0,128,255]},
+        {'type':'set_stroke_color','color':[255,0,0]},{'type':'set_global_alpha','alpha':0.5},
+        {'type':'rect','rect':[2,2,10,8]},{'type':'fill'},{'type':'fill_rect','rect':[14,2,4,6]},{'type':'stroke'},
+    ],
+    'frozen-clip': [
+        {'type':'translate','offset':[2,1]},{'type':'rect','rect':[0,0,8,8]},{'type':'clip'},{'type':'begin_path'},
+        {'type':'set_transform','matrix':[1,0,0,1,10,0]},{'type':'fill_rect','rect':[0,0,14,14]},
+    ],
+}
+
+
 def main():
     revision = subprocess.check_output(["git", "-C", str(JAVA), "rev-parse", "HEAD"], text=True).strip()
     if revision != PIN:
@@ -118,6 +148,9 @@ def main():
                 cases.append(case)
     output=destination/"reference.json"
     output.write_text(json.dumps({"java_revision":revision,"page_size":[40,30],"boundary":[4,3,24,20],"cases":cases},indent=2)+"\n")
+    requests={"java_revision":revision,"page_size":[40,30],"boundary":[4,3,24,20],
+              "cases":[{"name":name,"commands":commands} for name,commands in COMMANDS.items()]}
+    (destination/"requests.json").write_text(json.dumps(requests,indent=2)+"\n")
     print(output.relative_to(ROOT))
 
 if __name__=="__main__":main()

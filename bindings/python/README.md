@@ -308,3 +308,26 @@ Pass `line_width=0` to `add_path_object`, `add_composite_path_object`, or
 accept `set_page_path_stroke_style(0, object_id, {"line_width": 0})`.
 PNG retains device width across DPI and transforms; PDF preserves a native
 zero-width stroke. Use the matching unreleased native library.
+
+## Vector canvas batches (unreleased; after 0.4.0)
+
+Use a matching native library built from the same unreleased source.
+
+```python
+from ofdrw_rs import Document
+
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    ids = document.draw_canvas(0, (0, 0, 40, 30), [
+        {"type": "set_stroke_color", "color": [0, 80, 200]},
+        {"type": "rect", "rect": [2, 3, 12, 8]},
+        {"type": "stroke"},
+    ])
+    document.save("canvas.ofd")
+```
+
+The batch commits atomically and returns painted object IDs as strings.
+Coordinates are millimeters; angles are degrees. Use `save`/`restore` for
+paths and drawing state, and `begin_path` to clear the path. Unknown commands
+and fields are rejected. Set global alpha to `None` to clear it.
+See the [command reference](../../docs/FEATURES.md#有状态向量画布) for all vector operations and remaining text/image limitations.

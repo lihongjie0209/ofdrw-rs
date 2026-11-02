@@ -512,3 +512,16 @@ function exercise(document: Document, source: Document, certificate: Uint8Array,
 }
 
 void exercise;
+
+function exerciseCanvas(document: Document): void {
+  const ids: string[] = document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_line_width', width: 0},
+    {type: 'rect', rect: [1, 2, 12, 8]},
+    {type: 'stroke'},
+  ]);
+  void ids;
+  // @ts-expect-error move_to requires two coordinates
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: 'move_to', point: [1]}]);
+  // @ts-expect-error unknown command tags are rejected
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: 'unknown'}]);
+}

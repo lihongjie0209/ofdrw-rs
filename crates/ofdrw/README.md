@@ -89,4 +89,6 @@ The batch commits atomically and returns painted object IDs. Paths, drawing
 parameters, transforms, opacity and clipping participate in save/restore.
 Path coordinates are transformed when painted; rectangle helpers preserve the
 current path. See the feature reference for the Java clip fixture normalization
-and remaining canvas text/image/language-binding work.
+and remaining canvas text/image work. C, Python, Go and Node.js expose the
+same batch through `ofd_draw_canvas_json`, `draw_canvas`, `DrawCanvas` and
+`drawCanvas`, respectively. See each binding README for examples.

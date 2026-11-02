@@ -326,6 +326,7 @@ type nativeAPI struct {
 	addTable                        func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowedSpans                  func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	drawCanvas                      func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFixedContainers              func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFlowContainers               func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addTextBoxes                    func(uintptr, uintptr, *byte, *nativeBuffer) int32
@@ -702,6 +703,7 @@ func loadAPI() error {
 			{"ofd_add_box_layout_with_content_ranges_json", &api.addBoxLayoutWithContentRanges},
 			{"ofd_add_box_layout_json", &api.addBoxLayout},
 			{"ofd_add_text_boxes_json", &api.addTextBoxes},
+			{"ofd_draw_canvas_json", &api.drawCanvas},
 			{"ofd_add_fixed_containers_json", &api.addFixedContainers},
 			{"ofd_add_flow_containers_json", &api.addFlowContainers},
 			{"ofd_measure_flowed_spans_json", &api.measureFlowedSpans},

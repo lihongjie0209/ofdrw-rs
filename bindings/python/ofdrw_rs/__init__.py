@@ -318,6 +318,7 @@ _ffi.cdef(
     int ofd_add_table_json(OfdDocument *handle, size_t document_index, const char *table_json, OfdBuffer *output);
     int ofd_add_flowed_spans_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
+    int ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
@@ -4387,6 +4388,29 @@ class Document:
         _check(_lib.ofd_add_box_layout_json(
             self._handle, document_index,
             _utf8(json.dumps({**options, "items": items}, allow_nan=False)), output,
+        ))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def draw_canvas(self, page_index: int,
+                    boundary: tuple[float, float, float, float],
+                    commands: list[dict]) -> list[str]:
+        """Execute an atomic vector canvas batch; return painted object IDs.
+
+        Commands use a snake_case ``type`` tag. Angles are degrees, coordinates
+        are millimeters. Empty commands leave the selected page unchanged.
+        """
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if not isinstance(commands, list):
+            raise TypeError("commands must be a list")
+        payload = json.dumps({"boundary": boundary, "commands": commands}, allow_nan=False)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_draw_canvas_json(
+            self._handle, page_index, _utf8(payload), output,
         ))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))

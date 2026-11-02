@@ -659,3 +659,28 @@ Pass `{line_width: 0}` to `addPathObject`, `addCompositePathObject`, or
 `doc.setPagePathStrokeStyle(0, objectId, {line_width: 0})`.
 PNG retains one device pixel across DPI and transforms; PDF preserves a
 native zero-width stroke. Use the matching unreleased native library.
+
+## Vector canvas batches (unreleased; after 0.4.0)
+
+Use a matching native library built from the same unreleased source.
+
+```js
+const {Document} = require('ofdrw-rs');
+const fs = require('node:fs');
+const document = Document.create();
+try {
+  document.addBlankPage(40, 30);
+  const ids = document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_stroke_color', color: [0, 80, 200]},
+    {type: 'rect', rect: [2, 3, 12, 8]},
+    {type: 'stroke'},
+  ]);
+  fs.writeFileSync('canvas.ofd', document.toBytes());
+} finally {document.close();}
+```
+
+`CanvasCommand` is a TypeScript discriminated union. The batch commits
+atomically and returns string object IDs. Coordinates are millimeters and
+angles are degrees. Unknown fields and nonfinite numbers are rejected.
+A null or omitted `set_global_alpha.alpha` clears global opacity.
+See the [command reference](../../docs/FEATURES.md#有状态向量画布) for vector operations and remaining text/image limitations.

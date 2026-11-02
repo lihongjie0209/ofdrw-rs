@@ -1,6 +1,7 @@
 //! Versioned C ABI for OFD package operations.
 
 mod box_layout;
+mod canvas;
 mod flow_blocks;
 mod flow_container;
 mod text_box;
@@ -11184,6 +11185,34 @@ pub unsafe extern "C" fn ofd_add_text_boxes_json(
             serde_json::to_vec(&box_layout::Response::from(&result)).map_err(|e| e.to_string())?,
             output,
         )
+    })
+}
+
+/// Execute an atomic vector canvas batch on an existing global page.
+///
+/// JSON requires `boundary:[x,y,width,height]` and `commands:[{type:...}]`.
+/// Returns painted object IDs as a JSON string array. Unknown fields and command
+/// types are rejected. Angles are degrees; omitted boolean flags default false.
+/// `set_global_alpha` with null or absent alpha clears global opacity.
+///
+/// # Safety
+/// `handle` must be live, `request_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_draw_canvas_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    request_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let (boundary, commands) = canvas::parse(input_string(request_json)?)?;
+        let ids = document_mut(handle)?
+            .draw_canvas(page_index, boundary, &commands)
+            .map_err(|e| e.to_string())?;
+        output_buffer(serde_json::to_vec(&ids).map_err(|e| e.to_string())?, output)
     })
 }
 
