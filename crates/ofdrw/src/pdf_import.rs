@@ -534,6 +534,43 @@ impl TextState {
 }
 
 impl PathBuilder {
+    fn change_ctm(
+        &mut self,
+        previous: [f64; 6],
+        next: [f64; 6],
+        box_: [f64; 4],
+    ) -> Result<(), OfdError> {
+        if self.commands.is_empty() || previous == next {
+            return Ok(());
+        }
+        // PDF applies the painting CTM to the entire current path, including
+        // coordinates supplied before cm or a graphics-state restoration.
+        let frame = |[a, b, c, d, e, f]: [f64; 6]| {
+            [
+                a * MM_PER_PT,
+                -b * MM_PER_PT,
+                c * MM_PER_PT,
+                -d * MM_PER_PT,
+                (e - box_[0]) * MM_PER_PT,
+                (box_[3] - f) * MM_PER_PT,
+            ]
+        };
+        let inverse = crate::inverse_matrix(frame(previous)).ok_or_else(|| {
+            OfdError::Invalid("PDF path has a singular construction transform".into())
+        })?;
+        let matrix = crate::multiply_matrix(frame(next), inverse);
+        self.commands = affine_path_commands(&self.commands, matrix)?;
+        let transform = |(x, y): (f64, f64)| {
+            (
+                matrix[0] * x + matrix[2] * y + matrix[4],
+                matrix[1] * x + matrix[3] * y + matrix[5],
+            )
+        };
+        self.current = self.current.map(transform);
+        self.start = self.start.map(transform);
+        Ok(())
+    }
+
     fn move_to(&mut self, point: (f64, f64)) {
         self.commands
             .push_str(&format!(" M {} {}", point.0, point.1));
@@ -1018,13 +1055,21 @@ fn paint(
             .then_some((state.stroke_alpha * 255.0).round() as u8),
         ..PathStyle::default()
     };
+    let mut object_matrix = None;
     if mode.stroke {
         let scale = if state.line_width == 0.0 && state.dash_pattern.is_none() {
             // Undashed device hairlines have no physical width to scale; their
             // already-transformed geometry remains valid under skew or unequal scales.
             MM_PER_PT
+        } else if let Ok(scale) = state.stroke_scale() {
+            scale * MM_PER_PT
         } else {
-            state.stroke_scale()? * MM_PER_PT
+            // Geometry is already in page millimeters. Move it back into the
+            // pen's local frame so the complete affine transform also acts on
+            // widths, caps, joins and dash lengths.
+            let [a, b, c, d, _, _] = state.ctm;
+            object_matrix = Some([a, -b, -c, d, 0., 0.]);
+            MM_PER_PT
         };
         style.line_width = state.line_width * scale;
         style.cap = Some(state.line_cap);
@@ -1040,6 +1085,14 @@ fn paint(
             .map(|_| state.dash_phase * scale);
     }
     let commands = std::mem::take(&mut path.commands);
+    let commands = if let Some(matrix) = object_matrix {
+        let inverse = crate::inverse_matrix(matrix).ok_or_else(|| {
+            OfdError::Invalid("PDF stroke has a singular affine transform".into())
+        })?;
+        affine_path_commands(&commands, inverse)?
+    } else {
+        commands
+    };
     path.current = None;
     path.start = None;
     if !visible || (!mode.fill && !mode.stroke) {
@@ -1056,10 +1109,54 @@ fn paint(
         ],
         style,
     )?;
+    if let Some(matrix) = object_matrix {
+        output.set_page_object_ctm(page_index, &id, Some(matrix))?;
+    }
     tiling_pattern::attach(output, page, &id, state, mode.fill, mode.stroke)?;
     attach_blend_mode(output, page_index, &id, state.blend_mode)?;
     attach_clips(output, page_index, &id, "PathObject", &state.clips)?;
     Ok(())
+}
+
+fn affine_path_commands(commands: &str, matrix: [f64; 6]) -> Result<String, OfdError> {
+    let mut tokens = commands.split_whitespace();
+    let mut output = String::with_capacity(commands.len());
+    while let Some(command) = tokens.next() {
+        let pairs = match command {
+            "M" | "L" => 1,
+            "B" => 3,
+            "C" => 0,
+            _ => {
+                return Err(OfdError::Invalid(
+                    "invalid imported PDF path command".into(),
+                ))
+            }
+        };
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(command);
+        for _ in 0..pairs {
+            let mut number = || {
+                tokens
+                    .next()
+                    .ok_or_else(|| OfdError::Invalid("incomplete imported PDF path".into()))?
+                    .parse::<f64>()
+                    .map_err(|e| OfdError::Invalid(e.to_string()))
+            };
+            let x = number()?;
+            let y = number()?;
+            let [a, b, c, d, e, f] = matrix;
+            let transformed = [a * x + c * y + e, b * x + d * y + f];
+            if transformed.iter().any(|value| !value.is_finite()) {
+                return Err(OfdError::Invalid(
+                    "PDF affine stroke geometry is not finite".into(),
+                ));
+            }
+            output.push_str(&format!(" {} {}", transformed[0], transformed[1]));
+        }
+    }
+    Ok(output)
 }
 
 fn attach_blend_mode(
@@ -8179,6 +8276,7 @@ fn import_content(
                 let (graphics, saved_text) = stack
                     .pop()
                     .ok_or_else(|| OfdError::Invalid("unbalanced PDF graphics state".into()))?;
+                path.change_ctm(state.ctm, graphics.ctm, page_context.box_)?;
                 state = graphics;
                 text = saved_text;
             }
@@ -8189,11 +8287,13 @@ fn import_content(
                     ));
                 }
                 values = numbers(&operation, 6)?;
+                let previous = state.ctm;
                 state.concat(
                     values
                         .try_into()
                         .map_err(|_| OfdError::Invalid("invalid PDF matrix".into()))?,
                 );
+                path.change_ctm(previous, state.ctm, page_context.box_)?;
             }
             "w" => {
                 state.line_width = numbers(&operation, 1)?[0];
@@ -20137,7 +20237,7 @@ mod tests {
             b"0 0 10 10 v S".as_slice(),
             b"2 0 0 rg 10 20 5 5 re f".as_slice(),
             b"-1 w 10 20 m 30 40 l S".as_slice(),
-            b"2 0 0 1 0 0 cm 10 20 m 30 40 l S".as_slice(),
+            b"0 0 0 1 0 0 cm 10 20 m 30 40 l S".as_slice(),
         ] {
             assert!(OfdDocument::from_pdf_bytes(&vector_pdf(stream)).is_err());
         }
