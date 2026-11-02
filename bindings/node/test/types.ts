@@ -521,6 +521,15 @@ function exerciseCanvas(document: Document): void {
   ]);
   // @ts-expect-error Image commands require one encoding, never both.
   document.drawCanvas(0, [0, 0, 40, 30], [{type: 'draw_image', data: Buffer.alloc(1), data_base64: '', format: 'png', rect: [0, 0, 1, 1]}]);
+  const canvasMetrics = document.measureCanvasText(0, 'Canvas', {size: 4, align: 'center', read_direction: 90});
+  const canvasWidth: number = canvasMetrics.width;
+  void canvasWidth;
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_font', font: {size: 4, weight: 700}},
+    {type: 'fill_text', text: '', point: [2, 8]},
+  ]);
+  // @ts-expect-error Canvas directions are quarter turns.
+  document.measureCanvasText(0, 'Canvas', {char_direction: 45});
   const ids: string[] = document.drawCanvas(0, [0, 0, 40, 30], [
     {type: 'set_line_width', width: 0},
     {type: 'rect', rect: [1, 2, 12, 8]},

@@ -355,3 +355,26 @@ with Document.new() as document:
     ])
     document.save("canvas-images.ofd")
 ```
+
+### Canvas text (unreleased)
+
+`set_font` configures size, tracking, weight, italic, alignment and quarter-turn
+reading/character directions. Omitted fields use SimSun, 1 mm, weight 400 and
+start alignment. `measure_canvas_text` returns logical width, first glyph offset
+and signed advances without modifying the document. These metrics exclude
+kerning and shaping. Embedded fonts provide reproducible measurements.
+
+```python
+from ofdrw_rs import Document
+
+font = {"size": 4, "align": "center"}
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    metrics = document.measure_canvas_text(0, "Canvas", font)
+    document.draw_canvas(0, (0, 0, 40, 30), [
+        {"type": "set_font", "font": font},
+        {"type": "fill_text", "text": "Canvas", "point": [20, 10]},
+    ])
+    document.save("canvas-text.ofd")
+    print(metrics["width"])
+```

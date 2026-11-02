@@ -137,3 +137,64 @@ test('canvas rejects invalid image bytes and conflicting encodings before changi
     }
   } finally {doc.close();}
 });
+
+const textRoot = path.join(root, '..', 'canvas-text-java');
+const textRequests = JSON.parse(fs.readFileSync(path.join(textRoot, 'requests.json')));
+
+test('canvas text measurement and painting match all sixteen Java direction combinations', () => {
+  const doc = Document.create();
+  const java = Document.open(path.join(textRoot, 'directions.ofd'));
+  try {
+    doc.addBlankPage(90, 90);
+    doc.setPageArea(0, {physical_box: [0, 0, 90, 90], application_box: [0, 0, 90, 90]});
+    const fontId = doc.addEmbeddedFont('CanvasTest', fs.readFileSync(path.join(textRoot, '..', 'dejavu-sans.ttf')));
+    const before = doc.toBytes();
+    const commands = [{type: 'translate', offset: [1, 1]}, {type: 'set_global_alpha', alpha: 0.5}];
+    for (const entry of textRequests.cases) {
+      const font = Object.freeze({...entry.font, font_id: fontId});
+      assert.deepEqual(doc.measureCanvasText(0, textRequests.text, font), entry.metrics);
+      commands.push({type: 'set_font', font}, {type: 'fill_text', text: textRequests.text, point: entry.point});
+    }
+    const controls = JSON.parse(fs.readFileSync(path.join(textRoot, 'controls.json')));
+    for (const entry of controls.cases) {
+      const text = `A${String.fromCodePoint(entry.code)}B`;
+      assert.deepEqual(doc.measureCanvasText(0, text, {font_id: fontId, size: 4}), entry.metrics);
+    }
+    assert.deepEqual(doc.toBytes(), before);
+    const snapshot = structuredClone(commands);
+    const ids = doc.drawCanvas(0, textRequests.boundary, commands);
+    assert.deepEqual(commands, snapshot);
+    assert.equal(ids.length, 16);
+    assert.deepEqual(doc.pageTextObjects(0).map(item => item.id), ids);
+    for (const dpi of [25.4, 101.6]) assert.deepEqual(doc.pagePng(0, dpi), java.pagePng(0, dpi));
+    const reopened = Document.fromBytes(doc.toBytes());
+    try {
+      assert.deepEqual(reopened.validateReferences(), []);
+      assert.deepEqual(reopened.pagePng(0, 101.6), doc.pagePng(0, 101.6));
+    } finally {reopened.close();}
+  } finally {doc.close(); java.close();}
+});
+
+test('canvas text defaults, empty text and invalid settings preserve document state', () => {
+  const doc = Document.create();
+  try {
+    doc.addBlankPage(40, 30);
+    const before = doc.toBytes();
+    assert.deepEqual(doc.measureCanvasText(0, ''), {width: 0, first_offset: [0, 0], offsets: []});
+    assert.ok(doc.measureCanvasText(0, 'x').width > 0);
+    assert.deepEqual(doc.drawCanvas(0, [0, 0, 40, 30], [{type: 'fill_text', text: '', point: [0, 0]}]), []);
+    assert.deepEqual(doc.toBytes(), before);
+    for (const font of [{size: 0}, {size: NaN}, {weight: 450}, {align: 'bad'}, {read_direction: 1}, {extra: 1}, {font_id: '99999'}]) {
+      assert.throws(() => doc.measureCanvasText(0, 'text', font));
+      assert.throws(() => doc.drawCanvas(0, [0, 0, 40, 30], [
+        {type: 'fill_text', text: 'first', point: [1, 5]},
+        {type: 'set_font', font}, {type: 'fill_text', text: 'last', point: [1, 10]},
+      ]));
+      assert.deepEqual(doc.toBytes(), before);
+    }
+    assert.throws(() => doc.measureCanvasText(-1, 'text'), RangeError);
+    assert.throws(() => doc.measureCanvasText(0, 1), TypeError);
+    assert.throws(() => doc.measureCanvasText(0, 'text', []), TypeError);
+  } finally {doc.close();}
+  assert.throws(() => doc.measureCanvasText(0, 'text'));
+});

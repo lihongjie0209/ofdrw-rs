@@ -414,3 +414,40 @@ func main() {
     if err := document.Save("canvas-images.ofd"); err != nil { log.Fatal(err) }
 }
 ```
+
+### Canvas text (unreleased)
+
+CanvasFont configures size, tracking, weight, italic, alignment and quarter-turn
+reading/character directions. Nil numeric fields use native defaults: SimSun,
+1 mm, weight 400, zero tracking/directions and start alignment. Explicit zero
+size is rejected. CanvasCommand.Text is a string pointer so empty text remains
+an explicit no-op. MeasureCanvasText returns logical metrics without changing
+the document; metrics exclude kerning and shaping. Embed a font for reproducibility.
+
+```go
+package main
+
+import (
+    "log"
+    "github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw"
+)
+
+func main() {
+    document, err := ofdrw.New()
+    if err != nil { log.Fatal(err) }
+    defer document.Close()
+    if err := document.AddBlankPage(40, 30); err != nil { log.Fatal(err) }
+    size := 4.0
+    text := "Canvas"
+    font := ofdrw.CanvasFont{Size: &size, Align: "center"}
+    metrics, err := document.MeasureCanvasText(0, text, font)
+    if err != nil { log.Fatal(err) }
+    _, err = document.DrawCanvas(0, [4]float64{0, 0, 40, 30}, []ofdrw.CanvasCommand{
+        {Type: "set_font", Font: &font},
+        {Type: "fill_text", Text: &text, Point: &[2]float64{20, 10}},
+    })
+    if err != nil { log.Fatal(err) }
+    if err := document.Save("canvas-text.ofd"); err != nil { log.Fatal(err) }
+    log.Println(metrics.Width)
+}
+```

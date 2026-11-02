@@ -709,3 +709,27 @@ try {
   document.save('canvas-images.ofd');
 } finally {document.close();}
 ```
+
+### Canvas text (unreleased)
+
+`set_font` accepts CanvasFont settings for size, tracking, weight, italic,
+alignment and quarter-turn reading/character directions. Defaults are SimSun,
+1 mm, weight 400 and start alignment. `measureCanvasText` returns logical width,
+first glyph offset and signed advances without changing the document. Metrics
+exclude kerning and shaping; embed a font for reproducible measurements.
+
+```js
+const {Document} = require('ofdrw-rs');
+const document = Document.create();
+const font = {size: 4, align: 'center'};
+try {
+  document.addBlankPage(40, 30);
+  const metrics = document.measureCanvasText(0, 'Canvas', font);
+  document.drawCanvas(0, [0, 0, 40, 30], [
+    {type: 'set_font', font},
+    {type: 'fill_text', text: 'Canvas', point: [20, 10]},
+  ]);
+  document.save('canvas-text.ofd');
+  console.log(metrics.width);
+} finally {document.close();}
+```

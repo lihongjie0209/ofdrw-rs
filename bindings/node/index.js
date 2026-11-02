@@ -308,6 +308,7 @@ const api = {
   addFlowedSpans: library.func('int ofd_add_flowed_spans_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   addFlowBlocks: library.func('int ofd_add_flow_blocks_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   drawCanvas: library.func('int ofd_draw_canvas_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
+  measureCanvasText: library.func('int ofd_measure_canvas_text_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
   addFixedContainers: library.func('int ofd_add_fixed_containers_json(OfdDocument handle, size_t page_index, str layout, _Out_ OfdBuffer *output)'),
   addFlowContainers: library.func('int ofd_add_flow_containers_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addTextBoxes: library.func('int ofd_add_text_boxes_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
@@ -390,6 +391,15 @@ function utf8(value, name) {
 function textValue(value) {
   if (typeof value !== 'string') throw new TypeError('text must be a string');
   return value;
+}
+
+function canvasJson(value) {
+  return JSON.stringify(value, (_key, item) => {
+    if (typeof item === 'number' && !Number.isFinite(item)) {
+      throw new RangeError('canvas numbers must be finite');
+    }
+    return item;
+  });
 }
 
 function bytes(value) {
@@ -1671,6 +1681,11 @@ class Document {
     return this._json(api.measureFlowedSpans, index(documentIndex, 'documentIndex'), JSON.stringify(request));
   }
 
+  measureCanvasText(pageIndex, text, font = {}) {
+    const payload = canvasJson({text: textValue(text), font: optionsObject(font)});
+    return this._json(api.measureCanvasText, index(pageIndex, 'pageIndex'), payload);
+  }
+
   drawCanvas(pageIndex, box, commands) {
     if (!Array.isArray(commands)) throw new TypeError('commands must be an array');
     const encodedCommands = commands.map(command => {
@@ -1684,12 +1699,7 @@ class Document {
       }
       return command;
     });
-    const payload = JSON.stringify({boundary: boundary(box), commands: encodedCommands}, (_key, value) => {
-      if (typeof value === 'number' && !Number.isFinite(value)) {
-        throw new RangeError('canvas numbers must be finite');
-      }
-      return value;
-    });
+    const payload = canvasJson({boundary: boundary(box), commands: encodedCommands});
     return this._json(api.drawCanvas, index(pageIndex, 'pageIndex'), payload);
   }
 

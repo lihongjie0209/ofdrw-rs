@@ -1084,6 +1084,7 @@ export class Document {
   measureFlowedSpans(documentIndex: number, spans: FlowSpan[], contentWidth: number, options?: FlowTextOptions): FlowTextMetrics;
   /** Draw absolute mixed containers on an existing page; never adds pages. */
   drawCanvas(pageIndex: number, boundary: [number, number, number, number], commands: readonly CanvasCommand[]): string[];
+  measureCanvasText(pageIndex: number, text: string, font?: CanvasFont): CanvasTextMetrics;
   addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];
   addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;
   addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
@@ -1175,11 +1176,20 @@ export interface TextBox { layout: LayoutBox; spans: FlowSpan[]; style?: FlowTex
 /** Mixed children with measured height, nested floating rows and repeated table headers. */
 /** Absolute allocation position and mixed content; positive heights are retained. */
 /** Atomic vector drawing commands; coordinates are mm and angles are degrees. */
+export interface CanvasFont {
+  font_id?: string; size?: number; letter_spacing?: number; weight?: number; italic?: boolean;
+  read_direction?: 0 | 90 | 180 | 270; char_direction?: 0 | 90 | 180 | 270;
+  align?: 'start' | 'end' | 'left' | 'right' | 'center';
+}
+export interface CanvasTextMetrics { width: number; first_offset: [number, number]; offsets: number[] }
+
 export type CanvasImageData =
   | {data: Buffer | Uint8Array; data_base64?: never}
   | {data_base64: string; data?: never};
 
 export type CanvasCommand =
+  | {type: 'set_font'; font: CanvasFont}
+  | {type: 'fill_text'; text: string; point: [number, number]}
   | (CanvasImageData & {type: 'draw_image'; format: string; rect: [number, number, number, number]})
   | (CanvasImageData & {type: 'draw_image_at'; format: string; point: [number, number]; pixels_per_mm?: number})
   | (CanvasImageData & {type: 'draw_image_region'; format: string; source: [number, number, number, number];

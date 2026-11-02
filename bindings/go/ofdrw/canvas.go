@@ -15,6 +15,8 @@ import (
 // Image commands encode Data as base64. A nil PixelsPerMM uses Java's 3.78 default.
 type CanvasCommand struct {
 	Type        string          `json:"type"`
+	Font        *CanvasFont     `json:"font,omitempty"`
+	Text        *string         `json:"text,omitempty"`
 	Data        []byte          `json:"data_base64,omitempty"`
 	Format      string          `json:"format,omitempty"`
 	Source      *[4]float64     `json:"source,omitempty"`
@@ -89,4 +91,70 @@ func (doc *Document) DrawCanvas(pageIndex int, boundary [4]float64, commands []C
 		return nil, fmt.Errorf("decode canvas result: %w", err)
 	}
 	return ids, nil
+}
+
+// CanvasFont configures unshaped canvas text. Nil fields use native defaults:
+// SimSun, 1 mm, weight 400, zero tracking/directions, and start alignment.
+// Pointers preserve explicit zero values for native validation.
+type CanvasFont struct {
+	FontID        string   `json:"font_id,omitempty"`
+	Size          *float64 `json:"size,omitempty"`
+	LetterSpacing *float64 `json:"letter_spacing,omitempty"`
+	Weight        *uint16  `json:"weight,omitempty"`
+	Italic        bool     `json:"italic,omitempty"`
+	ReadDirection *uint16  `json:"read_direction,omitempty"`
+	CharDirection *uint16  `json:"char_direction,omitempty"`
+	Align         string   `json:"align,omitempty"`
+}
+
+// CanvasTextMetrics contains logical width, first glyph offset, and signed
+// increments along the reading axis. It excludes kerning and glyph ink bounds.
+type CanvasTextMetrics struct {
+	Width       float64    `json:"width"`
+	FirstOffset [2]float64 `json:"first_offset"`
+	Offsets     []float64  `json:"offsets"`
+}
+
+// MeasureCanvasText measures without modifying pages or allocating fonts.
+func (doc *Document) MeasureCanvasText(pageIndex int, text string, font CanvasFont) (CanvasTextMetrics, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return CanvasTextMetrics{}, err
+	}
+	if pageIndex < 0 {
+		return CanvasTextMetrics{}, errors.New("negative page index")
+	}
+	payload, err := json.Marshal(struct {
+		Text string     `json:"text"`
+		Font CanvasFont `json:"font"`
+	}{Text: text, Font: font})
+	if err != nil {
+		return CanvasTextMetrics{}, fmt.Errorf("encode canvas text measurement: %w", err)
+	}
+	request, err := cString(string(payload))
+	if err != nil {
+		return CanvasTextMetrics{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.measureCanvasText(
+		doc.handle,
+		uintptr(pageIndex),
+		&request[0],
+		&buffer,
+	)); err != nil {
+		return CanvasTextMetrics{}, fmt.Errorf("measure canvas text: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return CanvasTextMetrics{}, err
+	}
+	var metrics CanvasTextMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return CanvasTextMetrics{}, fmt.Errorf("decode canvas text measurement: %w", err)
+	}
+	return metrics, nil
 }

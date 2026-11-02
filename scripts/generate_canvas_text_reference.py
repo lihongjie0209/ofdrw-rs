@@ -56,6 +56,17 @@ public class CanvasTextReference {
 '''
 
 
+def requests(reference):
+    cases=[]
+    for case in reference['cases']:
+        rd,cd=case['read_direction'],case['char_direction']
+        cases.append({'font': {'size':4,'letter_spacing':0.25,'read_direction':rd,'char_direction':cd,
+            'align':case['align'],'weight':700 if cd==90 else 400,'italic':rd==270},
+            'point':[12+cd//90*20,12+rd//90*20],
+            'metrics':{key:case[key] for key in ['width','first_offset','offsets']}})
+    return {'boundary':[4,3,80,80],'text':'WiA','cases':cases}
+
+
 def main():
     revision=subprocess.check_output(['git','-C',str(JAVA),'rev-parse','HEAD'],text=True).strip()
     if revision != PIN:
@@ -78,6 +89,7 @@ def main():
         (destination/'directions.ofd').write_bytes((root/'directions.ofd').read_bytes())
         data={'java_revision':PIN,'text':'WiA','cases':json.loads((root/'metrics.json').read_text()),'number_format':json.loads((root/'format.json').read_text())}
         (destination/'reference.json').write_text(json.dumps(data,indent=2)+'\n')
+        (destination/'requests.json').write_text(json.dumps(requests(data),indent=2)+'\n')
 
 
 if __name__=='__main__':

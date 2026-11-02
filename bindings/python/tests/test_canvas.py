@@ -127,3 +127,69 @@ def test_canvas_image_rejects_invalid_bytes_and_conflicting_encodings_atomically
             with pytest.raises((TypeError, ValueError, OfdError)):
                 doc.draw_canvas(0, (0, 0, 40, 30), [valid, bad])
             assert doc.to_bytes() == before
+
+
+TEXT_ROOT = ROOT.parent / "canvas-text-java"
+TEXT_REQUESTS = json.loads((TEXT_ROOT / "requests.json").read_text())
+
+
+def test_canvas_text_metrics_and_drawing_match_all_java_directions():
+    with Document.new() as doc, Document.open(TEXT_ROOT / "directions.ofd") as java:
+        doc.add_blank_page(90, 90)
+        doc.set_page_area(0, (0, 0, 90, 90), application_box=(0, 0, 90, 90))
+        font_id = doc.add_embedded_font("CanvasTest", (TEXT_ROOT.parent / "dejavu-sans.ttf").read_bytes())
+        before = doc.to_bytes()
+        commands = [{"type": "translate", "offset": [1, 1]}, {"type": "set_global_alpha", "alpha": 0.5}]
+        for case in TEXT_REQUESTS["cases"]:
+            font = {**case["font"], "font_id": font_id}
+            snapshot = copy.deepcopy(font)
+            assert doc.measure_canvas_text(0, TEXT_REQUESTS["text"], font) == case["metrics"]
+            assert font == snapshot
+            commands.extend([
+                {"type": "set_font", "font": font},
+                {"type": "fill_text", "text": TEXT_REQUESTS["text"], "point": case["point"]},
+            ])
+        controls = json.loads((TEXT_ROOT / "controls.json").read_text())
+        for case in controls["cases"]:
+            text = "A" + chr(case["code"]) + "B"
+            assert doc.measure_canvas_text(0, text, {"font_id": font_id, "size": 4}) == case["metrics"]
+        assert doc.to_bytes() == before
+        snapshot = copy.deepcopy(commands)
+        ids = doc.draw_canvas(0, TEXT_REQUESTS["boundary"], commands)
+        assert commands == snapshot
+        assert len(ids) == 16
+        assert [item["id"] for item in doc.page_text_objects(0)] == ids
+        for dpi in (25.4, 101.6):
+            assert doc.page_png(0, dpi) == java.page_png(0, dpi)
+        with Document.from_bytes(doc.to_bytes()) as reopened:
+            assert reopened.validate_references() == []
+            assert reopened.page_png(0, 101.6) == doc.page_png(0, 101.6)
+
+
+def test_canvas_text_defaults_empty_input_invalid_settings_and_closed_document():
+    with Document.new() as doc:
+        doc.add_blank_page(40, 30)
+        before = doc.to_bytes()
+        assert doc.measure_canvas_text(0, "") == {"width": 0, "first_offset": [0, 0], "offsets": []}
+        assert doc.measure_canvas_text(0, "x")["width"] > 0
+        assert doc.draw_canvas(0, (0, 0, 40, 30), [{"type": "fill_text", "text": "", "point": [0, 0]}]) == []
+        assert doc.to_bytes() == before
+        for font in [{"size": 0}, {"size": float("nan")}, {"weight": 450}, {"align": "bad"},
+                     {"read_direction": 1}, {"extra": 1}, {"font_id": "99999"}]:
+            with pytest.raises((OfdError, ValueError)):
+                doc.measure_canvas_text(0, "text", font)
+            with pytest.raises((OfdError, ValueError)):
+                doc.draw_canvas(0, (0, 0, 40, 30), [
+                    {"type": "fill_text", "text": "first", "point": [1, 5]},
+                    {"type": "set_font", "font": font},
+                    {"type": "fill_text", "text": "last", "point": [1, 10]},
+                ])
+            assert doc.to_bytes() == before
+        with pytest.raises(IndexError):
+            doc.measure_canvas_text(-1, "text")
+        with pytest.raises(TypeError):
+            doc.measure_canvas_text(0, 1)
+        with pytest.raises(TypeError):
+            doc.measure_canvas_text(0, "text", [])
+    with pytest.raises(OfdError):
+        doc.measure_canvas_text(0, "text")

@@ -1,5 +1,5 @@
 use super::*;
-use ofdrw::CanvasCommand;
+use ofdrw::{CanvasCommand, CanvasFont, CanvasTextAlign};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -8,10 +8,83 @@ struct Request {
     commands: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FontInput {
+    font_id: Option<String>,
+    size: f64,
+    letter_spacing: f64,
+    weight: u16,
+    italic: bool,
+    read_direction: u16,
+    char_direction: u16,
+    align: String,
+}
+
+impl Default for FontInput {
+    fn default() -> Self {
+        Self {
+            font_id: None,
+            size: 1.,
+            letter_spacing: 0.,
+            weight: 400,
+            italic: false,
+            read_direction: 0,
+            char_direction: 0,
+            align: "start".into(),
+        }
+    }
+}
+
+impl FontInput {
+    fn into_core(self) -> Result<CanvasFont, String> {
+        Ok(CanvasFont {
+            font_id: self.font_id,
+            size: self.size,
+            letter_spacing: self.letter_spacing,
+            weight: self.weight,
+            italic: self.italic,
+            read_direction: self.read_direction,
+            char_direction: self.char_direction,
+            align: match self.align.as_str() {
+                "start" => CanvasTextAlign::Start,
+                "end" => CanvasTextAlign::End,
+                "left" => CanvasTextAlign::Left,
+                "right" => CanvasTextAlign::Right,
+                "center" => CanvasTextAlign::Center,
+                _ => return Err("unknown canvas text alignment".into()),
+            },
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeasureRequest {
+    text: String,
+    #[serde(default)]
+    font: FontInput,
+}
+
+pub(super) fn parse_measure(source: &str) -> Result<(String, CanvasFont), String> {
+    if source.len() > 16 * 1024 * 1024 {
+        return Err("canvas JSON exceeds 16 MiB".into());
+    }
+    let request: MeasureRequest = serde_json::from_str(source).map_err(|e| e.to_string())?;
+    Ok((request.text, request.font.into_core()?))
+}
+
 // Empty struct variants reject stray fields on commands without arguments.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
+    SetFont {
+        font: FontInput,
+    },
+    FillText {
+        text: String,
+        point: [f64; 2],
+    },
     DrawImage {
         data_base64: String,
         format: String,
@@ -119,6 +192,10 @@ enum Command {
 impl Command {
     fn into_core(self) -> Result<CanvasCommand, String> {
         Ok(match self {
+            Self::SetFont { font } => CanvasCommand::SetFont {
+                font: font.into_core()?,
+            },
+            Self::FillText { text, point } => CanvasCommand::FillText { text, point },
             Self::DrawImage {
                 data_base64,
                 format,
@@ -265,6 +342,145 @@ mod tests {
                 .unwrap();
         unsafe { ofd_buffer_free(buffer) };
         Ok(result)
+    }
+
+    fn measure(
+        handle: *mut OfdDocument,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, i32> {
+        let input = CString::new(value.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        let status =
+            unsafe { ofd_measure_canvas_text_json(handle, 0, input.as_ptr(), &mut output) };
+        if status != 0 {
+            return Err(status);
+        }
+        let result =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(output.data, output.len) })
+                .unwrap();
+        unsafe { ofd_buffer_free(output) };
+        Ok(result)
+    }
+
+    #[test]
+    fn ffi_canvas_text_matches_all_java_metrics_and_reference_pixels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ofdrw/tests/fixtures/canvas-text-java");
+        let requests: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("requests.json")).unwrap()).unwrap();
+        let java = OfdDocument::open(root.join("directions.ofd")).unwrap();
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(90., 90.).unwrap();
+        let area = java.pages().unwrap().remove(0);
+        doc.set_page_area(
+            0,
+            PageArea {
+                physical_box: area.physical_box.unwrap(),
+                application_box: area.application_box,
+                content_box: area.content_box,
+                bleed_box: area.bleed_box,
+            },
+        )
+        .unwrap();
+        let font_id = doc
+            .add_embedded_font(
+                "CanvasTest",
+                include_bytes!("../../ofdrw/tests/fixtures/dejavu-sans.ttf"),
+            )
+            .unwrap()
+            .to_string();
+        let before = doc.to_bytes().unwrap();
+        let handle = register_document(doc).unwrap();
+        let mut commands = vec![
+            json!({"type":"translate","offset":[1,1]}),
+            json!({"type":"set_global_alpha","alpha":0.5}),
+        ];
+        for case in requests["cases"].as_array().unwrap() {
+            let mut font = case["font"].clone();
+            font["font_id"] = json!(font_id);
+            let actual = measure(handle, &json!({"text":requests["text"],"font":font})).unwrap();
+            assert_eq!(actual, case["metrics"]);
+            commands.push(json!({"type":"set_font","font":font}));
+            commands
+                .push(json!({"type":"fill_text","text":requests["text"],"point":case["point"]}));
+        }
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        let controls: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("controls.json")).unwrap()).unwrap();
+        for case in controls["cases"].as_array().unwrap() {
+            let text = format!(
+                "A{}B",
+                char::from_u32(case["code"].as_u64().unwrap() as u32).unwrap()
+            );
+            let actual = measure(
+                handle,
+                &json!({"text":text,"font":{"font_id":font_id,"size":4}}),
+            )
+            .unwrap();
+            assert_eq!(actual, case["metrics"]);
+        }
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        let ids = call(
+            handle,
+            &json!({"boundary":requests["boundary"],"commands":commands}),
+        )
+        .unwrap();
+        assert_eq!(ids.len(), 16);
+        let doc = unsafe { document_ref(handle).unwrap() };
+        for dpi in [25.4, 101.6] {
+            assert_eq!(
+                doc.page_png(0, dpi).unwrap(),
+                java.page_png(0, dpi).unwrap()
+            );
+        }
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_canvas_text_rejects_invalid_settings_without_mutation() {
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(40., 30.).unwrap();
+        let before = doc.to_bytes().unwrap();
+        let handle = register_document(doc).unwrap();
+        for font in [
+            json!({"size":0}),
+            json!({"weight":450}),
+            json!({"align":"unknown"}),
+            json!({"read_direction":1}),
+            json!({"extra":1}),
+        ] {
+            assert!(measure(handle, &json!({"text":"text","font":font})).is_err());
+            assert!(call(handle,&json!({"boundary":[0,0,40,30],"commands":[
+                {"type":"fill_text","text":"first","point":[1,5]},
+                {"type":"set_font","font":font},{"type":"fill_text","text":"last","point":[1,10]}
+            ]})).is_err());
+            assert_eq!(
+                unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+                before
+            );
+        }
+        assert!(measure(handle, &json!({"text":"x","extra":1})).is_err());
+        let defaults = measure(handle, &json!({"text":""})).unwrap();
+        assert_eq!(defaults["width"], json!(0.0));
+        assert_eq!(defaults["offsets"], json!([]));
+        assert_ne!(
+            unsafe { ofd_measure_canvas_text_json(handle, 0, ptr::null(), ptr::null_mut()) },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        unsafe { ofd_close(handle) };
     }
 
     #[test]

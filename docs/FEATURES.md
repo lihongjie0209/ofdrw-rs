@@ -790,11 +790,20 @@ Rust 核心的 `SetFont { font: CanvasFont }`、`FillText { text, point }`
 缺省选择 SimSun/宋体；若未定义，则仅在实际绘制时原子补建资源。
 空串和仅含 Java trim 范围空白（U+0000..U+0020）的字符串不绘制。
 文字坐标、字号、字距的 OFD 数值序列化与 Java STBase 的精度规则一致；
-测量保留完整精度。未嵌入字体依赖本机字体回退，嵌入字体可用于稳定对比。
+测量保留完整精度。制表符、换行与回车使用零字宽，与 Java AWT 一致；
+33 组独立 Java 控制字符测量值由 `scripts/generate_canvas_text_controls_reference.py` 生成。
+未嵌入字体依赖本机字体回退，嵌入字体可用于稳定对比。
 `scripts/generate_canvas_text_reference.py` 生成独立 Java 测量值和 OFD，覆盖
 16 种方向组合、对齐、粗斜体、CTM 和透明度。Rust 保存/恢复保留字距，
 不复制 Java FontSetting.clone 遗漏字距的缺陷；补充平面 Unicode 按标量处理，
-不复制 Java 按两个 UTF-16 代理项计算字距的行为。此文字 API 尚待接入 C/Python/Go/Node.js。
+不复制 Java 按两个 UTF-16 代理项计算字距的行为。C 使用 `ofd_measure_canvas_text_json` 测量，请求为 `{"text":"...","font":{...}}`；
+返回 `width`、`first_offset:[x,y]` 与阅读轴上的有符号 `offsets`。绘制命令为
+`set_font`（`font` 对象）和 `fill_text`（`text`、`point:[x,y]`）。Python 使用
+`measure_canvas_text`，Node.js 使用 `measureCanvasText`，Go 使用
+`MeasureCanvasText`、`CanvasFont` 与 `CanvasTextMetrics`。Go 的 `CanvasCommand.Text`
+是字符串指针，可保留显式空串；`CanvasFont` 的数值指针保留显式零值供原生层校验。
+省略字体设置时使用核心默认值；未知字段、未知对齐和非法方向被拒绝。
+测量请求最多 16 MiB，解码后的文字最多 1 MB。三个语言接口均不修改调用者的字体配置。
 
 Canvas CSS 字体/颜色解析、measureTextArea 字符包围盒与独立像素单位助手仍待实现。
 复杂变换裁剪的 Java 像素一致性尚未证明；
