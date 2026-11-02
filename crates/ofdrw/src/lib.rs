@@ -3140,6 +3140,7 @@ pub struct DrawParamStyle {
     pub miter_limit: Option<f64>,
     pub dash_pattern: Option<[f64; 2]>,
     pub dash_sequence: Option<Vec<f64>>,
+    /// Finite dash phase in millimeters; negative phases are accepted.
     pub dash_offset: Option<f64>,
     pub fill: Option<SolidPaintStyle>,
     pub stroke: Option<SolidPaintStyle>,
@@ -3173,13 +3174,15 @@ impl DrawParamStyle {
         for (name, value, allow_zero) in [
             ("LineWidth", self.line_width, true),
             ("MiterLimit", self.miter_limit, false),
-            ("DashOffset", self.dash_offset, true),
         ] {
             if value.is_some_and(|value| {
                 !value.is_finite() || value < 0.0 || !allow_zero && value == 0.0
             }) {
                 return Err(OfdError::Invalid(format!("invalid DrawParam {name}")));
             }
+        }
+        if self.dash_offset.is_some_and(|value| !value.is_finite()) {
+            return Err(OfdError::Invalid("invalid DrawParam DashOffset".into()));
         }
         if self.dash_pattern.is_some_and(|values| {
             values
