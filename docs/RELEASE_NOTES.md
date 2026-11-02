@@ -1,14 +1,16 @@
 # v0.5.0
 
-Distribution becomes available after the release workflow completes. The previous
-v0.4.0 release and its tags remain immutable.
+Released to crates.io, PyPI and npm, with matching Go module tags and six-platform
+native archives. The release workflow passed registry installation and consumer
+checks: [release workflow](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41396012939).
+The previous v0.4.0 release and its tags remain immutable.
 
 ## Upgrade notes
 
 Use matching 0.5.0 bindings and native libraries. C ABI major version remains 1;
 three additive JSON exports bring the total to 335: protected content-range box
 pagination, atomic canvas drawing, and read-only canvas text measurement.
-Python wheels and the npm tarball bundle matching native libraries. Go will use
+Python wheels and the npm tarball bundle matching native libraries. Go uses
 `bindings/go/v0.5.0` with the corresponding native release ZIP.
 
 Paths without an explicit or inherited line width now use the OFD default of
@@ -16,10 +18,10 @@ Paths without an explicit or inherited line width now use the OFD default of
 hairline; Go callers use `PathStyle{Hairline: true}` to preserve an explicit zero
 through helpers whose default width is 0.4 mm. Positive widths retain their value.
 
-The candidate requires unpublished renderer forks `ofdrw-resvg`
-0.45.1-ofdrw.2 and 0.48.1-ofdrw.2, followed by `ofdrw-svg2pdf`
-0.13.0-ofdrw.3. Publish these from the verified main commit before publishing
-the 0.5.0 core. Existing package versions and release tags remain immutable.
+This release uses the published renderer forks `ofdrw-resvg`
+0.45.1-ofdrw.2 and 0.48.1-ofdrw.2, and `ofdrw-svg2pdf`
+0.13.0-ofdrw.3, all published from the same verified source commit.
+Existing package versions and release tags remain immutable.
 
 ## Changes since v0.4.0
 
