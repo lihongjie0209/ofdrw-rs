@@ -15,6 +15,7 @@ pub enum CanvasTextAlign {
 ///
 /// A missing font ID selects SimSun/宋体, adding a named resource when needed.
 /// Sizes and tracking are millimeters; directions are 0, 90, 180 or 270 degrees.
+/// Negative tracking is treated as zero, matching Java FontSetting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanvasFont {
     pub font_id: Option<String>,
@@ -74,7 +75,95 @@ pub struct CanvasTextMetrics {
     pub offsets: Vec<f64>,
 }
 
+/// Logical canvas character rectangles and aggregate dimensions in millimeters.
+///
+/// Rectangles are `[0, 0, width, height]`, rather than positioned glyph ink bounds.
+/// Tracking is included between characters along the reading axis. Supplementary
+/// Unicode scalars occupy one rectangle, unlike Java's UTF-16 surrogate pairs.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CanvasTextAreaMetrics {
+    /// Aggregate horizontal extent, including horizontal tracking.
+    pub width: f64,
+    /// Aggregate vertical extent, including vertical tracking.
+    pub height: f64,
+    /// Effective tracking, clamped to zero when the request is negative.
+    pub letter_spacing: f64,
+    /// Unpositioned character rectangles in Unicode scalar order.
+    pub char_areas: Vec<[f64; 4]>,
+}
+
 impl OfdDocument {
+    /// Measure logical character areas without changing document resources.
+    ///
+    /// Glyphs rotated by 90 or 270 degrees exchange width and height. Horizontal
+    /// reading sums widths; vertical reading sums heights. The cross-axis extent
+    /// is the largest character extent. Negative tracking is clamped to zero,
+    /// matching Java FontSetting; no kerning, shaping or wrapping is applied.
+    ///
+    /// ```
+    /// use ofdrw::{CanvasFont, OfdDocument};
+    /// let mut doc = OfdDocument::new();
+    /// doc.add_blank_page(40., 30.)?;
+    /// let area = doc.measure_canvas_text_area(0, "Canvas", &CanvasFont::default())?;
+    /// assert_eq!(area.char_areas.len(), 6);
+    /// assert!(area.width > 0. && area.height > 0.);
+    /// # Ok::<(), ofdrw::OfdError>(())
+    /// ```
+    pub fn measure_canvas_text_area(
+        &self,
+        page_index: usize,
+        text: &str,
+        font: &CanvasFont,
+    ) -> Result<CanvasTextAreaMetrics, OfdError> {
+        font.validate()?;
+        self.page_location(page_index)?;
+        if text.len() > 1_000_000 {
+            return Err(OfdError::Limit("canvas text exceeds 1 MB".into()));
+        }
+        let mut result = CanvasTextAreaMetrics {
+            letter_spacing: font.letter_spacing.max(0.),
+            ..Default::default()
+        };
+        if text.is_empty() {
+            return Ok(result);
+        }
+        let selected = self.canvas_font(page_index, font)?;
+        let (widths, height) = canvas_font_metrics(self, &selected, text, font.size)?;
+        if !height.is_finite() || height < 0. {
+            return Err(OfdError::Invalid("invalid canvas font line height".into()));
+        }
+        let rotated = font.char_direction % 180 == 90;
+        let vertical = font.read_direction % 180 == 90;
+        for width in widths {
+            let (width, height) = if rotated {
+                (height, width)
+            } else {
+                (width, height)
+            };
+            if !result.char_areas.is_empty() {
+                if vertical {
+                    result.height += result.letter_spacing;
+                } else {
+                    result.width += result.letter_spacing;
+                }
+            }
+            if vertical {
+                result.width = result.width.max(width);
+                result.height += height;
+            } else {
+                result.width += width;
+                result.height = result.height.max(height);
+            }
+            result.char_areas.push([0., 0., width, height]);
+        }
+        if !result.width.is_finite() || !result.height.is_finite() {
+            return Err(OfdError::Invalid(
+                "canvas text area metrics overflow".into(),
+            ));
+        }
+        Ok(result)
+    }
+
     /// Measure canvas text without allocating resources or changing the document.
     ///
     /// ```
@@ -106,7 +195,7 @@ impl OfdDocument {
             return Ok(CanvasTextMetrics::default());
         }
         let selected = self.canvas_font(page_index, font)?;
-        let widths = canvas_widths(self, &selected, text, font.size)?;
+        let (widths, _) = canvas_font_metrics(self, &selected, text, font.size)?;
         let first = widths[0];
         let last = widths[widths.len() - 1];
         let rd = font.read_direction;
@@ -120,7 +209,7 @@ impl OfdDocument {
                     widths[i + usize::from(reversed_glyph)]
                 } else {
                     font.size
-                } + font.letter_spacing)
+                } + font.letter_spacing.max(0.))
             })
             .collect();
         let terminal = if horizontal_glyph {
@@ -359,28 +448,35 @@ impl OfdDocument {
     }
 }
 
-fn canvas_widths(
+fn canvas_font_metrics(
     doc: &OfdDocument,
     font: &FontInfo,
     text: &str,
     size: f64,
-) -> Result<Vec<f64>, OfdError> {
+) -> Result<(Vec<f64>, f64), OfdError> {
     let measure = |data: &[u8], index: u32| {
         let face = ttf_parser::Face::parse(data, index)
             .map_err(|_| OfdError::Invalid("cannot measure canvas font".into()))?;
         let units = f64::from(face.units_per_em());
-        Ok(text
-            .chars()
-            .map(|ch| {
-                // Java AWT treats these layout controls as invisible zero-advance glyphs.
-                if matches!(ch, '\t' | '\n' | '\r') {
-                    return 0.;
-                }
-                let glyph = face.glyph_index(ch).unwrap_or(ttf_parser::GlyphId(0));
-                f64::from(face.glyph_hor_advance(glyph).unwrap_or(face.units_per_em())) / units
-                    * size
-            })
-            .collect())
+        let hhea = face.tables().hhea;
+        let height = (f64::from(hhea.ascender) - f64::from(hhea.descender)
+            + f64::from(hhea.line_gap))
+            / units
+            * size;
+        Ok((
+            text.chars()
+                .map(|ch| {
+                    // Java AWT treats these layout controls as invisible zero-advance glyphs.
+                    if matches!(ch, '\t' | '\n' | '\r') {
+                        return 0.;
+                    }
+                    let glyph = face.glyph_index(ch).unwrap_or(ttf_parser::GlyphId(0));
+                    f64::from(face.glyph_hor_advance(glyph).unwrap_or(face.units_per_em())) / units
+                        * size
+                })
+                .collect(),
+            height,
+        ))
     };
     if let Some(path) = &font.embedded_path {
         return measure(doc.required_entry(path)?, 0);
@@ -395,14 +491,16 @@ fn canvas_widths(
             return result;
         }
     }
-    Ok(text
-        .chars()
-        .map(|ch| match ch {
-            '\t' | '\n' | '\r' => 0.,
-            _ if ch.is_ascii() => size * 0.5,
-            _ => size,
-        })
-        .collect())
+    Ok((
+        text.chars()
+            .map(|ch| match ch {
+                '\t' | '\n' | '\r' => 0.,
+                _ if ch.is_ascii() => size * 0.5,
+                _ => size,
+            })
+            .collect(),
+        size,
+    ))
 }
 
 // Java STBase.fmt keeps three decimal places above one, and truncates to

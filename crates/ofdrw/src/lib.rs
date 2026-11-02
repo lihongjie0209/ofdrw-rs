@@ -14,7 +14,7 @@ pub use box_layout::{
 mod canvas;
 pub use canvas::CanvasCommand;
 mod canvas_text;
-pub use canvas_text::{CanvasFont, CanvasTextAlign, CanvasTextMetrics};
+pub use canvas_text::{CanvasFont, CanvasTextAlign, CanvasTextAreaMetrics, CanvasTextMetrics};
 mod encryption;
 mod flow_container;
 pub use flow_container::{FixedContainer, FlowContainer, FlowContainerChild};

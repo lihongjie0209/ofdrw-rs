@@ -789,6 +789,15 @@ Rust 核心的 `SetFont { font: CanvasFont }`、`FillText { text, point }`
 0/90/180/270 的全部 16 种组合，字距不含 kerning。缺省字号为 1 mm，
 缺省选择 SimSun/宋体；若未定义，则仅在实际绘制时原子补建资源。
 空串和仅含 Java trim 范围空白（U+0000..U+0020）的字符串不绘制。
+开发分支（v0.5.0 之后）在 Rust 中增加 `measure_canvas_text_area(page_index, text, &font)`，返回整段宽高、
+有效字距与每个 Unicode 标量的 `[0, 0, width, height]` 逻辑矩形。横向阅读累加宽度，
+纵向阅读累加高度，字形方向为 90/270 度时交换字符宽高；这是逻辑排版区域，
+不包含字形墨迹的定位、kerning、换行或画布变换。字体行高取 `hhea` 的
+ascender − descender + lineGap；结果保留原始字体单位精度。Java AWT 的 CFF
+量化差异单独限制在每字符 0.0001 mm；三份 TrueType 字体使用精确数值比较。
+960 组固定 Java 版本对照覆盖四份字体、全部 16 种方向组合、控制字符与字距。
+负字距在画布的测量和文字绘制中统一归零，与 Java `FontSetting` 一致。
+
 文字坐标、字号、字距的 OFD 数值序列化与 Java STBase 的精度规则一致；
 测量保留完整精度。制表符、换行与回车使用零字宽，与 Java AWT 一致；
 33 组独立 Java 控制字符测量值由 `scripts/generate_canvas_text_controls_reference.py` 生成。
