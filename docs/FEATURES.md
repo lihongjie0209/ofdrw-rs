@@ -2746,6 +2746,18 @@ with `CMapVersion` and `WMode` metadata also import.
 
 Rotated, skewed, and nonuniform PDF text and graphics matrices are imported
 into OFD text `CTM`; degenerate text matrices are rejected.
+Path strokes also preserve nonuniform scaling, shear and reflection through an
+OFD path `CTM`, including local line width, caps, joins, dash arrays and phase.
+Changes to `cm` and restoration through `Q` update the current path using the
+painting coordinate system. Device hairlines retain zero line width.
+Nine independent PDF fixtures check geometry and color at 72 and 144 DPI,
+vector preservation, saved OFD round trips and PDF export. References use
+Ghostscript for ordinary strokes and Poppler for translucent fill/stroke and
+hairlines; the generator records renderer versions and arguments. Ghostscript's
+`GraphicsAlphaBits` has documented compatibility limits with PDF transparency
+([Ghostscript FAQ](https://www.ghostscript.com/faq/index.html)).
+Singular affine stroke transforms remain unsupported.
+
 PDF Info Title, Author, Subject, Creator, Keywords, CreationDate, and ModDate
 import into OFD `DocInfo`. PDF keyword text is kept as one OFD keyword; PDF
 dates with a full calendar day are normalized to `YYYY-MM-DD`, while valid
@@ -3043,7 +3055,8 @@ PDF `Ts` text rise and `Tr` modes 0–3 map to OFD text position, fill, stroke,
 and no-paint text; RGB/gray text colors and separate fill/stroke alpha are
 preserved. Modes 4–7 also preserve glyph clipping after `ET`, including the
 union of multiple text runs and `q`/`Q` clip restoration. Zero-width text
-strokes use a 0.1 mm display width, matching imported zero-width paths.
+strokes currently use a 0.1 mm display width; zero-width path strokes use
+a device hairline.
 
 Transparent non-isolated/knockout Form paints, unsupported soft-mask configurations, and other
 unsupported painting operators currently return an error; this importer is

@@ -1,0 +1,96 @@
+{
+  "ghostscript_version": "10.02.1",
+  "poppler_version": "pdftoppm version 24.02.0",
+  "cases": [
+    {
+      "name": "solid-curve",
+      "file": "solid-curve.pdf",
+      "line_width_pt": 3,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "solid-curve-72.png",
+        "144": "solid-curve-144.png"
+      }
+    },
+    {
+      "name": "scale-dash",
+      "file": "scale-dash.pdf",
+      "line_width_pt": 3,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "scale-dash-72.png",
+        "144": "scale-dash-144.png"
+      }
+    },
+    {
+      "name": "shear-dash",
+      "file": "shear-dash.pdf",
+      "line_width_pt": 3,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "shear-dash-72.png",
+        "144": "shear-dash-144.png"
+      }
+    },
+    {
+      "name": "reflection",
+      "file": "reflection.pdf",
+      "line_width_pt": 4,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "reflection-72.png",
+        "144": "reflection-144.png"
+      }
+    },
+    {
+      "name": "changing-ctm",
+      "file": "changing-ctm.pdf",
+      "line_width_pt": 2,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "changing-ctm-72.png",
+        "144": "changing-ctm-144.png"
+      }
+    },
+    {
+      "name": "restored-ctm",
+      "file": "restored-ctm.pdf",
+      "line_width_pt": 2,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "restored-ctm-72.png",
+        "144": "restored-ctm-144.png"
+      }
+    },
+    {
+      "name": "fill-stroke-alpha",
+      "file": "fill-stroke-alpha.pdf",
+      "line_width_pt": 3,
+      "renderer": "Poppler",
+      "references": {
+        "72": "fill-stroke-alpha-72.png",
+        "144": "fill-stroke-alpha-144.png"
+      }
+    },
+    {
+      "name": "pattern-clip",
+      "file": "pattern-clip.pdf",
+      "line_width_pt": 5,
+      "renderer": "Ghostscript",
+      "references": {
+        "72": "pattern-clip-72.png",
+        "144": "pattern-clip-144.png"
+      }
+    },
+    {
+      "name": "hairline",
+      "file": "hairline.pdf",
+      "line_width_pt": 0,
+      "renderer": "Poppler",
+      "references": {
+        "72": "hairline-72.png",
+        "144": "hairline-144.png"
+      }
+    }
+  ]
+}
