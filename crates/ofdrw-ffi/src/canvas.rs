@@ -12,6 +12,24 @@ struct Request {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
+    DrawImage {
+        data_base64: String,
+        format: String,
+        rect: [f64; 4],
+    },
+    DrawImageAt {
+        data_base64: String,
+        format: String,
+        point: [f64; 2],
+        pixels_per_mm: Option<f64>,
+    },
+    DrawImageRegion {
+        data_base64: String,
+        format: String,
+        source: [f64; 4],
+        rect: [f64; 4],
+        pixels_per_mm: Option<f64>,
+    },
     BeginPath {},
     ClosePath {},
     MoveTo {
@@ -101,6 +119,45 @@ enum Command {
 impl Command {
     fn into_core(self) -> Result<CanvasCommand, String> {
         Ok(match self {
+            Self::DrawImage {
+                data_base64,
+                format,
+                rect,
+            } => CanvasCommand::DrawImage {
+                data: STANDARD
+                    .decode(data_base64)
+                    .map_err(|e| format!("invalid canvas image base64: {e}"))?,
+                format,
+                rect,
+            },
+            Self::DrawImageAt {
+                data_base64,
+                format,
+                point,
+                pixels_per_mm,
+            } => CanvasCommand::DrawImageAt {
+                data: STANDARD
+                    .decode(data_base64)
+                    .map_err(|e| format!("invalid canvas image base64: {e}"))?,
+                format,
+                point,
+                pixels_per_mm: pixels_per_mm.unwrap_or(3.78),
+            },
+            Self::DrawImageRegion {
+                data_base64,
+                format,
+                source,
+                rect,
+                pixels_per_mm,
+            } => CanvasCommand::DrawImageRegion {
+                data: STANDARD
+                    .decode(data_base64)
+                    .map_err(|e| format!("invalid canvas image base64: {e}"))?,
+                format,
+                source,
+                rect,
+                pixels_per_mm: pixels_per_mm.unwrap_or(3.78),
+            },
             Self::BeginPath {} => CanvasCommand::BeginPath,
             Self::ClosePath {} => CanvasCommand::ClosePath,
             Self::MoveTo { point } => CanvasCommand::MoveTo { point },
@@ -208,6 +265,69 @@ mod tests {
                 .unwrap();
         unsafe { ofd_buffer_free(buffer) };
         Ok(result)
+    }
+
+    #[test]
+    fn ffi_canvas_image_commands_match_java_pixels_and_reject_invalid_base64() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ofdrw/tests/fixtures/canvas-images-java");
+        let requests: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("requests.json")).unwrap()).unwrap();
+        for case in requests["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let java = OfdDocument::open(root.join(format!("{name}.ofd"))).unwrap();
+            let area = java.pages().unwrap().remove(0);
+            let mut doc = OfdDocument::new();
+            doc.add_blank_page(40., 30.).unwrap();
+            doc.set_page_area(
+                0,
+                PageArea {
+                    physical_box: area.physical_box.unwrap(),
+                    application_box: area.application_box,
+                    content_box: area.content_box,
+                    bleed_box: area.bleed_box,
+                },
+            )
+            .unwrap();
+            let handle = register_document(doc).unwrap();
+            let ids = call(
+                handle,
+                &json!({"boundary":requests["boundary"], "commands":case["commands"]}),
+            )
+            .unwrap();
+            assert_eq!(ids.len(), 1);
+            let doc = unsafe { document_ref(handle).unwrap() };
+            for dpi in [25.4, 101.6] {
+                assert_eq!(
+                    doc.page_png(0, dpi).unwrap(),
+                    java.page_png(0, dpi).unwrap(),
+                    "{name} {dpi}"
+                );
+            }
+            let before = doc.to_bytes().unwrap();
+            assert!(call(
+                handle,
+                &json!({"boundary":[0,0,40,30],"commands":[
+                    {"type":"draw_image","data_base64":"!invalid!","format":"png","rect":[0,0,1,1]}
+                ]})
+            )
+            .is_err());
+            assert_eq!(
+                unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+                before
+            );
+            unsafe { ofd_close(handle) };
+        }
+        let (_, commands) = parse(
+            &json!({"boundary":[0,0,40,30],"commands":[
+                {"type":"draw_image_at","data_base64":"","format":"png","point":[0,0]}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&commands[0], CanvasCommand::DrawImageAt { pixels_per_mm, .. } if *pixels_per_mm == 3.78)
+        );
     }
 
     #[test]

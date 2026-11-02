@@ -766,7 +766,19 @@ Go 使用指针字段保留显式零坐标、零线宽和零透明度。三个�
 | `set_fill_color`、`set_stroke_color` | `color:[r,g,b]` |
 | `set_global_alpha` | `alpha?`，0..1 或 null |
 
-Canvas 文字、图片裁剪、CSS 字体/颜色解析与像素单位助手仍待实现。
+Rust 核心另支持 `DrawImage`（指定目标矩形）、`DrawImageAt`（按像素尺寸和
+`pixels_per_mm` 绘制）与 `DrawImageRegion`（裁剪后绘制）。它们使用同一画布边界，
+组合目标矩形与当前 CTM，并沿用透明度、绘制参数和冻结裁剪；不改变当前路径。
+Java 的默认像素比例为 3.78，Rust 的原尺寸与裁剪命令显式传入该比例。
+裁剪源矩形按毫米乘像素比例并向零截断，与 Java 实现一致；超出原图的区域透明填充，
+目标宽高可为负数（镜像）或零（退化矩阵），裁剪结果最多 1600 万像素。六组独立 Java 样本由
+`scripts/generate_canvas_image_reference.py` 生成。C 的同一 `ofd_draw_canvas_json` 请求已支持这三个图片命令，编码图像使用
+`data_base64` 与 `format` 字段；`draw_image` 使用 `rect`，`draw_image_at` 使用
+`point`，`draw_image_region` 使用 `source` 和 `rect`。后两者可选
+`pixels_per_mm`，缺省为 3.78。Python/Node.js 可直接传入同一 JSON 命令，
+Go 类型及各语言的原生字节数组助手和集成示例仍待补齐。
+
+Canvas 文字、CSS 字体/颜色解析与独立像素单位助手仍待实现。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
 

@@ -1,4 +1,4 @@
-//! Stateful vector drawing using the Java OFDRW DrawContext path model.
+//! Stateful path and image drawing using the Java OFDRW DrawContext model.
 use crate::{DrawParamStyle, OfdDocument, OfdError, PathClipArea, PathStyle, SolidPaintStyle};
 use std::fmt::Write;
 
@@ -8,7 +8,7 @@ const MAX_STACK: usize = 256;
 const MAX_SAVED_PATH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4 * 1024 * 1024;
 
-/// One command in an atomic vector canvas drawing operation.
+/// One command in an atomic canvas drawing operation.
 ///
 /// Coordinates and widths are millimeters; angles are degrees. Paths are
 /// transformed when painted, rather than when each segment is added. Save and
@@ -16,6 +16,31 @@ const MAX_PATH_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum CanvasCommand {
+    /// Draw an encoded image into a destination rectangle in millimeters.
+    /// Negative target dimensions mirror the image; zero dimensions collapse it.
+    DrawImage {
+        data: Vec<u8>,
+        format: String,
+        rect: [f64; 4],
+    },
+    /// Draw at the encoded pixel dimensions divided by `pixels_per_mm`.
+    /// Java DrawContext uses 3.78 pixels per millimeter by default.
+    DrawImageAt {
+        data: Vec<u8>,
+        format: String,
+        point: [f64; 2],
+        pixels_per_mm: f64,
+    },
+    /// Crop then draw. Source coordinates are millimeters converted to integer
+    /// pixels by truncation, matching Java's implementation (despite its pixel
+    /// parameter documentation). Out-of-image portions remain transparent.
+    DrawImageRegion {
+        data: Vec<u8>,
+        format: String,
+        source: [f64; 4],
+        rect: [f64; 4],
+        pixels_per_mm: f64,
+    },
     BeginPath,
     ClosePath,
     MoveTo {
@@ -272,6 +297,37 @@ impl OfdDocument {
         let mut objects = Vec::new();
         for command in commands {
             match command {
+                CanvasCommand::DrawImage { .. }
+                | CanvasCommand::DrawImageAt { .. }
+                | CanvasCommand::DrawImageRegion { .. } => {
+                    let PreparedImage { data, format, rect } = prepare_image(command)?;
+                    let id = staged.add_image_object(page_index, &data, &format, boundary)?;
+                    let param = canvas_parameter(
+                        &mut staged,
+                        document_index,
+                        &state.draw,
+                        &mut parameters,
+                    )?;
+                    staged.set_page_object_draw_param(page_index, &id, Some(&param))?;
+                    staged.set_page_object_ctm(
+                        page_index,
+                        &id,
+                        Some(multiply(
+                            state.matrix,
+                            [rect[2], 0., 0., rect[3], rect[0], rect[1]],
+                        )?),
+                    )?;
+                    if let Some(alpha) = state.alpha {
+                        staged.set_page_object_attribute(
+                            page_index,
+                            &id,
+                            "Alpha",
+                            Some(&(255. * alpha).trunc().to_string()),
+                        )?;
+                    }
+                    apply_clip(&mut staged, page_index, &id, boundary, &state)?;
+                    objects.push(id);
+                }
                 CanvasCommand::BeginPath => state.path = Some(String::new()),
                 CanvasCommand::ClosePath => {
                     if state.path.as_ref().is_some_and(|p| !p.is_empty()) {
@@ -488,15 +544,12 @@ impl OfdDocument {
                     );
                     let even_odd = matches!(command, CanvasCommand::Fill { even_odd: true });
                     let hairline = matches!(command, CanvasCommand::Fill { .. });
-                    let param = if let Some((_, id)) =
-                        parameters.iter().find(|(style, _)| style == &state.draw)
-                    {
-                        id.clone()
-                    } else {
-                        let id = staged.add_document_draw_param(document_index, &state.draw)?;
-                        parameters.push((state.draw.clone(), id.clone()));
-                        id
-                    };
+                    let param = canvas_parameter(
+                        &mut staged,
+                        document_index,
+                        &state.draw,
+                        &mut parameters,
+                    )?;
                     let id = staged.add_path_object(
                         page_index,
                         path,
@@ -516,24 +569,7 @@ impl OfdDocument {
                     if state.matrix != IDENTITY {
                         staged.set_page_object_ctm(page_index, &id, Some(state.matrix))?;
                     }
-                    if let Some(clip) = &state.clip {
-                        staged.set_page_object_path_clips(
-                            page_index,
-                            &id,
-                            &[vec![PathClipArea {
-                                boundary: [0., 0., boundary[2], boundary[3]],
-                                commands: clip.path.clone(),
-                                area_ctm: None,
-                                path_ctm: Some(clip.matrix),
-                                even_odd: clip.even_odd,
-                                fill: Some(true),
-                                // Java CT_Path also strokes clip paths by default.
-                                stroke: Some(true),
-                                draw_param: None,
-                            }]],
-                            false,
-                        )?;
-                    }
+                    apply_clip(&mut staged, page_index, &id, boundary, &state)?;
                     objects.push(id);
                 }
             }
@@ -541,4 +577,144 @@ impl OfdDocument {
         *self = staged;
         Ok(objects)
     }
+}
+
+fn canvas_parameter(
+    doc: &mut OfdDocument,
+    document_index: usize,
+    style: &DrawParamStyle,
+    parameters: &mut Vec<(DrawParamStyle, String)>,
+) -> Result<String, OfdError> {
+    if let Some((_, id)) = parameters.iter().find(|(cached, _)| cached == style) {
+        return Ok(id.clone());
+    }
+    let id = doc.add_document_draw_param(document_index, style)?;
+    parameters.push((style.clone(), id.clone()));
+    Ok(id)
+}
+
+fn apply_clip(
+    doc: &mut OfdDocument,
+    page_index: usize,
+    id: &str,
+    boundary: [f64; 4],
+    state: &State,
+) -> Result<(), OfdError> {
+    if let Some(clip) = &state.clip {
+        doc.set_page_object_path_clips(
+            page_index,
+            id,
+            &[vec![PathClipArea {
+                boundary: [0., 0., boundary[2], boundary[3]],
+                commands: clip.path.clone(),
+                area_ctm: None,
+                path_ctm: Some(clip.matrix),
+                even_odd: clip.even_odd,
+                fill: Some(true),
+                // Java CT_Path also strokes clip paths by default.
+                stroke: Some(true),
+                draw_param: None,
+            }]],
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+struct PreparedImage<'a> {
+    data: std::borrow::Cow<'a, [u8]>,
+    format: String,
+    rect: [f64; 4],
+}
+
+fn prepare_image(command: &CanvasCommand) -> Result<PreparedImage<'_>, OfdError> {
+    use std::borrow::Cow;
+    use std::io::Cursor;
+    let (data, format, mut rect, crop, ppm) = match command {
+        CanvasCommand::DrawImage { data, format, rect } => (data, format, *rect, None, None),
+        CanvasCommand::DrawImageAt {
+            data,
+            format,
+            point,
+            pixels_per_mm,
+        } => (
+            data,
+            format,
+            [point[0], point[1], 0., 0.],
+            None,
+            Some(*pixels_per_mm),
+        ),
+        CanvasCommand::DrawImageRegion {
+            data,
+            format,
+            source,
+            rect,
+            pixels_per_mm,
+        } => (data, format, *rect, Some(*source), Some(*pixels_per_mm)),
+        _ => return Err(OfdError::Invalid("expected canvas image command".into())),
+    };
+    let (canonical, _) = crate::checked_image_format(data, format)?;
+    let raster = if crop.is_some() || matches!(command, CanvasCommand::DrawImageAt { .. }) {
+        match canonical {
+            "GBIG2" => Cow::Owned(crate::jbig2_to_png(data)?),
+            "JPEG2000" => Cow::Owned(crate::jpeg2000_to_png(data)?),
+            _ => Cow::Borrowed(data.as_slice()),
+        }
+    } else {
+        Cow::Borrowed(data.as_slice())
+    };
+    if ppm.is_some_and(|v| !v.is_finite() || v <= 0.) {
+        return Err(OfdError::Invalid(
+            "canvas pixels per millimeter must be positive and finite".into(),
+        ));
+    }
+    if matches!(command, CanvasCommand::DrawImageAt { .. }) {
+        let (width, height) = image::ImageReader::new(Cursor::new(raster.as_ref()))
+            .with_guessed_format()
+            .map_err(|e| OfdError::Invalid(format!("cannot identify canvas image: {e}")))?
+            .into_dimensions()
+            .map_err(|e| OfdError::Invalid(format!("cannot read canvas image dimensions: {e}")))?;
+        let ppm = ppm.ok_or_else(|| OfdError::Invalid("missing canvas pixel scale".into()))?;
+        rect[2] = f64::from(width) / ppm;
+        rect[3] = f64::from(height) / ppm;
+    }
+    finite(&rect)?;
+    let Some(source) = crop else {
+        return Ok(PreparedImage {
+            data: Cow::Borrowed(data),
+            format: format.clone(),
+            rect,
+        });
+    };
+    finite(&source)?;
+    let ppm = ppm.ok_or_else(|| OfdError::Invalid("missing canvas pixel scale".into()))?;
+    let pixels = source.map(|v| (v * ppm).trunc());
+    if pixels
+        .iter()
+        .any(|v| !v.is_finite() || *v < f64::from(i32::MIN) || *v > f64::from(i32::MAX))
+        || pixels[2] <= 0.
+        || pixels[3] <= 0.
+    {
+        return Err(OfdError::Invalid(
+            "canvas image crop is outside integer pixel bounds".into(),
+        ));
+    }
+    let [x, y, width, height] = pixels.map(|v| v as i64);
+    if width * height > 16_000_000 {
+        return Err(OfdError::Limit(
+            "canvas crop exceeds 16 million pixels".into(),
+        ));
+    }
+    let source = crate::decode_image_for_mask(&raster)?;
+    let mut output = image::RgbaImage::new(width as u32, height as u32);
+    image::imageops::overlay(&mut output, &source, -x, -y);
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(output)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|e| OfdError::Invalid(format!("cannot encode canvas image crop: {e}")))?;
+    Ok(PreparedImage {
+        data: Cow::Owned(encoded.into_inner()),
+        format: "png".into(),
+        rect,
+    })
 }
