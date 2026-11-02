@@ -782,7 +782,21 @@ Python 图片命令可使用 `data: bytes|bytearray|memoryview`，Node.js 使用
 `data_base64`，并提供 `Format`、`Source`、`PixelsPerMM` 字段。三个语言接口
 均不修改调用者命令或图像数据；六组 Java 样例覆盖两种 DPI 的像素对比与保存后重读。
 
-Canvas 文字、CSS 字体/颜色解析与独立像素单位助手仍待实现。
+Rust 核心的 `SetFont { font: CanvasFont }`、`FillText { text, point }`
+提供非整形文字绘制；`measure_canvas_text(page_index, text, &font)` 返回逻辑宽度、
+首字偏移与阅读轴上的有符号字距，不修改文档。字体设置包括资源 ID、字号、字距、
+粗细、斜体、阅读/字符方向以及 start/end/left/right/center 对齐；方向支持
+0/90/180/270 的全部 16 种组合，字距不含 kerning。缺省字号为 1 mm，
+缺省选择 SimSun/宋体；若未定义，则仅在实际绘制时原子补建资源。
+空串和仅含 Java trim 范围空白（U+0000..U+0020）的字符串不绘制。
+文字坐标、字号、字距的 OFD 数值序列化与 Java STBase 的精度规则一致；
+测量保留完整精度。未嵌入字体依赖本机字体回退，嵌入字体可用于稳定对比。
+`scripts/generate_canvas_text_reference.py` 生成独立 Java 测量值和 OFD，覆盖
+16 种方向组合、对齐、粗斜体、CTM 和透明度。Rust 保存/恢复保留字距，
+不复制 Java FontSetting.clone 遗漏字距的缺陷；补充平面 Unicode 按标量处理，
+不复制 Java 按两个 UTF-16 代理项计算字距的行为。此文字 API 尚待接入 C/Python/Go/Node.js。
+
+Canvas CSS 字体/颜色解析、measureTextArea 字符包围盒与独立像素单位助手仍待实现。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
 

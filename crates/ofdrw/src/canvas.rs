@@ -1,5 +1,7 @@
 //! Stateful path and image drawing using the Java OFDRW DrawContext model.
-use crate::{DrawParamStyle, OfdDocument, OfdError, PathClipArea, PathStyle, SolidPaintStyle};
+use crate::{
+    CanvasFont, DrawParamStyle, OfdDocument, OfdError, PathClipArea, PathStyle, SolidPaintStyle,
+};
 use std::fmt::Write;
 
 const IDENTITY: [f64; 6] = [1., 0., 0., 1., 0., 0.];
@@ -16,6 +18,13 @@ const MAX_PATH_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum CanvasCommand {
+    SetFont {
+        font: CanvasFont,
+    },
+    FillText {
+        text: String,
+        point: [f64; 2],
+    },
     /// Draw an encoded image into a destination rectangle in millimeters.
     /// Negative target dimensions mirror the image; zero dimensions collapse it.
     DrawImage {
@@ -142,6 +151,7 @@ struct State {
     path: Option<String>,
     matrix: [f64; 6],
     draw: DrawParamStyle,
+    font: CanvasFont,
     alpha: Option<f64>,
     clip: Option<Clip>,
 }
@@ -160,6 +170,7 @@ impl Default for State {
                 stroke: Some(black),
                 ..Default::default()
             },
+            font: CanvasFont::default(),
             alpha: None,
             clip: None,
         }
@@ -250,7 +261,7 @@ fn arc(
 }
 
 impl OfdDocument {
-    /// Draw a vector canvas on an existing global page, atomically.
+    /// Draw paths, images and text on an existing global page, atomically.
     ///
     /// All painted objects use `boundary` as their canvas. Returns object IDs in
     /// paint order. State starts fresh for each call. Rect helpers preserve the
@@ -258,7 +269,7 @@ impl OfdDocument {
     ///
     /// Unlike the pinned Java CanvasState clone bug, restore preserves drawing
     /// parameters as well as paths, transforms, colors, opacity and clipping.
-    /// Text/image canvas commands and CSS font/color parsers are not included.
+    /// CSS font/color parsers are not included.
     ///
     /// ```
     /// use ofdrw::{CanvasCommand, OfdDocument};
@@ -297,6 +308,38 @@ impl OfdDocument {
         let mut objects = Vec::new();
         for command in commands {
             match command {
+                CanvasCommand::SetFont { font } => {
+                    font.validate()?;
+                    state.font = font.clone();
+                }
+                CanvasCommand::FillText { text, point } => {
+                    if text.chars().all(|ch| ch <= '\u{20}') {
+                        continue;
+                    }
+                    finite(point)?;
+                    let id =
+                        staged.add_canvas_text(page_index, boundary, text, *point, &state.font)?;
+                    let param = canvas_parameter(
+                        &mut staged,
+                        document_index,
+                        &state.draw,
+                        &mut parameters,
+                    )?;
+                    staged.set_page_object_draw_param(page_index, &id, Some(&param))?;
+                    if state.matrix != IDENTITY {
+                        staged.set_page_object_ctm(page_index, &id, Some(state.matrix))?;
+                    }
+                    if let Some(alpha) = state.alpha {
+                        staged.set_page_object_attribute(
+                            page_index,
+                            &id,
+                            "Alpha",
+                            Some(&((255. * alpha) as u8).to_string()),
+                        )?;
+                    }
+                    apply_clip(&mut staged, page_index, &id, boundary, &state)?;
+                    objects.push(id);
+                }
                 CanvasCommand::DrawImage { .. }
                 | CanvasCommand::DrawImageAt { .. }
                 | CanvasCommand::DrawImageRegion { .. } => {

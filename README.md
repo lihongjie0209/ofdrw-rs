@@ -204,6 +204,7 @@ Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
 坐标使用毫米，角度使用度，失败时回滚整批绘制。
 此功能不包含在 v0.4.0 发布候选中；文字、图片等 Canvas 功能仍在继续实现。
 协议与限制见[有状态向量画布](docs/FEATURES.md#有状态向量画布)。
+Rust 核心另提供 `CanvasFont`、`FillText` 与 `measure_canvas_text`，支持文字对齐、字距和方向；文字接口尚待接入各语言绑定。
 
 ## 测试与发布
 
