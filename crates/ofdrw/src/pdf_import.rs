@@ -24,6 +24,7 @@ mod simple_widths;
 mod soft_mask;
 mod standard_font_data;
 mod standard_fonts;
+mod text_stroke;
 mod tiling_pattern;
 mod uri_action;
 mod vertical_metrics;
@@ -1125,6 +1126,7 @@ fn affine_path_commands(commands: &str, matrix: [f64; 6]) -> Result<String, OfdE
         let pairs = match command {
             "M" | "L" => 1,
             "B" => 3,
+            "Q" => 2,
             "C" => 0,
             _ => {
                 return Err(OfdError::Invalid(
@@ -1343,12 +1345,11 @@ fn attach_text_paint(
     if stroke {
         let scale = graphics.stroke_scale()? * MM_PER_PT;
         let width = graphics.line_width * scale;
-        if !width.is_finite() {
+        if !width.is_finite() || width <= 0. {
             return Err(OfdError::Invalid(
                 "PDF text stroke width is not representable".into(),
             ));
         }
-        let width = if width > 0.0 { width } else { 0.1 };
         attrs.push_str(&format!(" Stroke=\"true\" LineWidth=\"{width}\""));
         let style = PathStyle {
             cap: Some(graphics.line_cap),
@@ -7595,21 +7596,45 @@ fn finish_import_text(
                 },
             )?;
         }
-        attach_text_paint(output, page.index, &id, graphics, state.render_mode)?;
-        tiling_pattern::attach(
+        let outlined = text_stroke::required(graphics, state);
+        attach_text_paint(
             output,
-            page,
+            page.index,
             &id,
             graphics,
-            matches!(state.render_mode % 4, 0 | 2) && !graphics.fill_space.nonpainting(),
-            matches!(state.render_mode % 4, 1 | 2) && !graphics.stroke_space.nonpainting(),
+            if outlined { 3 } else { state.render_mode },
         )?;
+        if !outlined {
+            tiling_pattern::attach(
+                output,
+                page,
+                &id,
+                graphics,
+                matches!(state.render_mode % 4, 0 | 2) && !graphics.fill_space.nonpainting(),
+                matches!(state.render_mode % 4, 1 | 2) && !graphics.stroke_space.nonpainting(),
+            )?;
+        }
         attach_blend_mode(output, page.index, &id, graphics.blend_mode)?;
         attach_clips(output, page.index, &id, "TextObject", &graphics.clips)?;
         if state.render_mode >= 4 {
             state
                 .clip_areas
                 .push(imported_text_clip_shape(output, page.index, &id)?);
+        }
+        if outlined {
+            text_stroke::paint(
+                output,
+                page,
+                graphics,
+                state,
+                text_stroke::Run {
+                    object_id: &id,
+                    text,
+                    glyphs,
+                    positions,
+                    vertical: vertical_positions,
+                },
+            )?;
         }
     }
     if state.render_mode >= 4 {
@@ -28293,12 +28318,16 @@ mod tests {
             .descendants()
             .find(|node| is_element(*node, "TextObject"))
             .unwrap();
-        assert_eq!(text.attribute("Stroke"), Some("true"));
-        assert_eq!(text.attribute("LineWidth"), Some("0.1"));
-        assert!(hairline
-            .page_svg(0)
-            .unwrap()
-            .contains("stroke-width=\"0.1\""));
+        assert_ne!(text.attribute("Stroke"), Some("true"));
+        let paths = hairline.page_paths(0).unwrap();
+        assert!(!paths.is_empty());
+        let styles = hairline.page_object_stroke_styles(0).unwrap();
+        for path in paths {
+            let style = styles.iter().find(|style| style.id == path.id).unwrap();
+            assert!(style.stroke_enabled);
+            assert_eq!(style.style.line_width, 0.);
+        }
+        assert!(hairline.page_svg(0).unwrap().contains("non-scaling-stroke"));
         assert!(!hairline.page_png(0, 25.4).unwrap().is_empty());
         let reopened = OfdDocument::from_bytes(&hairline.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.page_text(0).unwrap(), ["A"]);

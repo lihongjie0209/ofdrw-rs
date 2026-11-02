@@ -18536,7 +18536,17 @@ impl OfdDocument {
                 direction,
                 &format!("fill=\"{fill}\" fill-opacity=\"{fill_opacity}\" stroke=\"{stroke}\" stroke-opacity=\"{stroke_opacity}\" stroke-width=\"{line_width}\" {stroke_geometry}"),
             )?;
-            if glyph_paths.is_some() {
+            let hidden_semantics = resources.pdf_semantics && fill == "none" && stroke == "none";
+            let semantic_group = glyph_paths.is_some() || hidden_semantics;
+            let style = if hidden_semantics {
+                style.replace("fill=\"none\"", "fill=\"black\"").replace(
+                    &format!("fill-opacity=\"{fill_opacity}\""),
+                    "fill-opacity=\"1\"",
+                )
+            } else {
+                style
+            };
+            if semantic_group {
                 svg.push_str("<g opacity=\"0\">");
             }
             for (code_index, code) in object
@@ -18579,8 +18589,10 @@ impl OfdDocument {
                     svg.push_str(&format!("<text transform=\"translate({code_x} {code_y}) rotate({direction}) scale({h_scale} 1)\" x=\"0\" y=\"0\" {style}>{}</text>", escape_svg_text(&content)));
                 }
             }
-            if let Some(paths) = glyph_paths {
+            if semantic_group {
                 svg.push_str("</g>");
+            }
+            if let Some(paths) = glyph_paths {
                 svg.push_str(&paths.paths);
             }
         } else if is_element(object, "PathObject") {

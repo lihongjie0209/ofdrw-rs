@@ -1,0 +1,261 @@
+{
+  "font_sha256": "8f2c103bfa3fd5de71f1b92b18f21906b5a26871fb7e19a9a4c9af539c3cc7ab",
+  "cases": [
+    {
+      "name": "uniform-hairline",
+      "file": "uniform-hairline.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "line_width_pt": 0,
+      "references": {
+        "72": "uniform-hairline-72.png",
+        "144": "uniform-hairline-144.png",
+        "288": "uniform-hairline-288.png",
+        "576": "uniform-hairline-576.png"
+      }
+    },
+    {
+      "name": "cff-shear",
+      "file": "cff-shear.pdf",
+      "text": "AAA",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.2,
+        0.5,
+        1.0,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "cff-shear-72.png",
+        "144": "cff-shear-144.png",
+        "288": "cff-shear-288.png",
+        "576": "cff-shear-576.png"
+      }
+    },
+    {
+      "name": "dashed",
+      "file": "dashed.pdf",
+      "text": "fiAfi",
+      "renderer": "Poppler",
+      "global_matrix": [
+        1.0,
+        0.2,
+        0.5,
+        1.0,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "dashed-72.png",
+        "144": "dashed-144.png",
+        "288": "dashed-288.png",
+        "576": "dashed-576.png"
+      }
+    },
+    {
+      "name": "fill-stroke-clip",
+      "file": "fill-stroke-clip.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.2,
+        0.4,
+        1.0,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "fill-stroke-clip-72.png",
+        "144": "fill-stroke-clip-144.png",
+        "288": "fill-stroke-clip-288.png",
+        "576": "fill-stroke-clip-576.png"
+      }
+    },
+    {
+      "name": "scale",
+      "file": "scale.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        2.0,
+        0.0,
+        0.0,
+        0.7,
+        10.0,
+        15.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "scale-72.png",
+        "144": "scale-144.png",
+        "288": "scale-288.png",
+        "576": "scale-576.png"
+      }
+    },
+    {
+      "name": "shear",
+      "file": "shear.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.2,
+        0.5,
+        1.0,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "shear-72.png",
+        "144": "shear-144.png",
+        "288": "shear-288.png",
+        "576": "shear-576.png"
+      }
+    },
+    {
+      "name": "reflection",
+      "file": "reflection.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        -1.0,
+        0.1,
+        0.2,
+        1.0,
+        180.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "reflection-72.png",
+        "144": "reflection-144.png",
+        "288": "reflection-288.png",
+        "576": "reflection-576.png"
+      }
+    },
+    {
+      "name": "text-matrix",
+      "file": "text-matrix.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "text-matrix-72.png",
+        "144": "text-matrix-144.png",
+        "288": "text-matrix-288.png",
+        "576": "text-matrix-576.png"
+      }
+    },
+    {
+      "name": "horizontal-scale",
+      "file": "horizontal-scale.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.2,
+        0.5,
+        1.0,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "horizontal-scale-72.png",
+        "144": "horizontal-scale-144.png",
+        "288": "horizontal-scale-288.png",
+        "576": "horizontal-scale-576.png"
+      }
+    },
+    {
+      "name": "fill-stroke",
+      "file": "fill-stroke.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.5,
+        0.1,
+        0.3,
+        0.8,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "fill-stroke-72.png",
+        "144": "fill-stroke-144.png",
+        "288": "fill-stroke-288.png",
+        "576": "fill-stroke-576.png"
+      }
+    },
+    {
+      "name": "clip",
+      "file": "clip.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        1.0,
+        0.2,
+        0.4,
+        1.0,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 1.5,
+      "references": {
+        "72": "clip-72.png",
+        "144": "clip-144.png",
+        "288": "clip-288.png",
+        "576": "clip-576.png"
+      }
+    },
+    {
+      "name": "hairline",
+      "file": "hairline.pdf",
+      "text": "fiAfi",
+      "renderer": "Ghostscript",
+      "global_matrix": [
+        2.0,
+        0.15,
+        0.5,
+        0.8,
+        10.0,
+        10.0
+      ],
+      "line_width_pt": 0,
+      "references": {
+        "72": "hairline-72.png",
+        "144": "hairline-144.png",
+        "288": "hairline-288.png",
+        "576": "hairline-576.png"
+      }
+    }
+  ],
+  "raster_policy": "Unhinted vector geometry; hairline reference uses target device pixels without supersampling.",
+  "poppler_version": "pdftoppm version 24.02.0",
+  "ghostscript_version": "10.02.1",
+  "cff_sha256": "f8b685475516ed8c977a08a284730fda5946e714bdd29206648c19d33ae4bd04"
+}

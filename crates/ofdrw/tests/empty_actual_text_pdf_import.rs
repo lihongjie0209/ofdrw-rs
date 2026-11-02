@@ -6,10 +6,16 @@ fn check(name: &str, source: &[u8], reference: &[u8]) {
     assert!(document.page_text(0).unwrap().is_empty(), "{name}");
     assert!(document.page_text_objects(0).unwrap().is_empty(), "{name}");
     assert!(document.page_images(0).unwrap().is_empty(), "{name}");
-    assert!(
-        !document.page_composite_objects(0).unwrap().is_empty(),
-        "{name}"
-    );
+    // Affine stroked glyphs already paint as native paths before ActualText
+    // removes their nonpainting semantic runs. Other runs become composites.
+    if name.ends_with("matrix-stroke") {
+        assert!(!document.page_paths(0).unwrap().is_empty(), "{name}");
+    } else {
+        assert!(
+            !document.page_composite_objects(0).unwrap().is_empty(),
+            "{name}"
+        );
+    }
     assert!(document.validate_references().unwrap().is_empty(), "{name}");
     // High-resolution color boundaries reduce font-grid-fitting differences.
     let dpi = if name.ends_with("stroke") { 576. } else { 144. };
