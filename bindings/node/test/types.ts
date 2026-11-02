@@ -9,6 +9,8 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const resolvedCanvasFont = document.resolveCanvasFontStyle(0, "bold 12px Arial", {}, 3.78);
+  document.measureCanvasText(0, "Canvas", resolvedCanvasFont);
   const ranges: import('../index').BoxContentRanges[] = [{source_index: 0, ranges: [[0, 5]]}];
   document.addBoxLayoutWithContentRanges(0, [{type: 'box', size: [10, 5]}], ranges);
   // @ts-expect-error protected intervals require two endpoints

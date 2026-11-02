@@ -859,7 +859,9 @@ Canvas 度量遵循固定的 OpenJDK 21 FreeType 参考：26.6 字号、16.16 �
 JSON 启用浮点往返精度，避免序列化后丢失最低有效位。
 参考缩放和布局接口见 [OpenJDK FreeType scaler](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/freetypeScaler.c)
 及 [HarfBuzz 字体回调](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/hb-jdk-font.cc)。
-完整浏览器 CSS 字体语法（字体列表、转义和行高）、跨语言字体样式接口及独立像素单位助手仍待实现。
+开发版本的 C `ofd_resolve_canvas_font_style_json`、Python `resolve_canvas_font_style`、Go `ResolveCanvasFontStyle` 和 Node.js `resolveCanvasFontStyle` 返回可直接用于 Canvas 的完整字体设置；复用已有字体，找不到时添加命名字体资源。C ABI 保持为 1，共 338 个导出。这些接口尚未包含在 v0.5.0 中。
+
+完整浏览器 CSS 字体语法（字体列表、转义和行高）及独立像素单位助手仍待实现。
 字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。

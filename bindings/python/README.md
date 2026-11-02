@@ -410,3 +410,15 @@ from ofdrw_rs import parse_canvas_color
 paint = parse_canvas_color("rgba(10,20,30,0.5)")
 assert paint == {"color": [10, 20, 30], "alpha": 127}
 ```
+
+### Canvas 字体样式（开发版本，v0.5.0 尚未包含）
+
+```python
+font = doc.resolve_canvas_font_style(0, "italic bold 12px Arial", pixels_per_mm=3.78)
+doc.draw_canvas(0, (0, 0, 100, 50), [
+    {"type": "set_font", "font": font},
+    {"type": "fill_text", "text": "Hello", "point": [5, 15]},
+])
+```
+
+需要先创建对应页面。支持 mm、px 和无单位毫米；已有字体按页面可见字体名/字体族匹配，否则添加命名字体资源。可传入原字体设置以保留跟踪间距、方向和对齐。无样式前缀保留粗细和斜体；仅斜体会将粗细设为 400，仅粗细保留斜体，`normal normal` 清除斜体。默认像素密度为每毫米 3.78 像素（Go 需显式传入）。不支持完整 CSS 字体列表、转义或行高。
