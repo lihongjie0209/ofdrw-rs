@@ -683,8 +683,32 @@ func TestImportsHairlinePDFTextAcrossBinding(t *testing.T) {
 		t.Fatalf("hairline text: %v, %v", text, err)
 	}
 	svg, err := doc.PageSVG(0)
-	if err != nil || !strings.Contains(svg, "stroke-width=\"0.1\"") {
+	if err != nil || !strings.Contains(svg, "non-scaling-stroke") {
 		t.Fatalf("hairline SVG: %v", err)
+	}
+	paths, err := doc.PagePaths(0)
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("hairline vector paths: %v", err)
+	}
+	styles, err := doc.PageObjectStrokeStyles(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, style := range styles {
+		if style.Kind == "PathObject" {
+			count++
+			if !style.StrokeEnabled || style.Style.LineWidth != 0 {
+				t.Fatalf("hairline pen: %+v", style)
+			}
+		}
+	}
+	if count != len(paths) {
+		t.Fatalf("hairline pens: %d, paths: %d", count, len(paths))
+	}
+	png, err := doc.PagePNG(0, 144)
+	if err != nil {
+		t.Fatal(err)
 	}
 	file := filepath.Join(t.TempDir(), "hairline.ofd")
 	if err := doc.Save(file); err != nil {
@@ -698,6 +722,10 @@ func TestImportsHairlinePDFTextAcrossBinding(t *testing.T) {
 	again, err := reopened.PageText(0)
 	if err != nil || !slices.Equal(again, text) {
 		t.Fatalf("reopened hairline text: %v, %v", again, err)
+	}
+	raster, err := reopened.PagePNG(0, 144)
+	if err != nil || !bytes.Equal(raster, png) {
+		t.Fatalf("hairline raster round trip: %v", err)
 	}
 }
 
