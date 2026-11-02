@@ -6,23 +6,22 @@
 使用 Rust 实现的 OFD 文档库，提供 **Rust、Python、Go、Node.js 和 C ABI**。
 以 [Java OFDRW](https://github.com/ofdrw/ofdrw) 为兼容性参考，优先实现包读写、页面对象、资源、布局、渲染和文档转换。
 
-本页对应 **0.4.0**；分发状态见 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases) 和 [Release 工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml)。项目已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
-本页安装命令对应已发布的 0.4.0，可从下表原生仓库安装；预编译文件见 [v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)。
+本页对应 **0.5.0**；分发状态见 [Release 工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml)。历史版本 [v0.4.0](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) 的包和标签保持不变。
+下方 0.5.0 安装命令在发布流程完成后可用；候选源码可从 `release/v0.5.0` 分支构建匹配的 Rust 核心与各语言绑定。项目尚未完整替代 Java OFDRW。
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
-版本变更见 [v0.4.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
-0.4.0 新增文本自动测量、图片自动尺寸、混合流布局、盒模型、自动文字盒、
-嵌套容器和固定页面容器，并支持虚线边框、绘制图层和行内占位符。
-Rust、C、Python、Go 和 Node.js 均提供这些布局接口；用法见下方及各语言 README。
+版本变更见 [v0.5.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
+0.5.0 新增跨语言保护内容范围分页、设备像素细线，以及有状态画布的路径、图片、文字绘制与只读文字测量。
+Rust、C、Python、Go 和 Node.js 均提供相应接口；C ABI 主版本保持为 1，当前共 335 个导出。用法见下方及各语言 README。
 
 ## 安装渠道
 
 | 语言 | 原生仓库 | 对应版本安装方式 |
 | --- | --- | --- |
-| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `pip install ofdrw-rs==0.4.0` |
-| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs@0.4.0` |
-| Rust | [crates.io](https://crates.io/crates/ofdrw) | `ofdrw = "0.4.0"` |
-| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.4.0` |
+| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `pip install ofdrw-rs==0.5.0` |
+| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs@0.5.0` |
+| Rust | [crates.io](https://crates.io/crates/ofdrw) | `ofdrw = "0.5.0"` |
+| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.5.0` |
 
 各语言使用原生包管理工具，无需 ORAS 或 GitHub Packages 登录。
 Go / C 所需动态库、静态库和 C 头文件保留在 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases)。
@@ -36,11 +35,11 @@ Linux wheels 通过 auditwheel 检查并标记为 manylinux；预编译 native �
 需要 Python 3.10+，直接从 PyPI 安装：
 
 ```sh
-python -m pip install ofdrw-rs==0.4.0
+python -m pip install ofdrw-rs==0.5.0
 ```
 
 wheel 已带 Rust 共享库，不需要安装 Rust。它会自动安装 CFFI 依赖。
-也可从 [v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)
+也可从 [v0.5.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.5.0)
 下载匹配系统和架构的 wheel 后安装。
 
 ```python
@@ -65,7 +64,7 @@ with Document.open("hello.ofd") as document:
 需要 Node.js 20+。直接从 npm 安装：
 
 ```sh
-npm install ofdrw-rs@0.4.0
+npm install ofdrw-rs@0.5.0
 ```
 
 ```js
@@ -90,10 +89,10 @@ Go 包通过 purego 动态加载 C ABI，**不需要 cgo**。需要 Go 1.22+。
 先从 GitHub Releases 下载对应平台的 native ZIP 并解压，设置动态库的绝对路径：
 
 ```sh
-curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/ofdrw-native-linux-x64-v0.4.0.zip
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.5.0/ofdrw-native-linux-x64-v0.5.0.zip
 unzip native.zip -d native
-export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.4.0/libofdrw_ffi.so"
-go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.4.0
+export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.5.0/libofdrw_ffi.so"
+go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.5.0
 ```
 
 macOS 使用 `libofdrw_ffi.dylib`，Windows 使用 `ofdrw_ffi.dll`。
@@ -115,7 +114,7 @@ func main() {
 }
 ```
 
-Release 会同时创建 Go 子模块标签 `bindings/go/v0.4.0`。
+Release 会同时创建 Go 子模块标签 `bindings/go/v0.5.0`。
 更多内容见 [Go 说明](bindings/go/README.md)。
 
 ## Rust
@@ -124,7 +123,7 @@ Release 会同时创建 Go 子模块标签 `bindings/go/v0.4.0`。
 
 ```toml
 [dependencies]
-ofdrw = "0.4.0"
+ofdrw = "0.5.0"
 ```
 
 ```rust
@@ -147,6 +146,7 @@ GitHub Releases 的 native ZIP 中提供 `include/ofdrw.h`、动态库和静态�
 ```sh
 git clone https://github.com/lihongjie0209/ofdrw-rs.git
 cd ofdrw-rs
+git checkout release/v0.5.0
 cargo build --release --locked -p ofdrw-ffi
 ```
 
@@ -156,7 +156,7 @@ cargo build --release --locked -p ofdrw-ffi
 
 ## 图像插值与 PDF 批注
 
-以下示例使用 0.4.0 及对应共享库。
+以下示例使用 0.5.0 及对应共享库。
 
 ### 图像插值
 
@@ -195,16 +195,16 @@ Rust 使用 `FlowSpan::placeholder`，Go 使用 `NewPlaceholderSpan`，Python、
 和 C JSON 使用空 `text`、`placeholder_width` 和 `font_size` 字段。详见
 [行内占位符](docs/FEATURES.md#行内占位符)及各语言 README。
 
-## 向量画布（后续版本，尚未发布）
+## 向量画布（0.5.0）
 
 开发分支新增有状态画布，支持路径、曲线、变换、保存恢复、裁剪、绘制参数与图片绘制/裁剪。
 Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
 [Python](bindings/python/README.md)、[Go](bindings/go/README.md) 和
 [Node.js / TypeScript](bindings/node/README.md) 均提供原子批量调用示例。
 坐标使用毫米，角度使用度，失败时回滚整批绘制。
-此功能不包含在 v0.4.0 发布候选中；文字、图片等 Canvas 功能仍在继续实现。
+0.5.0 候选包含路径、图片和文字画布；CSS 字体/颜色解析及字符包围盒仍待实现。
 协议与限制见[有状态向量画布](docs/FEATURES.md#有状态向量画布)。
-Rust 核心另提供 `CanvasFont`、`FillText` 与 `measure_canvas_text`，支持文字对齐、字距和方向；C、Python、Go、Node.js 提供对应文字绘制与只读测量接口（后续版本，尚未发布）。
+Rust 核心另提供 `CanvasFont`、`FillText` 与 `measure_canvas_text`，支持文字对齐、字距和方向；C、Python、Go、Node.js 提供对应文字绘制与只读测量接口（0.5.0）。
 
 ## 测试与发布
 

@@ -720,7 +720,7 @@ receive blank pages without requiring a font resource.
 
 ## 有状态向量画布
 
-**后续版本，尚未发布。**
+**0.5.0。分发状态见发布工作流。**
 
 Rust 的 `draw_canvas(page_index, boundary, &[CanvasCommand])` 在已有全局页号上
 按顺序执行路径绘图，返回绘制对象 ID。整个批次原子提交；任何参数、资源或绘制失败
@@ -742,7 +742,7 @@ Rust 的 `draw_canvas(page_index, boundary, &[CanvasCommand])` 在已有全局�
 另外，Rust 的 restore 正确保留绘制参数，不复制 Java CanvasState.clone
 把参数克隆写回原对象的缺陷。
 
-此项尚未包含在 v0.4.0。C 使用 `ofd_draw_canvas_json`，Python 使用 `draw_canvas`，
+此项属于 0.5.0 发布候选。C 使用 `ofd_draw_canvas_json`，Python 使用 `draw_canvas`，
 Go 使用 `DrawCanvas` 和 `CanvasCommand`，Node.js 使用 `drawCanvas` 和 TypeScript 命令联合类型。
 C 请求为 `{"boundary":[x,y,width,height],"commands":[...]}`，返回 JSON 字符串 ID 数组。
 请求最多 16 MiB；各命令使用 `type` 区分，未知字段和未知类型均被拒绝。
@@ -1899,7 +1899,7 @@ bytes retained. Raw
 CFF text without glyph mappings still uses the text fallback. The PDF importer
 encapsulates supported raw programs in deterministic sfnt wrappers.
 
-### 路径设备发丝线（后续版本，尚未发布）
+### 路径设备发丝线（0.5.0）
 
 Rust 路径写入与更新接受 `line_width: 0`，表示一个设备像素宽的线。
 页面路径、批注、组合对象、重复图案和描边裁剪共用此行为；
@@ -1908,7 +1908,7 @@ Rust 路径写入与更新接受 `line_width: 0`，表示一个设备像素宽�
 原生渲染器通过保留的 `ofd-device-hairline-` ID 前缀识别设备描边。
 PDF 导出写入零线宽操作符；导入不再将路径零线宽替换成固定毫米值。
 
-此项尚未包含在 v0.4.0 发布候选中。文字描边仍要求正线宽；
+此项属于 0.5.0 发布候选。文字描边仍要求正线宽；
 PDF 导入仍不支持非均匀或倾斜变换下的虚线描边。
 Python 和 Node.js 使用 `line_width: 0`；Go 写入接口使用
 `PathStyle{Stroke: true, Hairline: true}` 保留零值。Go 未设置 `Hairline`

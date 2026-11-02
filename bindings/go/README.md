@@ -1,17 +1,19 @@
 # ofdrw Go bindings
 
+This README targets 0.5.0. Check the [release workflow](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml) for distribution status; build matching bindings and native libraries from source while publication is pending. The previous [v0.4.0 release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) remains available.
+
 Go 1.22+ wrapper for the Rust OFD core. It loads the C ABI with purego and does
 not require cgo. Use the module and native assets from the same release;
 check GitHub Releases for version availability. Install the module:
 
 ```sh
-go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.4.0
+go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.5.0
 ```
 
 Download native ZIPs from [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases):
 
 ```sh
-curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/ofdrw-native-linux-x64-v0.4.0.zip
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.5.0/ofdrw-native-linux-x64-v0.5.0.zip
 unzip native.zip -d native
 ```
 
@@ -38,9 +40,9 @@ func main() {
 
 `Open`, `FromBytes` and `FromPDF` read documents; `PageSVG`, `PagePNG` and
 `ToPDF` export content. Page indexes start at zero and coordinates use millimeters.
-The release workflow publishes the Go module tag `bindings/go/v0.4.0`.
+The release workflow publishes the Go module tag `bindings/go/v0.5.0`.
 
-## 混合流布局（0.4.0 起）
+## 混合流布局（0.5.0 起）
 
 ```go
 style := ofdrw.FlowDocumentStyle{BlockGap: 2}
@@ -61,7 +63,7 @@ if err != nil { log.Fatal(err) }
 `result.Next` 可传给下一次布局的 `Start`，整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（0.4.0 起）
+## 盒模型与浮动行（0.5.0 起）
 
 ```go
 style := ofdrw.DefaultBoxLayoutStyle()
@@ -83,7 +85,7 @@ if err != nil { log.Fatal(err) }
 自动测量文本盒与嵌套混合容器见下文的布局接口。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（0.4.0 起）
+## 文本自动测量（0.5.0 起）
 
 ```go
 spans := []ofdrw.FlowSpan{{Text: "First line\nSecond line"}}
@@ -312,7 +314,7 @@ width. Available since 0.4.0; use matching bindings and native library.
 
 ### Protected content ranges (unreleased source API)
 
-Use matching source bindings and native library; this addition is outside 0.4.0.
+Use matching source bindings and native library; this addition is outside 0.5.0.
 `BoxContentRangesFromText` builds indivisible intervals from measured lines:
 
 ```go
@@ -332,7 +334,7 @@ disjoint and inside the box. Nil/empty policies retain geometric cuts. The
 result uses ordinary box-layout geometry and continuation; callers draw child
 content separately. Invalid policies roll back the entire call.
 
-## Device hairlines (unreleased; after 0.4.0)
+## Device hairlines (0.5.0 candidate)
 
 For path writers, use `ofdrw.PathStyle{Stroke: true, Hairline: true}` to
 preserve a zero line width. This applies to page paths, composite paths,
@@ -343,7 +345,7 @@ positive `LineWidth` is always honored, even when `Hairline` is true.
 PNG uses one device pixel at any DPI; PDF exports a native zero-width stroke.
 Use a matching native library built from the same unreleased source.
 
-## Vector canvas batches (unreleased; after 0.4.0)
+## Vector canvas batches (0.5.0 candidate)
 
 Use a matching native library built from the same unreleased source.
 
@@ -379,7 +381,7 @@ and nil Alpha clears global opacity. Coordinates are millimeters and angles
 are degrees. See the [command reference](../../docs/FEATURES.md#有状态向量画布)
 for vector operations and remaining text limitations.
 
-### Canvas images (unreleased)
+### Canvas images (0.5.0 candidate)
 
 `CanvasCommand.Data` accepts encoded image bytes and serializes them as base64.
 Use `Format`, `Rect` and, for `draw_image_region`, `Source`. Source coordinates
@@ -415,7 +417,7 @@ func main() {
 }
 ```
 
-### Canvas text (unreleased)
+### Canvas text (0.5.0 candidate)
 
 CanvasFont configures size, tracking, weight, italic, alignment and quarter-turn
 reading/character directions. Nil numeric fields use native defaults: SimSun,

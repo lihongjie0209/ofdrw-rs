@@ -1,5 +1,7 @@
 # ofdrw
 
+These examples target 0.5.0. Check [crates.io](https://crates.io/crates/ofdrw) for availability; the previous [0.4.0 release](https://crates.io/crates/ofdrw/0.4.0) remains available.
+
 Rust OFD document core: package reading/writing, text and graphics, layout,
 SVG/PNG/PDF output, supported PDF import, annotations, SM2 signatures and encryption.
 This is an early subset of Java OFDRW; full standards compatibility is still in progress.

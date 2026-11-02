@@ -1,12 +1,14 @@
 # ofdrw-rs for Node.js
 
+This README targets 0.5.0. Check the [release workflow](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml) for distribution status; build matching bindings and native libraries from source while publication is pending. The previous [v0.4.0 release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) remains available.
+
 Node.js wrapper for the Rust OFD core. It uses the versioned C ABI through
 [Koffi](https://koffi.dev/).
 
 Check npm and GitHub Releases for version availability. Install from npm:
 
 ```sh
-npm install ofdrw-rs@0.4.0
+npm install ofdrw-rs@0.5.0
 ```
 
 For development from this source tree, build the native library and install
@@ -29,7 +31,7 @@ staged package binary is also present under `native/`.
 The CI-built npm tarball includes the native library for Linux, macOS, and
 Windows on x64 and ARM64. Linux binaries are built on Ubuntu 24.04, so older
 glibc distributions may need a native build. Install the tarball with
-`npm install /path/to/ofdrw-rs-0.4.0.tgz`;
+`npm install /path/to/ofdrw-rs-0.5.0.tgz`;
 the library is loaded automatically. To use a custom native build, set
 `OFDRW_LIB_PATH` to its absolute path. Packing from a source checkout requires
 all six release libraries under `native/<platform>-<arch>/`. Stage each one
@@ -382,7 +384,7 @@ currently supported OFD-A rules, and `prepareArchive()` returns a separate
 package with supported archival normalizations applied. Check the returned
 package again because complete OFD-A conversion is not yet implemented.
 
-## 混合流布局（0.4.0 起）
+## 混合流布局（0.5.0 起）
 
 ```js
 const document = Document.create();
@@ -402,7 +404,7 @@ try {
 和 `FlowLayoutResult` TypeScript 类型。图片使用 `data_base64`。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（0.4.0 起）
+## 盒模型与浮动行（0.5.0 起）
 
 ```js
 const document = Document.create();
@@ -423,7 +425,7 @@ try {
 自动测量文本盒与嵌套混合容器见下文的布局接口。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（0.4.0 起）
+## 文本自动测量（0.5.0 起）
 
 ```js
 const document = Document.create();
@@ -631,11 +633,11 @@ The same spans work in styled flow, text boxes, flow blocks and fixed/flow
 containers. Geometry participates in wrapping and line height while text omits
 the placeholders. A leading placeholder absorbs a configured first-line indent
 once. Character-count reservations use `count * (font_size + letter_spacing)`.
-Use matching bindings and native library (0.4.0 or later).
+Use matching bindings and native library (0.5.0 or later).
 
 ### Protected content ranges (unreleased source API)
 
-Use matching source bindings and native library; this addition is outside 0.4.0.
+Use matching source bindings and native library; this addition is outside 0.5.0.
 `BoxContentRanges` protects indivisible intervals while placing/decorating boxes:
 
 ```js
@@ -652,7 +654,7 @@ disjoint and inside the box. Empty policies retain geometric cuts. The result
 uses ordinary box-layout geometry and continuation; child drawing remains with
 the caller. Invalid policies roll back the entire call.
 
-## Device hairlines (unreleased; after 0.4.0)
+## Device hairlines (0.5.0 candidate)
 
 Pass `{line_width: 0}` to `addPathObject`, `addCompositePathObject`, or
 `addPathAnnotation`. Existing paths accept
@@ -660,7 +662,7 @@ Pass `{line_width: 0}` to `addPathObject`, `addCompositePathObject`, or
 PNG retains one device pixel across DPI and transforms; PDF preserves a
 native zero-width stroke. Use the matching unreleased native library.
 
-## Vector canvas batches (unreleased; after 0.4.0)
+## Vector canvas batches (0.5.0 candidate)
 
 Use a matching native library built from the same unreleased source.
 
@@ -685,7 +687,7 @@ angles are degrees. Unknown fields and nonfinite numbers are rejected.
 A null or omitted `set_global_alpha.alpha` clears global opacity.
 See the [command reference](../../docs/FEATURES.md#有状态向量画布) for vector operations and remaining text limitations.
 
-### Canvas images (unreleased)
+### Canvas images (0.5.0 candidate)
 
 Use Buffer or Uint8Array in `data`, or use `data_base64`, never both. Offset
 Uint8Array views are supported without changing the input. `draw_image_at`
@@ -710,7 +712,7 @@ try {
 } finally {document.close();}
 ```
 
-### Canvas text (unreleased)
+### Canvas text (0.5.0 candidate)
 
 `set_font` accepts CanvasFont settings for size, tracking, weight, italic,
 alignment and quarter-turn reading/character directions. Defaults are SimSun,

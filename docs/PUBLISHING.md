@@ -76,7 +76,7 @@ passman run --stdin registry/npm#token -- gh secret set NPM_TOKEN --repo lihongj
 公开包的校验和、源码提交、许可证及 Cargo 索引可见性已核验；转换器使用已发布的
 `ofdrw-resvg 0.45.1-ofdrw.1`，发布清单不依赖本地路径。
 
-v0.4.0 发布候选继续使用上述已发布依赖。后续零线宽路径分支使用
+v0.4.0 使用上述已发布依赖。v0.5.0 候选使用
 `ofdrw-resvg 0.45.1-ofdrw.2`、`0.48.1-ofdrw.2` 以及
 `ofdrw-svg2pdf 0.13.0-ofdrw.3`；这些新版本尚未发布。
 该分支合并并通过主分支完整 CI 后，必须按“渲染器 → 转换器 → 新核心版本”

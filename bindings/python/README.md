@@ -1,16 +1,18 @@
 # ofdrw-rs for Python
 
+This README targets 0.5.0. Check the [release workflow](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml) for distribution status; build matching bindings and native libraries from source while publication is pending. The previous [v0.4.0 release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) remains available.
+
 Python 3.10+ bindings to the Rust OFD core through CFFI.
 Install the matching version from [PyPI](https://pypi.org/project/ofdrw-rs/):
 
 ```sh
-python -m pip install ofdrw-rs==0.4.0
+python -m pip install ofdrw-rs==0.5.0
 ```
 
 Check the registry and release pages for version availability.
 The wheel includes the native library; a Rust toolchain is not needed.
 Wheels for all six supported platforms are also available from
-[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0).
+[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.5.0).
 
 ```python
 from ofdrw_rs import Document
@@ -30,7 +32,7 @@ Set `OFDRW_LIB_PATH` to an absolute shared-library path for a custom build.
 Supported behavior and limitations are documented in the
 [repository README](https://github.com/lihongjie0209/ofdrw-rs#python).
 
-## 混合流布局（0.4.0 起）
+## 混合流布局（0.5.0 起）
 
 ```python
 with Document.new() as document:
@@ -48,7 +50,7 @@ with Document.new() as document:
 `next` 包含全局 `page_index` 和相对页面顶端的 `y`。整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（0.4.0 起）
+## 盒模型与浮动行（0.5.0 起）
 
 ```python
 with Document.new() as document:
@@ -66,7 +68,7 @@ with Document.new() as document:
 `result["next"]` 可作为下一次调用的 `start`。接口布局已测量尺寸的盒子并绘制装饰；
 自动测量文本盒与嵌套混合容器见下文的布局接口。详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（0.4.0 起）
+## 文本自动测量（0.5.0 起）
 
 ```python
 with Document.new() as document:
@@ -282,7 +284,7 @@ the width. Available since 0.4.0; use matching bindings and native library.
 
 ### Protected content ranges (unreleased source API)
 
-Use matching source bindings and native library; this addition is outside 0.4.0.
+Use matching source bindings and native library; this addition is outside 0.5.0.
 Protect complete measured lines while placing/decorating a box:
 
 ```python
@@ -301,7 +303,7 @@ next page. The result uses ordinary box-layout fragment fields and continuation;
 callers draw child content separately. Empty policies retain geometric cuts.
 Invalid policies roll back the entire call.
 
-## Device hairlines (unreleased; after 0.4.0)
+## Device hairlines (0.5.0 candidate)
 
 Pass `line_width=0` to `add_path_object`, `add_composite_path_object`, or
 `add_path_annotation` for a one-device-pixel path stroke. Existing paths
@@ -309,7 +311,7 @@ accept `set_page_path_stroke_style(0, object_id, {"line_width": 0})`.
 PNG retains device width across DPI and transforms; PDF preserves a native
 zero-width stroke. Use the matching unreleased native library.
 
-## Vector canvas batches (unreleased; after 0.4.0)
+## Vector canvas batches (0.5.0 candidate)
 
 Use a matching native library built from the same unreleased source.
 
@@ -332,7 +334,7 @@ paths and drawing state, and `begin_path` to clear the path. Unknown commands
 and fields are rejected. Set global alpha to `None` to clear it.
 See the [command reference](../../docs/FEATURES.md#有状态向量画布) for all vector operations and remaining text limitations.
 
-### Canvas images (unreleased)
+### Canvas images (0.5.0 candidate)
 
 Image commands accept bytes, bytearray or memoryview in `data`. Alternatively,
 use `data_base64`; providing both is an error. `draw_image_at` uses natural
@@ -356,7 +358,7 @@ with Document.new() as document:
     document.save("canvas-images.ofd")
 ```
 
-### Canvas text (unreleased)
+### Canvas text (0.5.0 candidate)
 
 `set_font` configures size, tracking, weight, italic, alignment and quarter-turn
 reading/character directions. Omitted fields use SimSun, 1 mm, weight 400 and
