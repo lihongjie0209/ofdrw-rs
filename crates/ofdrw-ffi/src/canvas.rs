@@ -365,6 +365,110 @@ mod tests {
         Ok(result)
     }
 
+    fn measure_area(
+        handle: *mut OfdDocument,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, i32> {
+        let input = CString::new(value.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        let status =
+            unsafe { ofd_measure_canvas_text_area_json(handle, 0, input.as_ptr(), &mut output) };
+        if status != 0 {
+            return Err(status);
+        }
+        let result =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(output.data, output.len) })
+                .unwrap();
+        unsafe { ofd_buffer_free(output) };
+        Ok(result)
+    }
+
+    #[test]
+    fn ffi_canvas_area_returns_typed_json_and_preserves_document() {
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(40., 30.).unwrap();
+        let id = doc
+            .add_embedded_font(
+                "CanvasTest",
+                include_bytes!("../../ofdrw/tests/fixtures/dejavu-sans.ttf"),
+            )
+            .unwrap()
+            .to_string();
+        let before = doc.to_bytes().unwrap();
+        let handle = register_document(doc).unwrap();
+        let area = measure_area(
+            handle,
+            &json!({"text":"WiA", "font":{"font_id":id,"size":4,"letter_spacing":-1}}),
+        )
+        .unwrap();
+        assert_eq!(
+            area,
+            json!({"width":7.802734375,"height":4.65625,"letter_spacing":0.,
+            "char_areas":[[0.,0.,3.955078125,4.65625],[0.,0.,1.111328125,4.65625],[0.,0.,2.736328125,4.65625]]})
+        );
+        assert_eq!(
+            measure_area(handle, &json!({"text":""})).unwrap(),
+            json!({"width":0.,"height":0.,"letter_spacing":0.,"char_areas":[]})
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_canvas_area_rejects_invalid_requests_nulls_and_closed_handles() {
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(40., 30.).unwrap();
+        let before = doc.to_bytes().unwrap();
+        let handle = register_document(doc).unwrap();
+        for request in [
+            json!({"text":"x","extra":1}),
+            json!({"text":12}),
+            json!({"text":"x","font":{"size":0}}),
+            json!({"text":"x","font":{"extra":1}}),
+        ] {
+            assert!(measure_area(handle, &request).is_err());
+        }
+        let input = CString::new(r#"{"text":"x"}"#).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        for (pointer, page, request, destination) in [
+            (
+                ptr::null(),
+                0,
+                input.as_ptr(),
+                &mut output as *mut OfdBuffer,
+            ),
+            (handle as *const OfdDocument, 1, input.as_ptr(), &mut output),
+            (handle as *const OfdDocument, 0, ptr::null(), &mut output),
+            (
+                handle as *const OfdDocument,
+                0,
+                input.as_ptr(),
+                ptr::null_mut(),
+            ),
+        ] {
+            assert_ne!(
+                unsafe { ofd_measure_canvas_text_area_json(pointer, page, request, destination) },
+                0
+            );
+            assert!(output.data.is_null());
+        }
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        unsafe { ofd_close(handle) };
+        assert!(measure_area(handle, &json!({"text":""})).is_err());
+    }
+
     #[test]
     fn ffi_canvas_text_matches_all_java_metrics_and_reference_pixels() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

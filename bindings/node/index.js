@@ -309,6 +309,7 @@ const api = {
   addFlowBlocks: library.func('int ofd_add_flow_blocks_json(OfdDocument handle, size_t document_index, str flow, _Out_ OfdBuffer *output)'),
   drawCanvas: library.func('int ofd_draw_canvas_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
   measureCanvasText: library.func('int ofd_measure_canvas_text_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
+  measureCanvasTextArea: library.func('int ofd_measure_canvas_text_area_json(OfdDocument handle, size_t page_index, str request, _Out_ OfdBuffer *output)'),
   addFixedContainers: library.func('int ofd_add_fixed_containers_json(OfdDocument handle, size_t page_index, str layout, _Out_ OfdBuffer *output)'),
   addFlowContainers: library.func('int ofd_add_flow_containers_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
   addTextBoxes: library.func('int ofd_add_text_boxes_json(OfdDocument handle, size_t document_index, str layout, _Out_ OfdBuffer *output)'),
@@ -1684,6 +1685,11 @@ class Document {
   measureCanvasText(pageIndex, text, font = {}) {
     const payload = canvasJson({text: textValue(text), font: optionsObject(font)});
     return this._json(api.measureCanvasText, index(pageIndex, 'pageIndex'), payload);
+  }
+
+  measureCanvasTextArea(pageIndex, text, font = {}) {
+    const payload = canvasJson({text: textValue(text), font: optionsObject(font)});
+    return this._json(api.measureCanvasTextArea, index(pageIndex, 'pageIndex'), payload);
   }
 
   drawCanvas(pageIndex, box, commands) {

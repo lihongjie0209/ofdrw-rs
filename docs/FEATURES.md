@@ -797,6 +797,11 @@ ascender − descender + lineGap；结果保留原始字体单位精度。Java A
 量化差异单独限制在每字符 0.0001 mm；三份 TrueType 字体使用精确数值比较。
 960 组固定 Java 版本对照覆盖四份字体、全部 16 种方向组合、控制字符与字距。
 负字距在画布的测量和文字绘制中统一归零，与 Java `FontSetting` 一致。
+C 使用 `ofd_measure_canvas_text_area_json`，请求格式与原文本测量一致；
+Python 使用 `measure_canvas_text_area`，Go 使用 `MeasureCanvasTextArea`，
+Node.js 使用 `measureCanvasTextArea`。各接口返回 `width`、`height`、
+`letter_spacing` 和 `char_areas`，Go/TypeScript 同时提供类型定义。
+这些接口位于 v0.5.0 之后的开发分支，需使用同一源码构建的本机库。
 
 文字坐标、字号、字距的 OFD 数值序列化与 Java STBase 的精度规则一致；
 测量保留完整精度。制表符、换行与回车使用零字宽，与 Java AWT 一致；

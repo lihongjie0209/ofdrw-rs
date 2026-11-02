@@ -380,3 +380,21 @@ with Document.new() as document:
     document.save("canvas-text.ofd")
     print(metrics["width"])
 ```
+
+### Canvas text areas (development after v0.5.0)
+
+Use a native library built from the same development source. Measurement returns
+logical rectangles rather than positioned glyph ink bounds; it leaves the document
+unchanged. Negative tracking is treated as zero.
+
+```python
+from ofdrw_rs import Document
+
+with Document.new() as document:
+    document.add_blank_page(40, 30)
+    before = document.to_bytes()
+    area = document.measure_canvas_text_area(0, "Rust", {"size": 4})
+    assert len(area["char_areas"]) == 4
+    assert document.to_bytes() == before
+    print(area["width"], area["height"])
+```

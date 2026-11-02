@@ -6,8 +6,8 @@ import pytest
 from ofdrw_rs import Document, OfdError
 
 ROOT = Path(__file__).resolve().parents[3] / "crates/ofdrw/tests/fixtures/canvas-java"
-REQUESTS = json.loads((ROOT / "requests.json").read_text())
-REFERENCES = {case["name"]: case for case in json.loads((ROOT / "reference.json").read_text())["cases"]}
+REQUESTS = json.loads((ROOT / "requests.json").read_text(encoding="utf-8"))
+REFERENCES = {case["name"]: case for case in json.loads((ROOT / "reference.json").read_text(encoding="utf-8"))["cases"]}
 
 
 @pytest.mark.parametrize("case", REQUESTS["cases"], ids=lambda case: case["name"])
@@ -77,7 +77,7 @@ def test_canvas_rejects_malformed_unknown_and_late_invalid_commands_atomically()
 
 
 IMAGE_ROOT = ROOT.parent / "canvas-images-java"
-IMAGE_REQUESTS = json.loads((IMAGE_ROOT / "requests.json").read_text())
+IMAGE_REQUESTS = json.loads((IMAGE_ROOT / "requests.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("case", IMAGE_REQUESTS["cases"], ids=lambda case: case["name"])
@@ -130,7 +130,7 @@ def test_canvas_image_rejects_invalid_bytes_and_conflicting_encodings_atomically
 
 
 TEXT_ROOT = ROOT.parent / "canvas-text-java"
-TEXT_REQUESTS = json.loads((TEXT_ROOT / "requests.json").read_text())
+TEXT_REQUESTS = json.loads((TEXT_ROOT / "requests.json").read_text(encoding="utf-8"))
 
 
 def test_canvas_text_metrics_and_drawing_match_all_java_directions():
@@ -149,7 +149,7 @@ def test_canvas_text_metrics_and_drawing_match_all_java_directions():
                 {"type": "set_font", "font": font},
                 {"type": "fill_text", "text": TEXT_REQUESTS["text"], "point": case["point"]},
             ])
-        controls = json.loads((TEXT_ROOT / "controls.json").read_text())
+        controls = json.loads((TEXT_ROOT / "controls.json").read_text(encoding="utf-8"))
         for case in controls["cases"]:
             text = "A" + chr(case["code"]) + "B"
             assert doc.measure_canvas_text(0, text, {"font_id": font_id, "size": 4}) == case["metrics"]
@@ -193,3 +193,51 @@ def test_canvas_text_defaults_empty_input_invalid_settings_and_closed_document()
             doc.measure_canvas_text(0, "text", [])
     with pytest.raises(OfdError):
         doc.measure_canvas_text(0, "text")
+
+
+def test_canvas_text_area_matches_all_java_reference_cases():
+    cases = json.loads((TEXT_ROOT / "areas.json").read_text(encoding="utf-8"))["cases"]
+    assert len(cases) == 960
+    with Document.new() as doc:
+        doc.add_blank_page(40, 30)
+        fonts = {name: doc.add_embedded_font(name, (TEXT_ROOT.parent / name).read_bytes())
+                 for name in {case["font"] for case in cases}}
+        before = doc.to_bytes()
+        for case in cases:
+            font = {"font_id": fonts[case["font"]], "size": 4,
+                    **{key: case[key] for key in ("letter_spacing", "read_direction", "char_direction")}}
+            snapshot = copy.deepcopy(font)
+            area = doc.measure_canvas_text_area(0, case["text"], font)
+            assert font == snapshot
+            tolerance = 0.0001 if case["font"] == "test-name-cff.otf" else 0
+            assert area["letter_spacing"] == case["effective_letter_spacing"]
+            count = max(len(area["char_areas"]), 1)
+            for key in ("width", "height"):
+                assert abs(area[key] - case[key]) <= tolerance * count, case
+            assert len(area["char_areas"]) == len(case["char_areas"])
+            for actual, expected in zip(area["char_areas"], case["char_areas"]):
+                assert all(abs(a - b) <= tolerance for a, b in zip(actual, expected)), case
+        assert doc.to_bytes() == before
+        with Document.from_bytes(before) as reopened:
+            assert reopened.measure_canvas_text_area(0, "A😀", {"font_id": fonts["dejavu-sans.ttf"]}) == doc.measure_canvas_text_area(0, "A😀", {"font_id": fonts["dejavu-sans.ttf"]})
+
+
+def test_canvas_text_area_validates_inputs_and_closed_documents():
+    with Document.new() as doc:
+        doc.add_blank_page(40, 30)
+        before = doc.to_bytes()
+        assert doc.measure_canvas_text_area(0, "") == {"width": 0, "height": 0, "letter_spacing": 0, "char_areas": []}
+        assert len(doc.measure_canvas_text_area(0, "A😀")["char_areas"]) == 2
+        for font in [{"size": 0}, {"extra": 1}, {"letter_spacing": float("nan")}, {"letter_spacing": 1e308}, {"font_id": "999999"}]:
+            with pytest.raises((OfdError, ValueError)):
+                doc.measure_canvas_text_area(0, "ABC", font)
+        for page in [-1, 1]:
+            with pytest.raises((IndexError, OfdError)):
+                doc.measure_canvas_text_area(page, "x")
+        with pytest.raises(TypeError):
+            doc.measure_canvas_text_area(0, 1)
+        with pytest.raises(TypeError):
+            doc.measure_canvas_text_area(0, "x", [])
+        assert doc.to_bytes() == before
+    with pytest.raises(OfdError):
+        doc.measure_canvas_text_area(0, "")

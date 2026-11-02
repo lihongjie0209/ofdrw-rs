@@ -1085,6 +1085,7 @@ export class Document {
   /** Draw absolute mixed containers on an existing page; never adds pages. */
   drawCanvas(pageIndex: number, boundary: [number, number, number, number], commands: readonly CanvasCommand[]): string[];
   measureCanvasText(pageIndex: number, text: string, font?: CanvasFont): CanvasTextMetrics;
+  measureCanvasTextArea(pageIndex: number, text: string, font?: CanvasFont): CanvasTextAreaMetrics;
   addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];
   addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;
   addTextBoxes(documentIndex: number, boxes: TextBox[], options?: BoxLayoutOptions): BoxLayoutResult;
@@ -1222,3 +1223,6 @@ export type FlowContainerChild =
   | {type: 'page_area_fill'}
   | {type: 'table'; table: NestedTable; align?: 'left' | 'center' | 'right';
       table_style?: {font_size?: number; line_height?: number; font_id?: string; repeat_header?: boolean}};
+
+/** Logical unpositioned character rectangles and aggregate dimensions in millimeters. */
+export interface CanvasTextAreaMetrics { width: number; height: number; letter_spacing: number; char_areas: [number, number, number, number][] }

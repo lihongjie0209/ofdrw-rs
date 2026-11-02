@@ -453,3 +453,44 @@ func main() {
     log.Println(metrics.Width)
 }
 ```
+
+### Canvas text areas (development after v0.5.0)
+
+Use a native library built from the same development source. `CanvasTextAreaMetrics`
+contains logical width/height, effective tracking and unpositioned character
+rectangles in millimeters. Measurement is read-only.
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw"
+)
+
+func main() {
+	if err := measureArea(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func measureArea() error {
+	document, err := ofdrw.New()
+	if err != nil {
+		return fmt.Errorf("create document: %w", err)
+	}
+	defer document.Close()
+	if err := document.AddBlankPage(40, 30); err != nil {
+		return fmt.Errorf("add page: %w", err)
+	}
+	size := 4.0
+	area, err := document.MeasureCanvasTextArea(0, "Rust", ofdrw.CanvasFont{Size: &size})
+	if err != nil {
+		return fmt.Errorf("measure area: %w", err)
+	}
+	fmt.Println(area.Width, area.Height, len(area.CharAreas))
+	return nil
+}
+```

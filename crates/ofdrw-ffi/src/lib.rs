@@ -11245,6 +11245,40 @@ pub unsafe extern "C" fn ofd_measure_canvas_text_json(
     })
 }
 
+/// Measure logical canvas character areas without changing the document or allocating resources.
+///
+/// JSON requires `text` and accepts optional `font` settings. Returns logical
+/// `width`, `height`, effective `letter_spacing` and `char_areas:[x,y,w,h][]`.
+/// Unknown fields are rejected; omitted settings use CanvasFont defaults.
+///
+/// # Safety
+/// `handle` must be live, `request_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_measure_canvas_text_area_json(
+    handle: *const OfdDocument,
+    page_index: usize,
+    request_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let (text, font) = canvas::parse_measure(input_string(request_json)?)?;
+        let metrics = document_ref(handle)?
+            .measure_canvas_text_area(page_index, &text, &font)
+            .map_err(|e| e.to_string())?;
+        output_buffer(
+            serde_json::to_vec(&serde_json::json!({
+                "width": metrics.width, "height": metrics.height,
+                "letter_spacing": metrics.letter_spacing, "char_areas": metrics.char_areas,
+            }))
+            .map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
 /// Draw fixed mixed containers on one existing global page, atomically.
 ///
 /// JSON is `{"containers":[{"position":[x,y],"container":{...}}]}`.

@@ -735,3 +735,20 @@ try {
   console.log(metrics.width);
 } finally {document.close();}
 ```
+
+### Canvas text areas (development after v0.5.0)
+
+Use a native library built from the same development source. The typed
+`CanvasTextAreaMetrics` contains `width`, `height`, effective `letter_spacing`,
+and unpositioned `char_areas` rectangles in millimeters. Measurement is read-only.
+
+```javascript
+const {Document} = require('ofdrw-rs');
+const document = Document.create();
+try {
+  document.addBlankPage(40, 30);
+  const area = document.measureCanvasTextArea(0, 'Rust', {size: 4});
+  if (area.char_areas.length !== 4) throw new Error('Unexpected character count');
+  console.log(area.width, area.height);
+} finally {document.close();}
+```

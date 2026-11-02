@@ -320,6 +320,7 @@ _ffi.cdef(
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_measure_canvas_text_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
+    int ofd_measure_canvas_text_area_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
     int ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
@@ -4410,6 +4411,26 @@ class Document:
         payload = json.dumps({"text": text, "font": settings}, allow_nan=False)
         output = _ffi.new("OfdBuffer *")
         _check(_lib.ofd_measure_canvas_text_json(self._handle, page_index, _utf8(payload), output))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def measure_canvas_text_area(self, page_index: int, text: str, font: dict | None = None) -> dict:
+        """Measure logical character rectangles and aggregate width/height without modifying the document."""
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        if font is not None and not isinstance(font, dict):
+            raise TypeError("font must be a dictionary")
+        settings = dict(font) if font is not None else {}
+        if settings.get("font_id") is not None:
+            settings["font_id"] = str(settings["font_id"])
+        payload = json.dumps({"text": text, "font": settings}, allow_nan=False)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_measure_canvas_text_area_json(self._handle, page_index, _utf8(payload), output))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))
         finally:

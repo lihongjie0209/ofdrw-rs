@@ -198,3 +198,52 @@ test('canvas text defaults, empty text and invalid settings preserve document st
   } finally {doc.close();}
   assert.throws(() => doc.measureCanvasText(0, 'text'));
 });
+
+test('canvas text areas match all 960 independent Java cases without mutation', () => {
+  const textRoot = path.join(root, '../canvas-text-java');
+  const cases = JSON.parse(fs.readFileSync(path.join(textRoot, 'areas.json'))).cases;
+  assert.equal(cases.length, 960);
+  const doc = Document.create();
+  try {
+    doc.addBlankPage(40, 30);
+    const fonts = Object.fromEntries([...new Set(cases.map(entry => entry.font))].map(name =>
+      [name, String(doc.addEmbeddedFont(name, fs.readFileSync(path.join(textRoot, '..', name))))]));
+    const before = doc.toBytes();
+    for (const entry of cases) {
+      const font = {font_id: fonts[entry.font], size: 4, letter_spacing: entry.letter_spacing,
+        read_direction: entry.read_direction, char_direction: entry.char_direction};
+      const snapshot = structuredClone(font);
+      const area = doc.measureCanvasTextArea(0, entry.text, font);
+      assert.deepEqual(font, snapshot);
+      const tolerance = entry.font === 'test-name-cff.otf' ? 0.0001 : 0;
+      const count = Math.max(area.char_areas.length, 1);
+      assert.equal(area.letter_spacing, entry.effective_letter_spacing);
+      for (const key of ['width', 'height']) assert.ok(Math.abs(area[key] - entry[key]) <= tolerance * count);
+      assert.equal(area.char_areas.length, entry.char_areas.length);
+      area.char_areas.forEach((box, i) => box.forEach((value, j) =>
+        assert.ok(Math.abs(value - entry.char_areas[i][j]) <= tolerance)));
+    }
+    assert.deepEqual(doc.toBytes(), before);
+    const reopened = Document.fromBytes(before);
+    try {assert.deepEqual(reopened.measureCanvasTextArea(0, 'A😀'), doc.measureCanvasTextArea(0, 'A😀'));}
+    finally {reopened.close();}
+  } finally {doc.close();}
+});
+
+test('canvas text area validates input and document lifetime', () => {
+  const doc = Document.create();
+  try {
+    doc.addBlankPage(40, 30);
+    const before = doc.toBytes();
+    assert.deepEqual(doc.measureCanvasTextArea(0, ''), {width: 0, height: 0, letter_spacing: 0, char_areas: []});
+    assert.equal(doc.measureCanvasTextArea(0, 'A😀').char_areas.length, 2);
+    for (const font of [{size: 0}, {extra: 1}, {letter_spacing: NaN}, {letter_spacing: 1e308}, {font_id: '999999'}]) {
+      assert.throws(() => doc.measureCanvasTextArea(0, 'ABC', font));
+    }
+    for (const page of [-1, 1]) assert.throws(() => doc.measureCanvasTextArea(page, 'x'));
+    assert.throws(() => doc.measureCanvasTextArea(0, 1), TypeError);
+    assert.throws(() => doc.measureCanvasTextArea(0, 'x', []), TypeError);
+    assert.deepEqual(doc.toBytes(), before);
+  } finally {doc.close();}
+  assert.throws(() => doc.measureCanvasTextArea(0, ''));
+});
