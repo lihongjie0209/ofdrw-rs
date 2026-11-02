@@ -17,6 +17,8 @@ pub use canvas::CanvasCommand;
 pub use canvas_color::parse_canvas_color;
 mod canvas_font_style;
 pub use canvas_font_style::{parse_canvas_font_style, CanvasFontStyle};
+mod canvas_units;
+pub use canvas_units::CanvasUnits;
 mod canvas_text;
 pub use canvas_text::{CanvasFont, CanvasTextAlign, CanvasTextAreaMetrics, CanvasTextMetrics};
 mod encryption;
