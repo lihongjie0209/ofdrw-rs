@@ -158,3 +158,57 @@ func (doc *Document) MeasureCanvasText(pageIndex int, text string, font CanvasFo
 	}
 	return metrics, nil
 }
+
+// CanvasTextAreaMetrics contains logical character rectangles and aggregate
+// dimensions in millimeters. Rectangles are unpositioned [0, 0, width, height].
+// LetterSpacing reports effective tracking after negative values clamp to zero.
+type CanvasTextAreaMetrics struct {
+	Width         float64      `json:"width"`
+	Height        float64      `json:"height"`
+	LetterSpacing float64      `json:"letter_spacing"`
+	CharAreas     [][4]float64 `json:"char_areas"`
+}
+
+// MeasureCanvasTextArea measures logical character areas without changing the document.
+func (doc *Document) MeasureCanvasTextArea(pageIndex int, text string, font CanvasFont) (CanvasTextAreaMetrics, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return CanvasTextAreaMetrics{}, err
+	}
+	if pageIndex < 0 {
+		return CanvasTextAreaMetrics{}, errors.New("negative page index")
+	}
+	payload, err := json.Marshal(struct {
+		Text string     `json:"text"`
+		Font CanvasFont `json:"font"`
+	}{Text: text, Font: font})
+	if err != nil {
+		return CanvasTextAreaMetrics{}, fmt.Errorf("encode canvas text area measurement: %w", err)
+	}
+	request, err := cString(string(payload))
+	if err != nil {
+		return CanvasTextAreaMetrics{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.measureCanvasTextArea(
+		doc.handle,
+		uintptr(pageIndex),
+		&request[0],
+		&buffer,
+	)); err != nil {
+		return CanvasTextAreaMetrics{}, fmt.Errorf("measure canvas text area: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return CanvasTextAreaMetrics{}, err
+	}
+	var metrics CanvasTextAreaMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return CanvasTextAreaMetrics{}, fmt.Errorf("decode canvas text area measurement: %w", err)
+	}
+	return metrics, nil
+}

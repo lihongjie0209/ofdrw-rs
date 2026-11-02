@@ -541,3 +541,9 @@ function exerciseCanvas(document: Document): void {
   // @ts-expect-error unknown command tags are rejected
   document.drawCanvas(0, [0, 0, 40, 30], [{type: 'unknown'}]);
 }
+
+function exerciseCanvasArea(document: Document): void {
+  const canvasArea = document.measureCanvasTextArea(0, 'Canvas', {size: 4});
+  const canvasBoxes: [number, number, number, number][] = canvasArea.char_areas;
+  void canvasBoxes;
+}

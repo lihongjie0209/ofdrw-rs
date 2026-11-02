@@ -429,6 +429,8 @@ int32_t ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, cons
 int32_t ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
 /* Measure text with optional canvas font settings; does not modify the document. */
 int32_t ofd_measure_canvas_text_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
+/* Same request as text measurement; returns width, height, letter_spacing and char_areas. */
+int32_t ofd_measure_canvas_text_area_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
 /* Fixed mixed containers on one existing global page; returns a placement array. */
 int32_t ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
 int32_t ofd_add_flow_containers_json(OfdDocument *handle, size_t document_index, const char *layout_json, OfdBuffer *output);
