@@ -6,7 +6,7 @@ Node.js wrapper for the Rust OFD core. It uses the versioned C ABI through
 Check npm and GitHub Releases for version availability. Install from npm:
 
 ```sh
-npm install ofdrw-rs@0.3.0
+npm install ofdrw-rs@0.4.0
 ```
 
 For development from this source tree, build the native library and install
@@ -29,7 +29,7 @@ staged package binary is also present under `native/`.
 The CI-built npm tarball includes the native library for Linux, macOS, and
 Windows on x64 and ARM64. Linux binaries are built on Ubuntu 24.04, so older
 glibc distributions may need a native build. Install the tarball with
-`npm install /path/to/ofdrw-rs-0.3.0.tgz`;
+`npm install /path/to/ofdrw-rs-0.4.0.tgz`;
 the library is loaded automatically. To use a custom native build, set
 `OFDRW_LIB_PATH` to its absolute path. Packing from a source checkout requires
 all six release libraries under `native/<platform>-<arch>/`. Stage each one
@@ -382,7 +382,7 @@ currently supported OFD-A rules, and `prepareArchive()` returns a separate
 package with supported archival normalizations applied. Check the returned
 package again because complete OFD-A conversion is not yet implemented.
 
-## 混合流布局（源码开发功能，尚未发布）
+## 混合流布局（0.4.0 起）
 
 ```js
 const document = Document.create();
@@ -402,7 +402,7 @@ try {
 和 `FlowLayoutResult` TypeScript 类型。图片使用 `data_base64`。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（源码开发功能，尚未发布）
+## 盒模型与浮动行（0.4.0 起）
 
 ```js
 const document = Document.create();
@@ -420,10 +420,10 @@ try {
 
 提供 `LayoutBox`、`BoxLayoutItem`、`BoxLayoutOptions`、`BoxPlacement` 和
 `BoxLayoutResult` TypeScript 类型。`next` 可传给下次调用的 `start`。
-自动测量文本盒与嵌套混合容器见下文的源码开发接口。
+自动测量文本盒与嵌套混合容器见下文的布局接口。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（源码开发功能，尚未发布）
+## 文本自动测量（0.4.0 起）
 
 ```js
 const document = Document.create();
@@ -438,9 +438,9 @@ try {
 
 提供 `FlowTextMetrics` 和 `FlowLineMetrics` 类型。测量不增加页面或资源，
 页面几何和 `start` 被忽略；逐行位置和逻辑基线相对段落原点。
-测得高度可用于盒模型；按行拆分的文本盒与一般嵌套容器见下文的源码开发接口。
+测得高度可用于盒模型；按行拆分的文本盒与一般嵌套容器见下文的布局接口。
 
-### Intrinsic image sizes (unreleased source API)
+### Intrinsic image sizes (since 0.4.0)
 
 Flow images, table-cell images and image blocks accept `intrinsic_size: true`
 (`IntrinsicSize: true` in Go). Omit width/height or leave them zero: pixel
@@ -450,7 +450,7 @@ in Go) optionally shrinks the image to millimeter bounds while preserving
 aspect ratio. It never enlarges smaller images. Nonzero explicit dimensions
 cannot be combined with intrinsic sizing. Without intrinsic sizing, both
 explicit dimensions remain required. These options share the same native
-validation in C and all bindings and are not included in version 0.3.0.
+validation in C and all bindings, available since 0.4.0.
 
 ```javascript
 const fs = require('node:fs');
@@ -465,7 +465,7 @@ try {
 } finally { doc.close(); }
 ```
 
-### Automatic text boxes (unreleased source API)
+### Automatic text boxes (since 0.4.0)
 
 ```javascript
 const fs = require('node:fs');
@@ -487,9 +487,9 @@ Typography can enable shaped text or paragraph keep rules; page geometry and
 continuation come from the shared box options. The result contains all
 fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
 General nested child containers use the mixed container API below. This API is available
-from the development source and is not included in published version 0.3.0.
+since 0.4.0.
 
-### Nested mixed containers (unreleased source API)
+### Nested mixed containers (since 0.4.0)
 
 ```javascript
 const fs = require('node:fs');
@@ -529,8 +529,7 @@ body-row groups, and header/body pairs that cannot fit a full page fail.
 Fragment heights include repeated headers and the space needed to align
 continuing floating columns.
 The whole call rolls back on invalid children. Limits are eight container
-levels and 10,000 container/child entries. This source API is not included in
-published version 0.3.0.
+levels and 10,000 container/child entries. This API is available since 0.4.0.
 
 
 `line_break` ends the current nonempty floating row; leading, repeated and
@@ -546,7 +545,7 @@ container that would span pages fails atomically.
 ```
 
 
-### Dashed box borders (unreleased source API)
+### Dashed box borders (since 0.4.0)
 
 `border_dash` (`BorderDash` in Go) uses Java `Div.setBorderDash` arguments:
 `[3]` means dash/gap `[3, 3]`; `[3, 2]` means dash/gap `[3, 2]`;
@@ -567,7 +566,7 @@ at each emitted path; allocation, text wrapping and continuation are unchanged.
 ```
 
 
-### Box painting layers (unreleased source API)
+### Box painting layers (since 0.4.0)
 
 Set `layout.layer` (`Layout.Layer` in Go) to `background`, `body` or
 `foreground`. Measured box items accept the same `layer` field directly.
@@ -589,9 +588,9 @@ document.addBoxLayout(0, [{type: 'box', size: [40, 10],
   background_color: [240, 240, 240], layer: 'background'}]);
 ```
 
-### Fixed page containers (development)
+### Fixed page containers (since 0.4.0)
 
-Use development bindings with their matching native library; this API follows 0.3.0.
+Available since 0.4.0; use bindings with their matching native library.
 
 ```js
 const doc = Document.create();
@@ -614,7 +613,7 @@ The call never adds pages. Nested text/images/tables, offsets, layers and placeh
 follow flow-container rules. Page-area fillers are ignored; invalid later content
 rolls back the entire call. Images use `data_base64` strings.
 
-### Inline placeholders (development)
+### Inline placeholders (since 0.4.0)
 
 `FlowSpan` accepts `placeholder_width` in millimeters with empty `text` and
 `font_size` as height. This reserves an indivisible inline rectangle without
@@ -632,4 +631,4 @@ The same spans work in styled flow, text boxes, flow blocks and fixed/flow
 containers. Geometry participates in wrapping and line height while text omits
 the placeholders. A leading placeholder absorbs a configured first-line indent
 once. Character-count reservations use `count * (font_size + letter_spacing)`.
-Use development bindings and their matching native library for this input.
+Use matching bindings and native library (0.4.0 or later).

@@ -4,13 +4,13 @@ Python 3.10+ bindings to the Rust OFD core through CFFI.
 Install the matching version from [PyPI](https://pypi.org/project/ofdrw-rs/):
 
 ```sh
-python -m pip install ofdrw-rs==0.3.0
+python -m pip install ofdrw-rs==0.4.0
 ```
 
 Check the registry and release pages for version availability.
 The wheel includes the native library; a Rust toolchain is not needed.
 Wheels for all six supported platforms are also available from
-[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0).
+[GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0).
 
 ```python
 from ofdrw_rs import Document
@@ -30,7 +30,7 @@ Set `OFDRW_LIB_PATH` to an absolute shared-library path for a custom build.
 Supported behavior and limitations are documented in the
 [repository README](https://github.com/lihongjie0209/ofdrw-rs#python).
 
-## 混合流布局（源码开发功能，尚未发布）
+## 混合流布局（0.4.0 起）
 
 ```python
 with Document.new() as document:
@@ -48,7 +48,7 @@ with Document.new() as document:
 `next` 包含全局 `page_index` 和相对页面顶端的 `y`。整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（源码开发功能，尚未发布）
+## 盒模型与浮动行（0.4.0 起）
 
 ```python
 with Document.new() as document:
@@ -64,9 +64,9 @@ with Document.new() as document:
 
 `size` 是内容宽高；`margin`、`border`、`padding` 均按上、右、下、左排列。
 `result["next"]` 可作为下一次调用的 `start`。接口布局已测量尺寸的盒子并绘制装饰；
-自动测量文本盒与嵌套混合容器见下文的源码开发接口。详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
+自动测量文本盒与嵌套混合容器见下文的布局接口。详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（源码开发功能，尚未发布）
+## 文本自动测量（0.4.0 起）
 
 ```python
 with Document.new() as document:
@@ -80,9 +80,9 @@ with Document.new() as document:
 测量不会增加页面或资源。`width` 为最大行前进宽度，`height` 包含内部空行和段间距；
 逐行 `x`、`y`、`baseline` 相对段落左上角。页面几何和 `start` 不参与测量。
 将测得高度用于盒模型，再按内容矩形调用文本流式绘制；尺寸属于逻辑行框，
-按行拆分的文本盒与一般嵌套容器见下文的源码开发接口。
+按行拆分的文本盒与一般嵌套容器见下文的布局接口。
 
-### Intrinsic image sizes (unreleased source API)
+### Intrinsic image sizes (since 0.4.0)
 
 Flow images, table-cell images and image blocks accept `intrinsic_size: true`
 (`IntrinsicSize: true` in Go). Omit width/height or leave them zero: pixel
@@ -92,7 +92,7 @@ in Go) optionally shrinks the image to millimeter bounds while preserving
 aspect ratio. It never enlarges smaller images. Nonzero explicit dimensions
 cannot be combined with intrinsic sizing. Without intrinsic sizing, both
 explicit dimensions remain required. These options share the same native
-validation in C and all bindings and are not included in version 0.3.0.
+validation in C and all bindings, available since 0.4.0.
 
 ```python
 from pathlib import Path
@@ -106,7 +106,7 @@ with Document.new() as doc:
     Path("picture.ofd").write_bytes(doc.to_bytes())
 ```
 
-### Automatic text boxes (unreleased source API)
+### Automatic text boxes (since 0.4.0)
 
 ```python
 from pathlib import Path
@@ -128,9 +128,9 @@ Typography can enable shaped text or paragraph keep rules; page geometry and
 continuation come from the shared box options. The result contains all
 fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
 General nested child containers use the mixed container API below. This API is available
-from the development source and is not included in published version 0.3.0.
+since 0.4.0.
 
-### Nested mixed containers (unreleased source API)
+### Nested mixed containers (since 0.4.0)
 
 ```python
 from pathlib import Path
@@ -171,8 +171,7 @@ body-row groups, and header/body pairs that cannot fit a full page fail.
 Fragment heights include repeated headers and the space needed to align
 continuing floating columns.
 The whole call rolls back on invalid children. Limits are eight container
-levels and 10,000 container/child entries. This source API is not included in
-published version 0.3.0.
+levels and 10,000 container/child entries. This API is available since 0.4.0.
 
 
 `line_break` ends the current nonempty floating row; leading, repeated and
@@ -188,7 +187,7 @@ container that would span pages fails atomically.
 ```
 
 
-### Dashed box borders (unreleased source API)
+### Dashed box borders (since 0.4.0)
 
 `border_dash` (`BorderDash` in Go) uses Java `Div.setBorderDash` arguments:
 `[3]` means dash/gap `[3, 3]`; `[3, 2]` means dash/gap `[3, 2]`;
@@ -209,7 +208,7 @@ at each emitted path; allocation, text wrapping and continuation are unchanged.
 ```
 
 
-### Box painting layers (unreleased source API)
+### Box painting layers (since 0.4.0)
 
 Set `layout.layer` (`Layout.Layer` in Go) to `background`, `body` or
 `foreground`. Measured box items accept the same `layer` field directly.
@@ -231,9 +230,9 @@ document.add_box_layout(0, [{"type": "box", "size": [40, 10],
     "background_color": [240, 240, 240], "layer": "background"}])
 ```
 
-### Fixed page containers (development)
+### Fixed page containers (since 0.4.0)
 
-Use the development bindings with their matching native library; this API follows 0.3.0.
+Available since 0.4.0; use bindings with their matching native library.
 `add_fixed_containers` draws on an existing global page and returns a placement list:
 
 ```python
@@ -258,7 +257,7 @@ never adds pages. It supports the same nested text/image/table content, offsets,
 layers and placeholders as flow containers. Page-area fillers are ignored. Invalid
 later content rolls back the entire call. Images accept bytes in `data`.
 
-### Inline placeholders (development)
+### Inline placeholders (since 0.4.0)
 
 A span with empty `text`, `placeholder_width` in millimeters and `font_size` as
 height reserves an indivisible inline rectangle without painting objects or
@@ -279,4 +278,4 @@ containers. Reserved geometry participates in wrapping and maximum line height;
 measured/extracted text omits placeholders. Invalid later input rolls back the
 call. A leading placeholder absorbs a configured first-line indent once.
 For character-count reservations use `count * (font_size + letter_spacing)` as
-the width. This development input requires matching bindings and native library.
+the width. Available since 0.4.0; use matching bindings and native library.

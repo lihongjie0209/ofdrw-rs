@@ -5,13 +5,13 @@ not require cgo. Use the module and native assets from the same release;
 check GitHub Releases for version availability. Install the module:
 
 ```sh
-go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.3.0
+go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.4.0
 ```
 
 Download native ZIPs from [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases):
 
 ```sh
-curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.3.0/ofdrw-native-linux-x64-v0.3.0.zip
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/ofdrw-native-linux-x64-v0.4.0.zip
 unzip native.zip -d native
 ```
 
@@ -38,9 +38,9 @@ func main() {
 
 `Open`, `FromBytes` and `FromPDF` read documents; `PageSVG`, `PagePNG` and
 `ToPDF` export content. Page indexes start at zero and coordinates use millimeters.
-The release workflow publishes the Go module tag `bindings/go/v0.3.0`.
+The release workflow publishes the Go module tag `bindings/go/v0.4.0`.
 
-## 混合流布局（源码开发功能，尚未发布）
+## 混合流布局（0.4.0 起）
 
 ```go
 style := ofdrw.FlowDocumentStyle{BlockGap: 2}
@@ -61,7 +61,7 @@ if err != nil { log.Fatal(err) }
 `result.Next` 可传给下一次布局的 `Start`，整次调用失败时回滚。
 详见[混合流布局](../../docs/FEATURES.md#混合流布局)。
 
-## 盒模型与浮动行（源码开发功能，尚未发布）
+## 盒模型与浮动行（0.4.0 起）
 
 ```go
 style := ofdrw.DefaultBoxLayoutStyle()
@@ -80,10 +80,10 @@ if err != nil { log.Fatal(err) }
 边距数组按上、右、下、左排列。使用 `DefaultBoxLayoutStyle()` 后可修改页面几何；
 将 `result.Next` 赋给 `style.Start` 可续写。断行和换页分别使用
 `BoxLayoutItem{Type: "line_break"}` 和 `BoxLayoutItem{Type: "page_break"}`。
-自动测量文本盒与嵌套混合容器见下文的源码开发接口。
+自动测量文本盒与嵌套混合容器见下文的布局接口。
 详见[盒模型说明](../../docs/FEATURES.md#盒模型与浮动分段)。
 
-## 文本自动测量（源码开发功能，尚未发布）
+## 文本自动测量（0.4.0 起）
 
 ```go
 spans := []ofdrw.FlowSpan{{Text: "First line\nSecond line"}}
@@ -99,9 +99,9 @@ if err != nil { log.Fatal(err) }
 
 `FlowTextMetrics`、`FlowLineMetrics` 返回逻辑尺寸和逐行位置。测量不修改页面或资源，
 页面几何和 `Start` 不参与计算；坐标和基线相对段落原点。
-按行拆分的文本盒与一般嵌套容器见下文的源码开发接口。
+按行拆分的文本盒与一般嵌套容器见下文的布局接口。
 
-### Intrinsic image sizes (unreleased source API)
+### Intrinsic image sizes (since 0.4.0)
 
 Flow images, table-cell images and image blocks accept `intrinsic_size: true`
 (`IntrinsicSize: true` in Go). Omit width/height or leave them zero: pixel
@@ -111,7 +111,7 @@ in Go) optionally shrinks the image to millimeter bounds while preserving
 aspect ratio. It never enlarges smaller images. Nonzero explicit dimensions
 cannot be combined with intrinsic sizing. Without intrinsic sizing, both
 explicit dimensions remain required. These options share the same native
-validation in C and all bindings and are not included in version 0.3.0.
+validation in C and all bindings, available since 0.4.0.
 
 ```go
 image := ofdrw.FlowBlock{
@@ -124,7 +124,7 @@ if err != nil {
 }
 ```
 
-### Automatic text boxes (unreleased source API)
+### Automatic text boxes (since 0.4.0)
 
 ```go
 typography := ofdrw.DefaultFlowTextStyle()
@@ -149,9 +149,9 @@ Typography can enable shaped text or paragraph keep rules; page geometry and
 continuation come from the shared box options. The result contains all
 fragment rectangles and `next` (`Next` in Go), reusable as `start` (`Start`).
 General nested child containers use the mixed container API below. This API is available
-from the development source and is not included in published version 0.3.0.
+since 0.4.0.
 
-### Nested mixed containers (unreleased source API)
+### Nested mixed containers (since 0.4.0)
 
 ```go
 textStyle := ofdrw.DefaultFlowTextStyle()
@@ -196,8 +196,7 @@ body-row groups, and header/body pairs that cannot fit a full page fail.
 Fragment heights include repeated headers and the space needed to align
 continuing floating columns.
 The whole call rolls back on invalid children. Limits are eight container
-levels and 10,000 container/child entries. This source API is not included in
-published version 0.3.0.
+levels and 10,000 container/child entries. This API is available since 0.4.0.
 
 
 `line_break` ends the current nonempty floating row; leading, repeated and
@@ -213,7 +212,7 @@ container that would span pages fails atomically.
 ```
 
 
-### Dashed box borders (unreleased source API)
+### Dashed box borders (since 0.4.0)
 
 `border_dash` (`BorderDash` in Go) uses Java `Div.setBorderDash` arguments:
 `[3]` means dash/gap `[3, 3]`; `[3, 2]` means dash/gap `[3, 2]`;
@@ -234,7 +233,7 @@ at each emitted path; allocation, text wrapping and continuation are unchanged.
 ```
 
 
-### Box painting layers (unreleased source API)
+### Box painting layers (since 0.4.0)
 
 Set `layout.layer` (`Layout.Layer` in Go) to `background`, `body` or
 `foreground`. Measured box items accept the same `layer` field directly.
@@ -263,9 +262,9 @@ _, err = document.AddBoxLayout(0, []ofdrw.BoxLayoutItem{
 if err != nil { log.Fatal(err) }
 ```
 
-### Fixed page containers (development)
+### Fixed page containers (since 0.4.0)
 
-Use development bindings with their matching native library; this API follows 0.3.0.
+Available since 0.4.0; use bindings with their matching native library.
 
 ```go
 if err := doc.AddBlankPage(80, 60); err != nil { return err }
@@ -288,7 +287,7 @@ may overflow. No pages are added. Nested text/images/tables, offsets, layers and
 placeholders follow flow-container rules. Page-area fillers are ignored. Invalid
 later content rolls back the whole call. Images accept `Data []byte`.
 
-### Inline placeholders (development)
+### Inline placeholders (since 0.4.0)
 
 `NewPlaceholderSpan(width, height)` creates a `FlowSpan` with empty text and an
 explicit `PlaceholderWidth *float64`, preserving width zero in JSON. Geometry
@@ -309,4 +308,4 @@ _ = metrics // line text is "Label:value"
 The same spans work in styled flow, text boxes, flow blocks and fixed/flow
 containers. A leading placeholder absorbs a configured first-line indent once.
 For character-count reservations use `count * (fontSize + letterSpacing)` as
-width. This development input requires matching bindings and native library.
+width. Available since 0.4.0; use matching bindings and native library.

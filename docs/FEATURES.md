@@ -813,7 +813,7 @@ content.
 
 ## 文本自动测量
 
-**未发布（开发分支）：** `OfdDocument::measure_flowed_spans()` computes logical
+**v0.4.0：** `OfdDocument::measure_flowed_spans()` computes logical
 line metrics and paragraph dimensions without changing the document. It shares
 font preparation, kerning, tracking, wrapping and shaping with
 `add_flowed_spans()`. Shaped text also checks the writer's glyph mappings,
@@ -857,7 +857,7 @@ all language bindings.
 
 ## 行内占位符
 
-**未发布：** `FlowSpan::placeholder(width, height)` reserves an
+**v0.4.0：** `FlowSpan::placeholder(width, height)` reserves an
 indivisible inline rectangle, and `placeholder_characters(count, font_size,
 letter_spacing)` reserves `count * (font_size + letter_spacing)` millimeters.
 `placeholder_width: Some(width)` requires empty text. Zero width is allowed;
@@ -888,12 +888,12 @@ and use `font_size` as height. Go exposes `PlaceholderWidth *float64` and
 `NewPlaceholderSpan(width, height)` so a zero width survives JSON serialization.
 Node.js declares the field in `FlowSpan`. Existing generic Python and Node.js
 serializers preserve the field. All language suites use the same Java fixtures
-and verify mixed-writer geometry and atomic errors. Use development bindings
-with a matching native library; this input follows 0.3.0.
+and verify mixed-writer geometry and atomic errors. Use matching 0.4.0-or-later bindings
+and native library.
 
 ## 图片自动尺寸
 
-**未发布（开发分支）：** Rust `TableCellImage::from_intrinsic(data, format)`
+**v0.4.0：** Rust `TableCellImage::from_intrinsic(data, format)`
 reads validated image dimensions and converts pixels at 5 pixels/mm, matching
 Java OFDRW’s `Img(Path)` constructor. Encoded DPI metadata does not affect this
 conversion. `fit_within([width, height])` shrinks to millimeter bounds while
@@ -915,7 +915,7 @@ PNG, JPEG, GIF, BMP, TIFF, JPEG 2000 and JBIG2 through existing decoders.
 
 ## 混合流布局
 
-**未发布（开发分支）：** `OfdDocument::add_flow_blocks()` accepts an ordered
+**v0.4.0：** `OfdDocument::add_flow_blocks()` accepts an ordered
 sequence of paragraphs, images, paginated tables, spacers, and explicit page
 breaks. `FlowDocumentStyle.text` shares page size, margins, an optional existing
 page start, and default typography. `block_gap` separates content blocks and is
@@ -952,7 +952,7 @@ also available below; arbitrary DOM layout fidelity remains pending.
 
 ## 盒模型与浮动分段
 
-**未发布（开发分支）：** `OfdDocument::add_box_layout()` places measured
+**v0.4.0：** `OfdDocument::add_box_layout()` places measured
 `LayoutBox` elements into Java-style rows and draws their backgrounds and
 borders. `BoxLayoutStyle` supplies page size, margins, and an optional existing
 page start. Boxes include content size, four independent margin/border/padding
@@ -996,7 +996,7 @@ measurement, safe content fragmentation and drawing.
 
 ### 按内容区间分页
 
-**未发布：** `add_box_layout_with_content_ranges()` accepts
+**v0.4.0：** `add_box_layout_with_content_ranges()` accepts
 `BoxContentRanges { source_index, ranges }` alongside the measured boxes.
 Each range is an indivisible `[start, end]` interval relative to the original
 content top. A cut inside an interval moves that interval intact to the next
@@ -1015,7 +1015,7 @@ provide styled child drawing and nested pagination. Direct range policies
 remain Rust-only.
 
 
-### Dashed box borders (unreleased source API)
+### Dashed box borders (since v0.4.0)
 
 `border_dash` (`BorderDash` in Go) uses Java `Div.setBorderDash` arguments:
 `[3]` means dash/gap `[3, 3]`; `[3, 2]` means dash/gap `[3, 2]`;
@@ -1041,7 +1041,7 @@ share the reference, including round trips and atomic rejection of invalid
 patterns. Vector PDF export/reimport retains dashed path painting.
 
 
-### Box painting layers (unreleased source API)
+### Box painting layers (since v0.4.0)
 
 Set `layout.layer` (`Layout.Layer` in Go) to `background`, `body` or
 `foreground`. Measured box items accept the same `layer` field directly.
@@ -1060,7 +1060,7 @@ pagination and to existing pages with nonzero canvas origins.
 
 ## 自动文字盒
 
-**未发布：** `OfdDocument::add_text_boxes()` combines text
+**v0.4.0：** `OfdDocument::add_text_boxes()` combines text
 measurement, safe line fragmentation, box decorations and styled drawing in
 one atomic operation. Each `TextBox` contains a `LayoutBox`, styled `FlowSpan`
 children and a `FlowTextStyle`. The requested width is clamped to the available
@@ -1098,7 +1098,7 @@ layout fidelity remains pending.
 
 ## 嵌套混合流容器
 
-**未发布：** `OfdDocument::add_flow_containers()` lays out vertical
+**v0.4.0：** `OfdDocument::add_flow_containers()` lays out vertical
 `FlowContainer` sequences containing paragraphs, images, tables, spacing and recursively
 nested decorated containers. Each container measures its own content height,
 clamps width before text wrapping, and adds its margin, padding and border
@@ -1179,7 +1179,7 @@ verify output text, image bounds, round trips, continuation and atomic errors.
 
 ## 固定页面混合容器
 
-**未发布：** `OfdDocument::add_fixed_containers(page_index, &[FixedContainer])`
+**v0.4.0：** `OfdDocument::add_fixed_containers(page_index, &[FixedContainer])`
 paints mixed containers on one existing global page. Each `FixedContainer` has
 `position: [x, y]` and a `container: FlowContainer`. Coordinates use the same
 OFD page space as `add_text_object`; physical-box origins are not added again.
@@ -1213,7 +1213,7 @@ C exposes `ofd_add_fixed_containers_json` with a strict
 response. Python provides `add_fixed_containers`, Go `AddFixedContainers`, and
 Node.js `addFixedContainers` with the `FixedContainer` TypeScript type. Python
 image children accept `data` bytes; Go accepts `Data []byte`; Node.js accepts
-`data_base64`. Use the development bindings with a matching native library.
+`data_base64`. Use matching 0.4.0-or-later bindings and native library.
 All three language suites compare the independent Java allocation fixtures,
 exercise ordinary/shaped mixed content overflow on one page, and verify rollback.
 

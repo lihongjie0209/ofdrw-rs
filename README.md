@@ -6,25 +6,23 @@
 使用 Rust 实现的 OFD 文档库，提供 **Rust、Python、Go、Node.js 和 C ABI**。
 以 [Java OFDRW](https://github.com/ofdrw/ofdrw) 为兼容性参考，优先实现包读写、页面对象、资源、布局、渲染和文档转换。
 
-**0.3.0 已发布**，可直接从下表原生仓库安装。产物见 [v0.3.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)，安装运行验证见 [Release 工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41318789139)。
-项目已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
+本页对应 **0.4.0**；分发状态见 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases) 和 [Release 工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml)。项目已经覆盖大量核心功能，但尚未完整替代 Java OFDRW。
+本页安装命令对应此版本；发布工作流完成后可从下表原生仓库安装。
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
-版本变更见 [v0.3.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
-0.3.0 提供批注图形动作的读取、追加、删除和触发区域编辑接口，支持 Rust、C、Python、Go 和 Node.js；
-接口说明见[批注与图章](docs/FEATURES.md#批注与图章)。
-0.3.0 还支持将空 ActualText 覆盖的可见字形保留为矢量绘制，详见[PDF 导入范围](docs/FEATURES.md#pdf-导入与兼容范围)。
-流式文本可从已有页面的指定位置继续排版，支持普通、样式和整形文本，见[文本流式布局](docs/FEATURES.md#文本流式布局)。
-表格也支持从已有页面继续排版，并保留重复表头和合并单元格分页，见[表格与嵌套布局](docs/FEATURES.md#表格与嵌套布局)。
+版本变更见 [v0.4.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
+0.4.0 新增文本自动测量、图片自动尺寸、混合流布局、盒模型、自动文字盒、
+嵌套容器和固定页面容器，并支持虚线边框、绘制图层和行内占位符。
+Rust、C、Python、Go 和 Node.js 均提供这些布局接口；用法见下方及各语言 README。
 
 ## 安装渠道
 
 | 语言 | 原生仓库 | 对应版本安装方式 |
 | --- | --- | --- |
-| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `pip install ofdrw-rs==0.3.0` |
-| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs@0.3.0` |
-| Rust | [crates.io](https://crates.io/crates/ofdrw) | `ofdrw = "0.3.0"` |
-| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.3.0` |
+| Python | [PyPI](https://pypi.org/project/ofdrw-rs/) | `pip install ofdrw-rs==0.4.0` |
+| Node.js / TypeScript | [npm](https://www.npmjs.com/package/ofdrw-rs) | `npm install ofdrw-rs@0.4.0` |
+| Rust | [crates.io](https://crates.io/crates/ofdrw) | `ofdrw = "0.4.0"` |
+| Go | GitHub Go module | `go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.4.0` |
 
 各语言使用原生包管理工具，无需 ORAS 或 GitHub Packages 登录。
 Go / C 所需动态库、静态库和 C 头文件保留在 [GitHub Releases](https://github.com/lihongjie0209/ofdrw-rs/releases)。
@@ -38,11 +36,11 @@ Linux wheels 通过 auditwheel 检查并标记为 manylinux；预编译 native �
 需要 Python 3.10+，直接从 PyPI 安装：
 
 ```sh
-python -m pip install ofdrw-rs==0.3.0
+python -m pip install ofdrw-rs==0.4.0
 ```
 
 wheel 已带 Rust 共享库，不需要安装 Rust。它会自动安装 CFFI 依赖。
-也可从 [v0.3.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.3.0)
+也可从 [v0.4.0 Release](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0)
 下载匹配系统和架构的 wheel 后安装。
 
 ```python
@@ -67,7 +65,7 @@ with Document.open("hello.ofd") as document:
 需要 Node.js 20+。直接从 npm 安装：
 
 ```sh
-npm install ofdrw-rs@0.3.0
+npm install ofdrw-rs@0.4.0
 ```
 
 ```js
@@ -92,10 +90,10 @@ Go 包通过 purego 动态加载 C ABI，**不需要 cgo**。需要 Go 1.22+。
 先从 GitHub Releases 下载对应平台的 native ZIP 并解压，设置动态库的绝对路径：
 
 ```sh
-curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.3.0/ofdrw-native-linux-x64-v0.3.0.zip
+curl -fL -o native.zip https://github.com/lihongjie0209/ofdrw-rs/releases/download/v0.4.0/ofdrw-native-linux-x64-v0.4.0.zip
 unzip native.zip -d native
-export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.3.0/libofdrw_ffi.so"
-go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.3.0
+export OFDRW_LIB_PATH="$PWD/native/ofdrw-native-linux-x64-v0.4.0/libofdrw_ffi.so"
+go get github.com/lihongjie0209/ofdrw-rs/bindings/go/ofdrw@v0.4.0
 ```
 
 macOS 使用 `libofdrw_ffi.dylib`，Windows 使用 `ofdrw_ffi.dll`。
@@ -117,7 +115,7 @@ func main() {
 }
 ```
 
-Release 会同时创建 Go 子模块标签 `bindings/go/v0.3.0`。
+Release 会同时创建 Go 子模块标签 `bindings/go/v0.4.0`。
 更多内容见 [Go 说明](bindings/go/README.md)。
 
 ## Rust
@@ -126,7 +124,7 @@ Release 会同时创建 Go 子模块标签 `bindings/go/v0.3.0`。
 
 ```toml
 [dependencies]
-ofdrw = "0.3.0"
+ofdrw = "0.4.0"
 ```
 
 ```rust
@@ -158,7 +156,7 @@ cargo build --release --locked -p ofdrw-ffi
 
 ## 图像插值与 PDF 批注
 
-以下示例使用 0.3.0 及对应共享库。
+以下示例使用 0.4.0 及对应共享库。
 
 ### 图像插值
 
@@ -184,13 +182,12 @@ PDF 导入支持批注的正常外观流（`AP/N`），包括 Widget、FreeText
 各语言继续使用现有 PDF 导入、导出接口；交互表单行为和
 导出限制见[功能说明](docs/FEATURES.md#pdf-导入与兼容范围)。
 
-## 新增布局功能（开发版）
+## 布局功能
 
-开发版还提供在已有页面上按绝对坐标绘制混合容器的接口：Rust
+从 0.4.0 起可在已有页面上按绝对坐标绘制混合容器：Rust
 `add_fixed_containers`、Python `add_fixed_containers`、Go `AddFixedContainers`
 和 Node.js `addFixedContainers`。支持文本、图片、表格和嵌套盒子，返回各容器的
-几何位置，保持页面数不变。此接口尚未包含在 0.3.0 中，须使用同一提交构建的
-绑定和原生库；各语言 README 提供用法，详见
+几何位置，保持页面数不变。须使用匹配版本的绑定和原生库；各语言 README 提供用法，详见
 [固定页面混合容器](docs/FEATURES.md#固定页面混合容器)。
 
 行内占位符可在文字之间预留宽高，并参与换行和行高计算，不生成绘制对象。
