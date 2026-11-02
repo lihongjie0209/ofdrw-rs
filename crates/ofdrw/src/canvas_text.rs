@@ -372,6 +372,10 @@ fn canvas_widths(
         Ok(text
             .chars()
             .map(|ch| {
+                // Java AWT treats these layout controls as invisible zero-advance glyphs.
+                if matches!(ch, '\t' | '\n' | '\r') {
+                    return 0.;
+                }
                 let glyph = face.glyph_index(ch).unwrap_or(ttf_parser::GlyphId(0));
                 f64::from(face.glyph_hor_advance(glyph).unwrap_or(face.units_per_em())) / units
                     * size
@@ -393,7 +397,11 @@ fn canvas_widths(
     }
     Ok(text
         .chars()
-        .map(|ch| if ch.is_ascii() { size * 0.5 } else { size })
+        .map(|ch| match ch {
+            '\t' | '\n' | '\r' => 0.,
+            _ if ch.is_ascii() => size * 0.5,
+            _ => size,
+        })
         .collect())
 }
 

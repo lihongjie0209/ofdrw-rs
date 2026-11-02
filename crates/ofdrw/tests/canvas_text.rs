@@ -449,3 +449,42 @@ fn canvas_text_creates_missing_public_resources_for_an_imported_document() {
     assert_eq!(doc.fonts().unwrap()[0].font_name, "SimSun");
     doc.page_png(0, 101.6).unwrap();
 }
+
+#[test]
+fn canvas_control_character_advances_match_independent_java_metrics() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/canvas-text-java");
+    let reference: Value =
+        serde_json::from_slice(&std::fs::read(root.join("controls.json")).unwrap()).unwrap();
+    assert_eq!(
+        reference["java_revision"],
+        "84e9eb260ba6fd351ecccf08a01a40305d4af635"
+    );
+    let mut doc = OfdDocument::new();
+    doc.add_blank_page(40., 30.).unwrap();
+    let font_id = doc
+        .add_embedded_font("CanvasTest", FONT)
+        .unwrap()
+        .to_string();
+    let style = CanvasFont {
+        font_id: Some(font_id),
+        size: 4.,
+        ..Default::default()
+    };
+    let before = doc.to_bytes().unwrap();
+    for case in reference["cases"].as_array().unwrap() {
+        let code = case["code"].as_u64().unwrap() as u32;
+        let text = format!("A{}B", char::from_u32(code).unwrap());
+        let actual = doc.measure_canvas_text(0, &text, &style).unwrap();
+        assert_eq!(
+            actual.width,
+            case["metrics"]["width"].as_f64().unwrap(),
+            "U+{code:04X}"
+        );
+        assert_eq!(
+            serde_json::to_value(actual.offsets).unwrap(),
+            case["metrics"]["offsets"],
+            "U+{code:04X}"
+        );
+    }
+    assert_eq!(doc.to_bytes().unwrap(), before);
+}
