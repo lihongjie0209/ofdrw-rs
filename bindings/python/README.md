@@ -432,3 +432,17 @@ assert canvas_mm_to_pixels(-0.49, 4) == -1
 ```
 
 无需文档句柄，密度必须有限且大于零；Java 默认密度为 3.78 像素/毫米，Python/Node.js 可省略该参数。整数像素限定为有符号 32 位。毫米转像素向零截断，溢出及无穷值饱和到整数边界，NaN 转换为零；极小密度下像素转毫米可能得到无穷值。这些规则与 Java `DrawContext` 一致，不修改页面几何或 CTM。
+
+### Canvas 图片底纹（开发版本，v0.5.0 尚未包含）
+
+```python
+pattern = doc.create_canvas_pattern(0, png_bytes, "png", repetition="row-column", image_size=(4, 3))
+doc.draw_canvas(0, (0, 0, 40, 30), [
+    {"type": "set_draw_param", "style": {"fill_pattern": pattern}},
+    {"type": "fill_rect", "rect": [2, 2, 18, 12]},
+])
+```
+
+需要已有页面。创建时仅添加页面所属文档的图片资源，不绘制对象；返回值可用于 `fill_pattern` 或 `stroke_pattern`。默认密度为 3.78 像素/毫米，自然尺寸沿用 Java 默认数值格式化，图片单元 CTM 保留未舍入缩放。可选 `ctm` 为底纹单元变换。
+
+支持空串/`repeat`、`row`、`column`、`row-column`（不区分 ASCII 大小写）；后三种表示交替行/列镜像。选项校验和资源修改整体提交，失败不残留资源。

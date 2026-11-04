@@ -313,6 +313,13 @@ export interface GouraudPaintStyle {
   back_alpha?: number;
 }
 
+export interface CanvasPatternOptions {
+  repetition?: string;
+  pixels_per_mm?: number;
+  image_size?: [number, number];
+  ctm?: [number, number, number, number, number, number];
+}
+
 export interface PatternPaintStyle {
   width: number;
   height: number;
@@ -324,6 +331,16 @@ export interface PatternPaintStyle {
   alpha?: number;
   thumbnail?: string;
   cells?: Record<string, unknown>[];
+}
+
+/** Image-backed pattern returned by createCanvasPattern. */
+export interface CanvasImagePattern extends PatternPaintStyle {
+  cells: [{
+    kind: 'image';
+    resource_id: string;
+    boundary: [number, number, number, number];
+    ctm: [number, number, number, number, number, number];
+  }];
 }
 
 export interface ImageBorderStyle {
@@ -351,8 +368,8 @@ export interface DrawParamStyle {
   stroke_gradient?: Record<string, unknown>;
   fill_gouraud?: Record<string, unknown>;
   stroke_gouraud?: Record<string, unknown>;
-  fill_pattern?: Record<string, unknown>;
-  stroke_pattern?: Record<string, unknown>;
+  fill_pattern?: PatternPaintStyle | Record<string, unknown>;
+  stroke_pattern?: PatternPaintStyle | Record<string, unknown>;
 }
 
 export interface PageArea {
@@ -1093,6 +1110,8 @@ export class Document {
   drawCanvas(pageIndex: number, boundary: [number, number, number, number], commands: readonly CanvasCommand[]): string[];
   measureCanvasText(pageIndex: number, text: string, font?: CanvasFont): CanvasTextMetrics;
   /** Resolve a font shorthand, reusing a page font or adding a named resource. */
+  /** Add an image resource and return reusable fill/stroke settings; paints nothing. */
+  createCanvasPattern(pageIndex: number, data: Uint8Array, format: string, options?: CanvasPatternOptions): CanvasImagePattern;
   resolveCanvasFontStyle(pageIndex: number, style: string, font?: CanvasFont, pixelsPerMm?: number): CanvasFont;
   measureCanvasTextArea(pageIndex: number, text: string, font?: CanvasFont): CanvasTextAreaMetrics;
   addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];

@@ -323,6 +323,7 @@ _ffi.cdef(
     int ofd_add_flow_blocks_json(OfdDocument *handle, size_t document_index, const char *flow_json, OfdBuffer *output);
     int ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_measure_canvas_text_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
+    int ofd_create_canvas_pattern_json(OfdDocument *handle, size_t page_index, const uint8_t *data, size_t data_len, const char *format, const char *options_json, OfdBuffer *output);
     int ofd_resolve_canvas_font_style_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_measure_canvas_text_area_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
     int ofd_add_fixed_containers_json(OfdDocument *handle, size_t page_index, const char *layout_json, OfdBuffer *output);
@@ -4445,6 +4446,30 @@ class Document:
         payload = json.dumps({"text": text, "font": settings}, allow_nan=False)
         output = _ffi.new("OfdBuffer *")
         _check(_lib.ofd_measure_canvas_text_json(self._handle, page_index, _utf8(payload), output))
+        try:
+            return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+        finally:
+            _lib.ofd_buffer_free(output[0])
+
+    def create_canvas_pattern(self, page_index: int, data: bytes, format: str,
+                              repetition: str = "repeat", pixels_per_mm: float = 3.78,
+                              image_size=None, ctm=None) -> dict:
+        """Add an image resource and return a reusable fill/stroke pattern; paints nothing."""
+        self._require_open()
+        if page_index < 0:
+            raise IndexError(page_index)
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError("data must be bytes-like")
+        if not isinstance(repetition, str):
+            raise TypeError("repetition must be a string")
+        if "\x00" in repetition:
+            raise ValueError("repetition contains NUL")
+        raw = bytes(data)
+        payload = json.dumps({"repetition": repetition, "pixels_per_mm": pixels_per_mm,
+                              "image_size": image_size, "ctm": ctm}, allow_nan=False)
+        output = _ffi.new("OfdBuffer *")
+        _check(_lib.ofd_create_canvas_pattern_json(self._handle, page_index, raw, len(raw),
+                                                   _utf8(format), _utf8(payload), output))
         try:
             return json.loads(bytes(_ffi.buffer(output.data, output.len)))
         finally:

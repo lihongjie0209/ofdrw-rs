@@ -831,8 +831,10 @@ Rust 开发版本另提供 `OfdDocument::create_canvas_pattern(page, data, forma
 不会留下部分资源修改；无效的尺寸/矩阵编辑不会修改底纹或已经绘制的对象。
 八组原始 Java OFD 验证自然尺寸、小数格式化、镜像、单元/画布变换、填充、描边和透明度；
 两端 OFD 使用相同 Rust 渲染器比较 25.4/101.6 DPI 像素，属于写入一致性验证，不是独立 Java 光栅器对照。
-另覆盖七种图片编码、多文档资源归属、签名拒绝、OFD 往返和 PDF 导出。助手的跨语言接口仍待接入，
-此 API 不属于 v0.5.0；C ABI 仍为 1，共 340 个导出。
+另覆盖七种图片编码、多文档资源归属、签名拒绝、OFD 往返和 PDF 导出。开发版本已接入 C `ofd_create_canvas_pattern_json`、Python `create_canvas_pattern`、Go `CreateCanvasPattern` 和 Node.js `createCanvasPattern`。
+返回可直接用于填充/描边的底纹设置，包含图片单元独立 `ctm`；Go `PatternCell.CTM` 与 TypeScript `CanvasImagePattern` 保留该信息。
+可选 `image_size`、`ctm` 与资源创建整体提交，任一选项无效时不会留下资源。各语言均通过八组 Java 写入对照及 OFD 往返；
+此 API 不属于 v0.5.0；C ABI 仍为 1，共 341 个导出。
 
 `SetDrawParam` 可设置 `fill_gradient` / `stroke_gradient`，支持轴向和径向渐变。
 六组独立 Java OFD 对照在 25.4 与 101.6 DPI 下检查像素一致性，覆盖路径填充、
@@ -874,7 +876,7 @@ Canvas 度量遵循固定的 OpenJDK 21 FreeType 参考：26.6 字号、16.16 �
 JSON 启用浮点往返精度，避免序列化后丢失最低有效位。
 参考缩放和布局接口见 [OpenJDK FreeType scaler](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/freetypeScaler.c)
 及 [HarfBuzz 字体回调](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/hb-jdk-font.cc)。
-开发版本的 C `ofd_resolve_canvas_font_style_json`、Python `resolve_canvas_font_style`、Go `ResolveCanvasFontStyle` 和 Node.js `resolveCanvasFontStyle` 返回可直接用于 Canvas 的完整字体设置；复用已有字体，找不到时添加命名字体资源。C ABI 保持为 1，共 340 个导出。这些接口尚未包含在 v0.5.0 中。
+开发版本的 C `ofd_resolve_canvas_font_style_json`、Python `resolve_canvas_font_style`、Go `ResolveCanvasFontStyle` 和 Node.js `resolveCanvasFontStyle` 返回可直接用于 Canvas 的完整字体设置；复用已有字体，找不到时添加命名字体资源。C ABI 保持为 1，共 341 个导出。这些接口尚未包含在 v0.5.0 中。
 
 Rust 开发版本提供 `CanvasUnits::new(pixels_per_mm)` 和默认密度 3.78 的 `CanvasUnits::default()`。
 `mm(i32)` 将整数像素换算为毫米；`pixel(f64)` 先乘密度，再向零截断到 32 位有符号像素。
