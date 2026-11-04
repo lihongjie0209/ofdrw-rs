@@ -15,6 +15,7 @@ _ffi.cdef(
     typedef struct OfdDocument OfdDocument;
     typedef struct { unsigned char *data; size_t len; } OfdBuffer;
     unsigned int ofd_abi_version(void);
+    int ofd_parse_canvas_color_json(const char *input, OfdBuffer *output);
     const char *ofd_last_error(void);
     int ofd_open(const char *path, OfdDocument **output);
     int ofd_from_bytes(const unsigned char *data, size_t len, OfdDocument **output);
@@ -400,6 +401,18 @@ def _utf8(value: str | os.PathLike[str]) -> bytes:
     if b"\x00" in encoded:
         raise ValueError("string contains NUL byte")
     return encoded
+
+
+def parse_canvas_color(value: str) -> dict | None:
+    """Return an RGB paint with byte alpha, or None for an invalid Canvas color."""
+    if not isinstance(value, str):
+        raise TypeError("value must be a string")
+    output = _ffi.new("OfdBuffer *")
+    _check(_lib.ofd_parse_canvas_color_json(_utf8(value), output))
+    try:
+        return json.loads(bytes(_ffi.buffer(output.data, output.len)))
+    finally:
+        _lib.ofd_buffer_free(output[0])
 
 
 def create_ses_seal(
@@ -4953,4 +4966,4 @@ class Document:
             _lib.ofd_buffer_free(output[0])
 
 
-__all__ = ["Document", "OfdError", "create_ses_seal"]
+__all__ = ["Document", "OfdError", "create_ses_seal", "parse_canvas_color"]

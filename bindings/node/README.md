@@ -752,3 +752,15 @@ try {
   console.log(area.width, area.height);
 } finally {document.close();}
 ```
+
+## Canvas 颜色字符串（0.5.0 后的开发版本）
+
+无需文档句柄即可解析 Java 命名颜色、十六进制、`rgb()` 和 `rgba()`。
+透明度按 Java 规则截断为字节；未知或非法颜色返回空结果。
+返回值可直接用于现有 Canvas 绘制参数的填充或描边。
+
+```js
+const {parseCanvasColor} = require('ofdrw-rs');
+const paint = parseCanvasColor('rgba(10,20,30,0.5)');
+// {color: [10, 20, 30], alpha: 127}
+```

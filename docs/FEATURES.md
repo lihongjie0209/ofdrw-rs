@@ -831,9 +831,14 @@ Rust 始终恢复完整绘制参数；生成器与元数据显式记录这项差
 返回可直接放入 `DrawParamStyle.fill` / `stroke` 的 `SolidPaintStyle`。
 RGB 通道限定为 0–255；RGBA 透明度限定为有限的 0–1，并按 Java 规则截断到字节，
 因此 `rgba(10,20,30,0.5)` 的 alpha 为 127。未知颜色和非法输入返回 `None`。
-这不是完整浏览器 CSS 语法；不复制 Java 的越界通道或无效浮点转换行为。
+这不是完整浏览器 CSS 语法；单个输入最多 4096 个 UTF-8 字节。
+不复制 Java 的越界通道或无效浮点转换行为。
 461 组参考值由固定 Java 提交独立执行生成，另验证透明度绘制、OFD 往返及 PDF 导出。
-颜色字符串的跨语言接口、CSS 字体解析与独立像素单位助手仍待实现。
+开发版本同时提供 C `ofd_parse_canvas_color_json`、Python `parse_canvas_color`、
+Go `ParseCanvasColor` 和 Node.js / TypeScript `parseCanvasColor`。这些函数不需要文档句柄，
+非法颜色返回 JSON null / `None` / nil / null；Go 的非法 UTF-8 和各语言的嵌入 NUL
+属于调用错误。C 返回的 JSON 仍由调用方使用 `ofd_buffer_free` 释放。
+CSS 字体解析与独立像素单位助手仍待实现。
 字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。

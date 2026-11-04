@@ -12,7 +12,7 @@
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
 版本变更见 [v0.5.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
 0.5.0 新增跨语言保护内容范围分页、设备像素细线，以及有状态画布的路径、图片、文字绘制与只读文字测量。
-Rust、C、Python、Go 和 Node.js 均提供相应接口；C ABI 主版本保持为 1，开发分支共 336 个导出（v0.5.0 为 335 个）。用法见下方及各语言 README。
+Rust、C、Python、Go 和 Node.js 均提供相应接口；C ABI 主版本保持为 1，开发分支共 337 个导出（v0.5.0 为 335 个）。用法见下方及各语言 README。
 
 ## 安装渠道
 
@@ -202,7 +202,7 @@ Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
 [Python](bindings/python/README.md)、[Go](bindings/go/README.md) 和
 [Node.js / TypeScript](bindings/node/README.md) 均提供原子批量调用示例。
 坐标使用毫米，角度使用度，失败时回滚整批绘制。
-0.5.0 包含路径、图片和文字画布；后续主分支已提供跨语言文字逻辑区域测量。CSS 字体/颜色解析与字符像素包围盒仍待实现。
+0.5.0 包含路径、图片和文字画布；后续开发版本另提供文字逻辑区域测量和颜色字符串解析。CSS 字体解析及字符像素包围盒仍待实现。
 协议与限制见[有状态向量画布](docs/FEATURES.md#有状态向量画布)。
 Rust 核心另提供 `CanvasFont`、`FillText` 与 `measure_canvas_text`，支持文字对齐、字距和方向；C、Python、Go、Node.js 提供对应文字绘制与只读测量接口（0.5.0）。
 

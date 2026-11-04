@@ -40,6 +40,7 @@ for (const candidate of candidates) {
 const OfdDocument = koffi.pointer('OfdDocument', koffi.opaque());
 const OfdBuffer = koffi.struct('OfdBuffer', { data: 'uint8_t *', len: 'size_t' });
 const api = {
+  parseCanvasColor: library.func('int ofd_parse_canvas_color_json(str input, _Out_ OfdBuffer *output)'),
   abiVersion: library.func('uint32_t ofd_abi_version(void)'),
   lastError: library.func('str ofd_last_error(void)'),
   open: library.func('int ofd_open(str path, _Out_ OfdDocument *output)'),
@@ -2130,4 +2131,10 @@ function createSesSeal(issuerPrivateKey, issuerCertificate, picture, spec, issue
   return ownedBuffer(output);
 }
 
-module.exports = { Document, OfdError, createSesSeal };
+function parseCanvasColor(value) {
+  const output = {};
+  check(api.parseCanvasColor(utf8(value, 'value'), output));
+  return JSON.parse(ownedBuffer(output).toString('utf8'));
+}
+
+module.exports = { Document, OfdError, createSesSeal, parseCanvasColor };

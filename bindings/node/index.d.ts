@@ -1,5 +1,8 @@
 export class OfdError extends Error {}
 
+/** Parse Canvas colors; unknown or malformed input returns null. Alpha is a byte. */
+export function parseCanvasColor(value: string): SolidPaintStyle | null;
+
 export interface SesSealSpec {
   version: 4 | 5;
   vendorId: string;
