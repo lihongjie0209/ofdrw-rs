@@ -33,10 +33,19 @@ OFD path hairlines: reserved `ofd-device-hairline-` SVG path IDs select the
 native PDF zero-width stroke operator. The renderer dependencies above must
 be published first. This change does not add zero-width text strokes.
 
-The next, unpublished converter revision (`0.13.0-ofdrw.4`) upgrades the SVG
+Converter revision `0.13.0-ofdrw.4` upgrades the SVG
 model to usvg 0.48.1 and preserves the SVG radial-gradient focal radius (`fr`)
 in native PDF radial shading coordinates. Color and opacity shadings share the
 same two circles, including gradients inside pattern cells. Text adapts the
 new model's wider glyph IDs through checked OpenType glyph-ID conversions.
 Regression tests inspect PDF shading dictionaries and compare Poppler renders
 against the OFD PNG output at two resolutions. This fix is absent from v0.5.0.
+
+The next, unpublished revision `0.13.0-ofdrw.5` also retains SVG `repeat` and `reflect` in native
+axial/radial PDF shadings and their opacity masks. It expands the shading to
+cover the painted bounds, including negative axial phases and the radius-zero
+limit of nonzero focal radii. A shared binary tree of stitching functions
+preserves period boundaries with logarithmic space. Coincident color stops
+remain hard transitions, without invalid zero-width stitching intervals.
+Nonfinite geometry and spans exceeding 2^24 periods return `InvalidGradient`,
+rather than losing integer period precision in PDF coordinates.

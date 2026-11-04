@@ -185,3 +185,322 @@ fn transparent_pattern_preserves_start_circle() {
 fn zero_start_radius_remains_supported() {
     check(0., false, false, false);
 }
+
+fn evaluate_function(pdf: &lopdf::Document, reference: lopdf::ObjectId, input: f64) -> Vec<f64> {
+    let dictionary = pdf.get_object(reference).unwrap().as_dict().unwrap();
+    let numbers = |key: &[u8]| -> Vec<f64> {
+        dictionary
+            .get(key)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| f64::from(v.as_float().unwrap()))
+            .collect()
+    };
+    let domain = numbers(b"Domain");
+    let t = input.clamp(domain[0], domain[1]);
+    match dictionary.get(b"FunctionType").unwrap().as_i64().unwrap() {
+        2 => {
+            let first = numbers(b"C0");
+            let last = numbers(b"C1");
+            let exponent = f64::from(dictionary.get(b"N").unwrap().as_float().unwrap());
+            first
+                .iter()
+                .zip(last)
+                .map(|(a, b)| a + t.powf(exponent) * (b - a))
+                .collect()
+        }
+        3 => {
+            let bounds = numbers(b"Bounds");
+            let encode = numbers(b"Encode");
+            let index = bounds.partition_point(|&bound| bound <= t);
+            let left = if index == 0 {
+                domain[0]
+            } else {
+                bounds[index - 1]
+            };
+            let right = bounds.get(index).copied().unwrap_or(domain[1]);
+            let mapped = encode[2 * index]
+                + (t - left) / (right - left) * (encode[2 * index + 1] - encode[2 * index]);
+            let functions = dictionary.get(b"Functions").unwrap().as_array().unwrap();
+            evaluate_function(pdf, functions[index].as_reference().unwrap(), mapped)
+        }
+        other => panic!("unexpected PDF function type {other}"),
+    }
+}
+
+fn check_periodic(
+    radial: bool,
+    mapping: &str,
+    alpha: bool,
+    stroke: bool,
+    pattern: bool,
+    inner: bool,
+) {
+    check_periodic_stops(radial, mapping, alpha, stroke, pattern, inner, false);
+}
+
+fn check_periodic_stops(
+    radial: bool,
+    mapping: &str,
+    alpha: bool,
+    stroke: bool,
+    pattern: bool,
+    inner: bool,
+    hard: bool,
+) {
+    let mut document = document(if inner { 1. } else { 0. }, alpha, stroke, pattern);
+    let path = document.pages().unwrap()[0].path.clone();
+    let mut source = std::str::from_utf8(document.entry(&path).unwrap().unwrap())
+        .unwrap()
+        .replace(
+            "<ofd:RadialShd ",
+            &format!("<ofd:RadialShd MapType=\"{mapping}\" "),
+        )
+        .replace("EndRadius=\"10\"", "EndRadius=\"3\"");
+    if !radial {
+        source = source
+            .replace("RadialShd", "AxialShd")
+            .replace("EndPoint=\"15 15\"", "EndPoint=\"20 15\"");
+    }
+    if hard {
+        source = source.replace("Position=\"0\"", "Position=\"0.2\"")
+            .replace("<ofd:Segment Position=\"1\">", "<ofd:Segment Position=\"0.5\"><ofd:Color Value=\"0 255 0\"/></ofd:Segment><ofd:Segment Position=\"0.5\"><ofd:Color Value=\"255 255 0\"/></ofd:Segment><ofd:Segment Position=\"0.8\">");
+    }
+    if inner {
+        source = source.replace("EndRadius=\"3\"", "EndRadius=\"6\"");
+    }
+    document.set_entry(&path, source.into_bytes()).unwrap();
+    let document = OfdDocument::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert!(document.validate_references().unwrap().is_empty());
+    let bytes = document.to_pdf().unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let mut shadings = 0;
+    for object in pdf.objects.values() {
+        if let Ok(stream) = object.as_stream() {
+            assert_ne!(
+                stream
+                    .dict
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok(),
+                Some(b"Image".as_slice()),
+                "periodic gradients must remain vector shadings"
+            );
+        }
+        if let Ok(dictionary) = object.as_dict() {
+            if dictionary
+                .get(b"ShadingType")
+                .and_then(lopdf::Object::as_i64)
+                .ok()
+                == Some(if radial { 3 } else { 2 })
+            {
+                let domain = dictionary.get(b"Domain").unwrap().as_array().unwrap();
+                assert_eq!(domain.len(), 2);
+                assert!(domain[1].as_float().unwrap() > 1.);
+                let function = dictionary.get(b"Function").unwrap().as_reference().unwrap();
+                for t in [-2.25_f64, -1.75, -0.25, 0., 0.25, 0.75, 1., 1.25, 3.75] {
+                    if t < f64::from(domain[0].as_float().unwrap())
+                        || t >= f64::from(domain[1].as_float().unwrap())
+                    {
+                        continue;
+                    }
+                    let phase = if mapping == "Repeat" {
+                        t.rem_euclid(1.)
+                    } else {
+                        1. - (t.rem_euclid(2.) - 1.).abs()
+                    };
+                    let values = evaluate_function(&pdf, function, t);
+                    let expected = if values.len() == 1 {
+                        vec![(64. + (220. - 64.) * phase) / 255.]
+                    } else if hard {
+                        if phase < 0.2 {
+                            vec![1., 0., 0.]
+                        } else if phase < 0.5 {
+                            let t = (phase - 0.2) / 0.3;
+                            vec![1. - t, t, 0.]
+                        } else if phase < 0.8 {
+                            let t = (phase - 0.5) / 0.3;
+                            vec![1. - t, 1. - t, t]
+                        } else {
+                            vec![0., 0., 1.]
+                        }
+                    } else {
+                        vec![1. - phase, 0., phase]
+                    };
+                    for (actual, expected) in values.iter().zip(expected) {
+                        assert!(
+                            (actual - expected).abs() < 1e-5,
+                            "{mapping} parameter {t}: {values:?}"
+                        );
+                    }
+                }
+                shadings += 1;
+            }
+        }
+    }
+    assert_eq!(shadings, if alpha { 2 } else { 1 });
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("gradient.pdf");
+    std::fs::write(&input, &bytes).unwrap();
+    for dpi in if hard { [406.4, 812.8] } else { [203.2, 406.4] } {
+        let expected = image::load_from_memory(&document.page_png(0, dpi).unwrap())
+            .unwrap()
+            .to_rgb8();
+        let output = temp.path().join("gradient");
+        let label = format!("radial={radial} {mapping} alpha={alpha} stroke={stroke} pattern={pattern} inner={inner} dpi={dpi}");
+        if let Some(program) = std::env::var_os("OFDRW_PDFTOPPM") {
+            let status = std::process::Command::new(&program)
+                .args([
+                    "-singlefile",
+                    "-png",
+                    "-scale-to-x",
+                    &expected.width().to_string(),
+                    "-scale-to-y",
+                    &expected.height().to_string(),
+                ])
+                .arg(&input)
+                .arg(&output)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "{status:?}");
+            let actual = image::open(output.with_extension("png")).unwrap().to_rgb8();
+            common::assert_raster_matches(&actual, &expected, &format!("Poppler {label}"));
+        }
+        if let Some(program) = std::env::var_os("OFDRW_GHOSTSCRIPT") {
+            let status = std::process::Command::new(&program)
+                .args([
+                    "-q",
+                    "-dSAFER",
+                    "-dBATCH",
+                    "-dNOPAUSE",
+                    "-sDEVICE=png16m",
+                    "-dTextAlphaBits=4",
+                    "-dGraphicsAlphaBits=4",
+                    "-dGridFitTT=0",
+                ])
+                .arg(format!("-r{dpi}"))
+                .arg(format!(
+                    "-sOutputFile={}",
+                    output.with_extension("png").display()
+                ))
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "{status:?}");
+            let actual = image::open(output.with_extension("png")).unwrap().to_rgb8();
+            common::assert_raster_matches(&actual, &expected, &format!("Ghostscript {label}"));
+        }
+    }
+}
+
+macro_rules! periodic_cases {
+    ($($name:ident: ($radial:expr, $mapping:expr, $alpha:expr, $stroke:expr, $pattern:expr, $inner:expr)),* $(,)?) => {
+        $(#[test] fn $name() { check_periodic($radial, $mapping, $alpha, $stroke, $pattern, $inner); })*
+    };
+}
+
+periodic_cases! {
+    axial_repeat_opaque_fill: (false, "Repeat", false, false, false, false),
+    axial_repeat_opaque_stroke: (false, "Repeat", false, true, false, false),
+    axial_repeat_opaque_pattern: (false, "Repeat", false, false, true, false),
+    axial_repeat_alpha_fill: (false, "Repeat", true, false, false, false),
+    axial_repeat_alpha_stroke: (false, "Repeat", true, true, false, false),
+    axial_repeat_alpha_pattern: (false, "Repeat", true, false, true, false),
+    axial_reflect_opaque_fill: (false, "Reflect", false, false, false, false),
+    axial_reflect_opaque_stroke: (false, "Reflect", false, true, false, false),
+    axial_reflect_opaque_pattern: (false, "Reflect", false, false, true, false),
+    axial_reflect_alpha_fill: (false, "Reflect", true, false, false, false),
+    axial_reflect_alpha_stroke: (false, "Reflect", true, true, false, false),
+    axial_reflect_alpha_pattern: (false, "Reflect", true, false, true, false),
+    radial_repeat_opaque_fill: (true, "Repeat", false, false, false, false),
+    radial_repeat_opaque_stroke: (true, "Repeat", false, true, false, false),
+    radial_repeat_opaque_pattern: (true, "Repeat", false, false, true, false),
+    radial_repeat_alpha_fill: (true, "Repeat", true, false, false, false),
+    radial_repeat_alpha_stroke: (true, "Repeat", true, true, false, false),
+    radial_repeat_alpha_pattern: (true, "Repeat", true, false, true, false),
+    radial_reflect_opaque_fill: (true, "Reflect", false, false, false, false),
+    radial_reflect_opaque_stroke: (true, "Reflect", false, true, false, false),
+    radial_reflect_opaque_pattern: (true, "Reflect", false, false, true, false),
+    radial_reflect_alpha_fill: (true, "Reflect", true, false, false, false),
+    radial_reflect_alpha_stroke: (true, "Reflect", true, true, false, false),
+    radial_reflect_alpha_pattern: (true, "Reflect", true, false, true, false),
+    radial_repeat_inner_radius: (true, "Repeat", true, false, false, true),
+    radial_reflect_inner_radius: (true, "Reflect", true, false, false, true),
+}
+
+#[test]
+fn axial_repeat_hard_and_padded_stops() {
+    check_periodic_stops(false, "Repeat", false, false, false, false, true);
+}
+
+#[test]
+fn axial_reflect_hard_and_padded_stops() {
+    check_periodic_stops(false, "Reflect", false, false, false, false, true);
+}
+
+#[test]
+fn radial_repeat_hard_and_padded_stops() {
+    check_periodic_stops(true, "Repeat", false, false, false, false, true);
+}
+
+#[test]
+fn radial_reflect_hard_and_padded_stops() {
+    check_periodic_stops(true, "Reflect", false, false, false, false, true);
+}
+
+#[test]
+fn many_periods_reuse_a_logarithmic_function_tree() {
+    for mapping in ["repeat", "reflect"] {
+        let source = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="20"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" x2="0.0001" spreadMethod="{mapping}"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs><path d="M0 0H100V20H0Z" fill="url(#g)"/></svg>"##
+        );
+        let tree =
+            svg2pdf::usvg::Tree::from_str(&source, &svg2pdf::usvg::Options::default()).unwrap();
+        let bytes = svg2pdf::to_pdf(
+            &tree,
+            svg2pdf::ConversionOptions::default(),
+            svg2pdf::PageOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            bytes.len() < 20_000,
+            "one million periods must remain compact: {}",
+            bytes.len()
+        );
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        let count = pdf
+            .objects
+            .values()
+            .filter(|object| {
+                object
+                    .as_dict()
+                    .is_ok_and(|dictionary| dictionary.has(b"FunctionType"))
+            })
+            .count();
+        assert!(
+            count < 30,
+            "one million periods must share functions: {count}"
+        );
+        let shading = pdf
+            .objects
+            .values()
+            .filter_map(|object| object.as_dict().ok())
+            .find(|dict| dict.has(b"ShadingType"))
+            .unwrap();
+        let function = shading.get(b"Function").unwrap().as_reference().unwrap();
+        for t in [0.25_f64, 1.25, 31.75, 65_535.25, 999_999.75] {
+            let expected = if mapping == "repeat" {
+                t.rem_euclid(1.)
+            } else {
+                1. - (t.rem_euclid(2.) - 1.).abs()
+            };
+            let color = evaluate_function(&pdf, function, t);
+            assert!(
+                (color[2] - expected).abs() < 1e-5,
+                "{mapping} {t}: {color:?}"
+            );
+        }
+    }
+}

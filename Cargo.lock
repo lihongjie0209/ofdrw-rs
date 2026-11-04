@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "ofdrw-svg2pdf"
-version = "0.13.0-ofdrw.4"
+version = "0.13.0-ofdrw.5"
 dependencies = [
  "fontdb",
  "image",

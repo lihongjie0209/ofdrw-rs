@@ -93,6 +93,8 @@ impl Default for PageOptions {
 /// A error that can appear during conversion.
 #[derive(Copy, Clone, Debug)]
 pub enum ConversionError {
+    /// A gradient cannot be represented with finite PDF coordinates and period bounds.
+    InvalidGradient,
     /// The SVG image contains an unrecognized type of image.
     InvalidImage,
     /// Text shaping resulted in a .notdef glyph. Can only occur if PDF/A
@@ -114,6 +116,7 @@ pub enum ConversionError {
 impl Display for ConversionError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
+            Self::InvalidGradient => f.write_str("Gradient geometry exceeds finite PDF coordinate or period precision."),
             Self::InvalidImage => f.write_str("An unknown type of image appears in the SVG."),
             Self::MissingGlyphs => f.write_str("A piece of text could not be displayed with any font."),
             Self::TooMuchNesting => f.write_str("The SVG's nesting depth is too high."),

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "ofdrw-svg2pdf"
-version = "0.13.0-ofdrw.4"
+version = "0.13.0-ofdrw.5"
 authors = [
     "Laurenz Stampfl <laurenz.stampfl@gmail.com>",
     "Martin Haug <mhaug@live.de>",
