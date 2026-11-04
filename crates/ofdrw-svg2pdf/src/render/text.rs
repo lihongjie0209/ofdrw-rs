@@ -248,11 +248,11 @@ pub fn render(
 
                 let name = font_names.get(&font.reference).unwrap();
 
-                // TODO: Remove unwraps and switch to error-based handling.
-                // NOTE(laurmaedje): If it can't happen, I think a panic is
-                // better. There is no way to handle it as a consumer of
-                // svg2pdf.
-                let cid = font.glyph_remapper.get(glyph.id.0).unwrap();
+                let glyph_id = u16::try_from(glyph.id.0).map_err(|_| InvalidFont(glyph.font))?;
+                let cid = font
+                    .glyph_remapper
+                    .get(glyph_id)
+                    .ok_or(SubsetError(glyph.font))?;
                 let ts = glyph
                     .outline_transform()
                     .pre_scale(font.units_per_em as f32, font.units_per_em as f32)
@@ -529,6 +529,7 @@ pub fn fill_fonts(group: &Group, ctx: &mut Context, fontdb: &fontdb::Database) -
                 let allocator = &mut ctx.ref_allocator;
                 for span in t.layouted() {
                     for g in &span.positioned_glyphs {
+                        let glyph_id = u16::try_from(g.id.0).map_err(|_| InvalidFont(g.font))?;
                         let font = ctx.fonts.entry(g.font).or_insert_with(|| {
                             fontdb
                                 .with_face_data(g.font, |data, face_index| {
@@ -556,8 +557,8 @@ pub fn fill_fonts(group: &Group, ctx: &mut Context, fontdb: &fontdb::Database) -
                         });
 
                         if let Some(ref mut font) = font {
-                            font.glyph_set.insert(g.id.0, g.text.clone());
-                            font.glyph_remapper.remap(g.id.0);
+                            font.glyph_set.insert(glyph_id, g.text.clone());
+                            font.glyph_remapper.remap(glyph_id);
                         }
 
                         if ctx.options.pdfa && g.id.0 == 0 {
