@@ -54,6 +54,7 @@ impl CanvasFont {
             italic: None,
         }
         .validate()?;
+        canvas_java_point_scale(self.size)?;
         if !self.letter_spacing.is_finite() {
             return Err(OfdError::Invalid(
                 "canvas letter spacing must be finite".into(),
@@ -63,7 +64,8 @@ impl CanvasFont {
     }
 }
 
-/// Logical canvas text advances, without kerning or shaping.
+/// Logical per-character canvas advances, without cross-character kerning or shaping.
+/// Complex characters use isolated layout, matching the pinned Java reference.
 ///
 /// Offsets are signed increments along the reading axis. Alignment is applied
 /// by `FillText`, not included in `first_offset`. Supplementary Unicode scalars
@@ -98,7 +100,7 @@ impl OfdDocument {
     /// Glyphs rotated by 90 or 270 degrees exchange width and height. Horizontal
     /// reading sums widths; vertical reading sums heights. The cross-axis extent
     /// is the largest character extent. Negative tracking is clamped to zero,
-    /// matching Java FontSetting; no kerning, shaping or wrapping is applied.
+    /// matching Java FontSetting; no cross-character kerning, shaping or wrapping is applied.
     ///
     /// ```
     /// use ofdrw::{CanvasFont, OfdDocument};
@@ -290,7 +292,7 @@ impl OfdDocument {
         let metrics = self.measure_canvas_text(page_index, text, style)?;
         let mut font = self.canvas_font(page_index, style)?;
         if font.id.is_empty() {
-            font.id = self.add_canvas_default_font(font.document_index)?;
+            font.id = self.add_canvas_named_font(font.document_index, "SimSun")?;
         }
         let mut origin = [
             point[0] + metrics.first_offset[0],
@@ -349,7 +351,12 @@ impl OfdDocument {
         Ok(id)
     }
 
-    fn add_canvas_default_font(&mut self, document_index: usize) -> Result<String, OfdError> {
+    pub(super) fn add_canvas_named_font(
+        &mut self,
+        document_index: usize,
+        name: &str,
+    ) -> Result<String, OfdError> {
+        let name = escape_xml_attribute(name);
         self.ensure_unsigned_document(document_index)?;
         let root = self
             .doc_roots()?
@@ -376,7 +383,7 @@ impl OfdDocument {
         )?);
         self.ensure_unsigned_entry(&path)?;
         let resource = if paths.is_empty() {
-            format!("<ofd:Res xmlns:ofd=\"{OFD_NS}\"><ofd:Fonts><ofd:Font ID=\"{id}\" FontName=\"SimSun\" FamilyName=\"SimSun\"/></ofd:Fonts></ofd:Res>")
+            format!("<ofd:Res xmlns:ofd=\"{OFD_NS}\"><ofd:Fonts><ofd:Font ID=\"{id}\" FontName=\"{name}\" FamilyName=\"{name}\"/></ofd:Fonts></ofd:Res>")
         } else {
             self.ensure_resource_file_not_shared(document_index, &path)?;
             let raw = std::str::from_utf8(self.required_entry(&path)?)
@@ -394,7 +401,7 @@ impl OfdDocument {
                 .rsplit_once(':')
                 .map_or(String::new(), |(p, _)| format!("{p}:"));
             let item =
-                format!("<{prefix}Font ID=\"{id}\" FontName=\"SimSun\" FamilyName=\"SimSun\"/>");
+                format!("<{prefix}Font ID=\"{id}\" FontName=\"{name}\" FamilyName=\"{name}\"/>");
             let item = if fonts.is_some() {
                 item
             } else {
@@ -457,12 +464,18 @@ fn canvas_font_metrics(
     let measure = |data: &[u8], index: u32| {
         let face = ttf_parser::Face::parse(data, index)
             .map_err(|_| OfdError::Invalid("cannot measure canvas font".into()))?;
-        let units = f64::from(face.units_per_em());
+        let (point_size, transform) = canvas_java_point_scale(size)?;
+        let design_scale = (point_size * 65536. / f64::from(face.units_per_em())).round();
+        let shaping = rustybuzz::Face::from_face(face.clone());
+        let mut complex_advances = std::collections::HashMap::new();
         let hhea = face.tables().hhea;
-        let height = (f64::from(hhea.ascender) - f64::from(hhea.descender)
-            + f64::from(hhea.line_gap))
-            / units
-            * size;
+        let scaled = |value: f32| value * design_scale as f32 / 65536. / 64.;
+        let ascent = scaled(f32::from(hhea.ascender));
+        let descent = scaled(-f32::from(hhea.descender));
+        let line =
+            scaled(f32::from(hhea.ascender) - f32::from(hhea.descender) + f32::from(hhea.line_gap));
+        let leading = line - ascent - descent;
+        let height = f64::from((ascent * transform + descent * transform) + leading * transform);
         Ok((
             text.chars()
                 .map(|ch| {
@@ -470,9 +483,33 @@ fn canvas_font_metrics(
                     if matches!(ch, '\t' | '\n' | '\r') {
                         return 0.;
                     }
-                    let glyph = face.glyph_index(ch).unwrap_or(ttf_parser::GlyphId(0));
-                    f64::from(face.glyph_hor_advance(glyph).unwrap_or(face.units_per_em())) / units
-                        * size
+                    let complex = canvas_complex_char(ch);
+                    let advance = if complex {
+                        *complex_advances.entry(ch).or_insert_with(|| {
+                            let mut encoded = [0u8; 4];
+                            let mut buffer = rustybuzz::UnicodeBuffer::new();
+                            buffer.push_str(ch.encode_utf8(&mut encoded));
+                            buffer.guess_segment_properties();
+                            buffer.set_flags(rustybuzz::BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE);
+                            rustybuzz::shape(&shaping, &[], buffer)
+                                .glyph_positions()
+                                .iter()
+                                .map(|position| f64::from(position.x_advance))
+                                .sum()
+                        })
+                    } else {
+                        let glyph = face.glyph_index(ch).unwrap_or(ttf_parser::GlyphId(0));
+                        f64::from(face.glyph_hor_advance(glyph).unwrap_or(face.units_per_em()))
+                    };
+                    let fixed = (advance * design_scale / 64.).round();
+                    let width = (fixed as f32 / 65536.) * transform;
+                    // Isolated layout passes the scaled advance through HarfBuzz's
+                    // 16.16 callback before returning AWT's logical bounds.
+                    f64::from(if complex {
+                        (width * 65536.).trunc() / 65536.
+                    } else {
+                        width
+                    })
                 })
                 .collect(),
             height,
@@ -501,6 +538,36 @@ fn canvas_font_metrics(
             .collect(),
         size,
     ))
+}
+
+// The reference switches to isolated-character layout for these script ranges.
+// This does not shape adjacent characters together or introduce word kerning.
+fn canvas_complex_char(ch: char) -> bool {
+    matches!(u32::from(ch), 0x0300..=0x036f | 0x0590..=0x06ff | 0x0900..=0x0e7f
+        | 0x0f00..=0x109f | 0x1100..=0x11fe | 0x1780..=0x17ff
+        | 0x200c..=0x200d | 0x202a..=0x202e | 0x206a..=0x206f)
+}
+
+// Match the fixed-point scale used by the pinned OpenJDK 21 FreeType reference.
+// Glyph advances use 16.16 values; the point size uses 26.6 before scaling.
+fn canvas_java_point_scale(size: f64) -> Result<(f64, f32), OfdError> {
+    let requested = size as f32;
+    if !requested.is_finite() || requested <= 0. {
+        return Err(OfdError::Invalid(
+            "canvas font size is not representable".into(),
+        ));
+    }
+    let points = f64::from(requested).clamp(1., 16384.);
+    let relative = f64::from(requested) / points;
+    if relative.trunc() > 32766. {
+        return Err(OfdError::Limit(
+            "canvas font scale exceeds the Java scaler range".into(),
+        ));
+    }
+    let ratio = relative as f32;
+    let transform = (ratio * 65536.).trunc() / 65536.;
+    let point_size = (points * 64.).floor();
+    Ok((point_size, transform))
 }
 
 // Java STBase.fmt keeps three decimal places above one, and truncates to
