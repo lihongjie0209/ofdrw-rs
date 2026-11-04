@@ -69,8 +69,8 @@ impl GradientProperties {
         let coords: Vec<_> = self.coords.iter().map(|&v| f64::from(v)).collect();
         let mut lower = 0_f64;
         let mut upper = 1_f64;
-        match coords.as_slice() {
-            &[x, y, ex, ey] => {
+        match *coords.as_slice() {
+            [x, y, ex, ey] => {
                 let (dx, dy) = (ex - x, ey - y);
                 let length = dx * dx + dy * dy;
                 if length == 0. {
@@ -83,7 +83,7 @@ impl GradientProperties {
                     upper = upper.max(t.ceil());
                 }
             }
-            &[x, y, radius, ex, ey, er] => {
+            [x, y, radius, ex, ey, er] => {
                 let (dx, dy, dr) = (ex - x, ey - y, er - radius);
                 let a = dx * dx + dy * dy - dr * dr;
                 // SVG's increasing nested circles have convex sublevel sets:
