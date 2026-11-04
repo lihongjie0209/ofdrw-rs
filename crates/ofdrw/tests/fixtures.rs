@@ -5095,7 +5095,11 @@ fn draw_params_write_gradient_and_gouraud_paints() {
             .kind,
         "Radial"
     );
-    assert!(document.page_svg(0).unwrap().contains("radialGradient"));
+    // The start circle is outside the end circle. Preserve this two-circle
+    // field through a paint tile instead of SVG's clamped focal point.
+    let svg = document.page_svg(0).unwrap();
+    assert!(svg.contains("<pattern id=\"ofd-shading-"));
+    assert!(svg.contains("data:image/png;base64,"));
 
     let mesh = GouraudFillStyle {
         points: vec![

@@ -1,0 +1,11 @@
+{
+  "oracle": "Original native PDF rendered by Ghostscript",
+  "ghostscript_version": "10.02.1",
+  "dpi": 144,
+  "cases": [
+    "equal-repeat",
+    "equal-reflect",
+    "ellipse"
+  ],
+  "construction": "Five stitching-function cycles over center domain [-2,3]; rotated eccentric ellipse via an independent PDF affine matrix"
+}

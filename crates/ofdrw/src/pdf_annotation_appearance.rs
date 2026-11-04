@@ -44,6 +44,7 @@ fn svg(
     let params = document.page_resource_elements(&page.path, page.document_index, "DrawParam")?;
     let colors = document.color_resources_for_page(&page.path, page.document_index)?;
     let resources = SvgRenderResources {
+        raster_scale: 1.,
         document_index: page.document_index,
         source_path: &page.path,
         fonts: &fonts,
@@ -100,7 +101,7 @@ fn form(
     options: RenderOptions,
     pdf: &mut Document,
 ) -> Result<ObjectId, OfdError> {
-    let source = svg(document, page, annotation, options)?;
+    let source = radial_pdf::svg(svg(document, page, annotation, options)?)?;
     let mut svg_options = svg2pdf::usvg::Options {
         fontdb: pdf_system_fonts(),
         ..svg2pdf::usvg::Options::default()
