@@ -826,7 +826,14 @@ Node.js 使用 `measureCanvasTextArea`。各接口返回 `width`、`height`、
 对照保留原始 `stroke-save.ofd`，并通过 Java 显式重设已知线宽生成单独的对照文件。
 Rust 始终恢复完整绘制参数；生成器与元数据显式记录这项差异。
 
-Canvas CSS 字体/颜色解析与独立像素单位助手仍待实现。
+开发版本的 Rust `parse_canvas_color` 解析全部 143 个 Java NamedColor 名称、
+`#rgb`、十六进制及 Java Color.decode 整数形式、`rgb()` 和 `rgba()`，
+返回可直接放入 `DrawParamStyle.fill` / `stroke` 的 `SolidPaintStyle`。
+RGB 通道限定为 0–255；RGBA 透明度限定为有限的 0–1，并按 Java 规则截断到字节，
+因此 `rgba(10,20,30,0.5)` 的 alpha 为 127。未知颜色和非法输入返回 `None`。
+这不是完整浏览器 CSS 语法；不复制 Java 的越界通道或无效浮点转换行为。
+461 组参考值由固定 Java 提交独立执行生成，另验证透明度绘制、OFD 往返及 PDF 导出。
+颜色字符串的跨语言接口、CSS 字体解析与独立像素单位助手仍待实现。
 字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
