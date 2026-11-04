@@ -1710,6 +1710,12 @@ support nonzero start radius, eccentricity, and angle. Advanced composite
 content and full font shaping remain unsupported. Text clipping areas use
 embedded font glyph outlines when `CGTransform` supplies glyph IDs.
 
+The development PDF exporter also retains the nonzero radial start radius in
+native color and opacity shadings, including strokes and pattern cells. Seven
+round-trip tests inspect both circles and compare independent Poppler renders
+at two resolutions on Linux CI. This requires the unpublished converter
+`ofdrw-svg2pdf 0.13.0-ofdrw.4`; v0.5.0 PDF export still loses the start radius.
+
 ## SVG 字体与绘制效果
 
 Mapped TrueType and CFF glyphs bake their font matrix into outline geometry,

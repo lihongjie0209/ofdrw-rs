@@ -24,11 +24,19 @@ Raster conversion honors SVG image-rendering per placement. Nearest sampling
 sets PDF Interpolate=false; smooth sampling sets true on both color images and
 associated alpha images. JPEG samples retain their original compressed bytes.
 
-The raster backend uses `ofdrw-resvg` 0.45.1-ofdrw.2 to preserve nested
+The raster backend uses `ofdrw-resvg` 0.48.1-ofdrw.2 to preserve nested
 layer, mask and pattern tile coordinates. Publish the renderer dependency with
 `Publish SVG renderers` before publishing this converter version.
 
-The next, unpublished converter revision (`0.13.0-ofdrw.3`) preserves
+Converter revision `0.13.0-ofdrw.3` preserves
 OFD path hairlines: reserved `ofd-device-hairline-` SVG path IDs select the
 native PDF zero-width stroke operator. The renderer dependencies above must
 be published first. This change does not add zero-width text strokes.
+
+The next, unpublished converter revision (`0.13.0-ofdrw.4`) upgrades the SVG
+model to usvg 0.48.1 and preserves the SVG radial-gradient focal radius (`fr`)
+in native PDF radial shading coordinates. Color and opacity shadings share the
+same two circles, including gradients inside pattern cells. Text adapts the
+new model's wider glyph IDs through checked OpenType glyph-ID conversions.
+Regression tests inspect PDF shading dictionaries and compare Poppler renders
+against the OFD PNG output at two resolutions. This fix is absent from v0.5.0.

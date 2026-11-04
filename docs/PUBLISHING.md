@@ -4,6 +4,12 @@ Python 发布到 PyPI（`ofdrw-rs`），Node.js 发布到 npm（`ofdrw-rs`），
 Rust 核心发布到 crates.io（`ofdrw`），Go 使用 GitHub 子模块标签。
 C ABI 的六个平台原生 ZIP 和所有语言的备份文件放在 GitHub Releases。
 
+开发分支的径向渐变 PDF 修复需要先发布新的
+`ofdrw-svg2pdf 0.13.0-ofdrw.4`（尚未发布），再发布采用它的核心版本。
+它依赖已发布的 `ofdrw-resvg 0.48.1-ofdrw.2`。
+使用通过 main 完整 CI 的准确提交运行 `Publish SVG PDF converter`；
+不得替换 v0.5.0 使用的 `0.13.0-ofdrw.3` 或已有发布标签。
+
 ## 当前已发布版本
 
 **0.4.0** 已发布到 [crates.io](https://crates.io/crates/ofdrw/0.4.0)、

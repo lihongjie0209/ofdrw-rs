@@ -31,7 +31,7 @@ impl GradientProperties {
                 transform: l.transform(),
             }),
             Paint::RadialGradient(r) => Some(Self {
-                coords: vec![r.fx(), r.fy(), 0.0, r.cx(), r.cy(), r.r().get()],
+                coords: vec![r.fx(), r.fy(), r.fr().get(), r.cx(), r.cy(), r.r().get()],
                 shading_type: FunctionShadingType::Radial,
                 stops: Vec::from(r.stops()),
                 transform: r.transform(),
