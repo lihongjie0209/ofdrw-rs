@@ -861,7 +861,12 @@ JSON 启用浮点往返精度，避免序列化后丢失最低有效位。
 及 [HarfBuzz 字体回调](https://github.com/openjdk/jdk21u/blob/jdk-21.0.11%2B10/src/java.desktop/share/native/libfontmanager/hb-jdk-font.cc)。
 开发版本的 C `ofd_resolve_canvas_font_style_json`、Python `resolve_canvas_font_style`、Go `ResolveCanvasFontStyle` 和 Node.js `resolveCanvasFontStyle` 返回可直接用于 Canvas 的完整字体设置；复用已有字体，找不到时添加命名字体资源。C ABI 保持为 1，共 338 个导出。这些接口尚未包含在 v0.5.0 中。
 
-完整浏览器 CSS 字体语法（字体列表、转义和行高）及独立像素单位助手仍待实现。
+Rust 开发版本提供 `CanvasUnits::new(pixels_per_mm)` 和默认密度 3.78 的 `CanvasUnits::default()`。
+`mm(i32)` 将整数像素换算为毫米；`pixel(f64)` 先乘密度，再向零截断到 32 位有符号像素。
+为兼容 Java，转换溢出和无穷值饱和到整数边界，NaN 转换为零；极小密度下毫米结果可为无穷值。
+构造器拒绝非正、非有限密度，不改变页面几何或绘制 CTM。329 组固定 Java 参考逐位验证普通值、
+负数、相邻浮点边界、极端密度和非有限毫米输入。该助手尚未提供跨语言接口，亦不属于 v0.5.0。
+完整浏览器 CSS 字体语法（字体列表、转义和行高）仍待实现。
 字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
 复杂变换裁剪的 Java 像素一致性尚未证明；
 Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
