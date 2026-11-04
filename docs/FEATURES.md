@@ -868,8 +868,14 @@ Rust 开发版本提供 `CanvasUnits::new(pixels_per_mm)` 和默认密度 3.78 �
 负数、相邻浮点边界、极端密度和非有限毫米输入。开发版本同步提供 C `ofd_canvas_pixels_to_mm` / `ofd_canvas_mm_to_pixels`、Python `canvas_pixels_to_mm` / `canvas_mm_to_pixels`、Go `CanvasPixelsToMM` / `CanvasMMToPixels` 和 Node.js `canvasPixelsToMm` / `canvasMmToPixels`。这些函数不需要文档；C 输出为标量，无需释放缓冲区。Python/Node.js 默认密度为 3.78，Go/C 显式传入。各语言均通过全部 329 个 Java 参考案例；这些接口不属于 v0.5.0。
 完整浏览器 CSS 字体语法（字体列表、转义和行高）仍待实现。
 字符逻辑矩形测量已在 v0.5.0 之后的开发分支提供。
-复杂变换裁剪的 Java 像素一致性尚未证明；
-Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
+复杂裁剪新增五组独立 Java2D 几何参考：剪切矩形、反射曲线、替换裁剪、保存/恢复及剪切圆。
+参考由 Java2D 的 Area、BasicStroke 和 AffineTransform 直接计算，不调用 Rust；
+在 101.6/304.8 DPI 下使用现有光栅比较阈值，同时检查参考白色内部没有额外绘制，
+并验证 OFD 保存重开像素不变和 PDF 导出可解析。
+固定 Java 原始 DrawContext OFD 一并保留；ImageMaker 对这些文件在仅删除对象 Clips 前后
+输出相同像素，因此不能作为正确裁剪的正向参考。这些结果不代表与完整 Java OFD
+渲染器在任意变换下像素一致。Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
+参考生成器使用 Java converter 的 Maven 测试 classpath，避免混用缓存中的不兼容依赖版本。
 
 ## 文本流式布局
 
