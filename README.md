@@ -202,7 +202,7 @@ Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
 [Python](bindings/python/README.md)、[Go](bindings/go/README.md) 和
 [Node.js / TypeScript](bindings/node/README.md) 均提供原子批量调用示例。
 坐标使用毫米，角度使用度，失败时回滚整批绘制。
-0.5.0 包含路径、图片和文字画布；后续开发版本另提供文字逻辑区域测量和颜色字符串解析。各语言开发版本另支持 Canvas 字体样式解析和字体资源选择；各语言开发版本还提供像素/毫米换算助手（Rust 使用 `CanvasUnits`）。完整 CSS 字体语法及字符像素包围盒仍待实现。
+0.5.0 包含路径、图片和文字画布；后续开发版本另提供文字逻辑区域测量和颜色字符串解析。各语言开发版本另支持 Canvas 字体样式解析和字体资源选择；各语言开发版本还提供像素/毫米换算助手（Rust 使用 `CanvasUnits`）。Rust 开发版本另提供 `create_canvas_pattern` 图片底纹助手，支持镜像平铺、尺寸与单元变换。完整 CSS 字体语法及字符像素包围盒仍待实现。
 协议与限制见[有状态向量画布](docs/FEATURES.md#有状态向量画布)。
 Rust 核心另提供 `CanvasFont`、`FillText` 与 `measure_canvas_text`，支持文字对齐、字距和方向；C、Python、Go、Node.js 提供对应文字绘制与只读测量接口（0.5.0）。
 

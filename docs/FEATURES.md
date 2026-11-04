@@ -819,6 +819,21 @@ Node.js 使用 `measureCanvasTextArea`。各接口返回 `width`、`height`、
 省略字体设置时使用核心默认值；未知字段、未知对齐和非法方向被拒绝。
 测量请求最多 16 MiB，解码后的文字最多 1 MB。三个语言接口均不修改调用者的字体配置。
 
+Rust 开发版本另提供 `OfdDocument::create_canvas_pattern(page, data, format, repetition, pixels_per_mm)`，
+返回 `CanvasPattern`。它只在页面所属文档中添加图片资源，不绘制页面对象；
+`set_image_size(w,h)` 和 `set_transform([a,b,c,d,e,f])` 可调整单元，
+`as_pattern_style()` / `into_pattern_style()` 可用于 `fill_pattern` 或 `stroke_pattern`。
+重复方式按 Java 实际行为接受空串、`repeat`、`row`、`column`、`row-column`，不区分 ASCII 大小写；
+后三种表示交替行/列的镜像，不是浏览器的单轴重复。`normal`、`repeat-x`、`repeat-y`、`no-repeat` 不属于别名。
+默认尺寸来自像素数 / 显式 PPM（Java 默认 3.78），并遵循 Java STBase 默认的数值格式化；
+图片 CTM 保留未舍入的缩放，使用新增的 `PatternCell::TransformedImage` 表达独立的边界和图片矩阵。
+已有 `PatternCell::Image` 仍按边界尺寸生成 CTM。无效密度、重复方式、编码、几何及签名保护错误
+不会留下部分资源修改；无效的尺寸/矩阵编辑不会修改底纹或已经绘制的对象。
+八组原始 Java OFD 验证自然尺寸、小数格式化、镜像、单元/画布变换、填充、描边和透明度；
+两端 OFD 使用相同 Rust 渲染器比较 25.4/101.6 DPI 像素，属于写入一致性验证，不是独立 Java 光栅器对照。
+另覆盖七种图片编码、多文档资源归属、签名拒绝、OFD 往返和 PDF 导出。助手的跨语言接口仍待接入，
+此 API 不属于 v0.5.0；C ABI 仍为 1，共 340 个导出。
+
 `SetDrawParam` 可设置 `fill_gradient` / `stroke_gradient`，支持轴向和径向渐变。
 六组独立 Java OFD 对照在 25.4 与 101.6 DPI 下检查像素一致性，覆盖路径填充、
 径向填充、渐变描边的保存/恢复、透明裁剪、文字填充及仿射变换。

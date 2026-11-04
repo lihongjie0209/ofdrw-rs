@@ -572,7 +572,7 @@ fn canvas_java_point_scale(size: f64) -> Result<(f64, f32), OfdError> {
 
 // Java STBase.fmt keeps three decimal places above one, and truncates to
 // three significant fractional digits below one after rounding to eight places.
-fn canvas_xml_number(value: f64) -> Result<f64, OfdError> {
+pub(super) fn canvas_xml_number(value: f64) -> Result<f64, OfdError> {
     if !value.is_finite() {
         return Err(OfdError::Invalid("nonfinite canvas text number".into()));
     }

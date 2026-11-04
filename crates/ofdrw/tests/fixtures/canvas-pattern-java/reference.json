@@ -1,0 +1,264 @@
+{
+  "java_commit": "84e9eb260ba6fd351ecccf08a01a40305d4af635",
+  "cases": [
+    {
+      "name": "repeat-natural",
+      "repetition": "repeat",
+      "ppm": 3.78,
+      "expected": {
+        "width": 1.587,
+        "height": 1.058,
+        "reflect": "Normal",
+        "ctm": null,
+        "image_boundary": [
+          0.0,
+          0.0,
+          1.587,
+          1.058
+        ],
+        "image_ctm": [
+          1.5873015873015874,
+          0.0,
+          0.0,
+          1.0582010582010584,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "empty-natural",
+      "repetition": "",
+      "ppm": 4,
+      "expected": {
+        "width": 1.5,
+        "height": 1.0,
+        "reflect": "Normal",
+        "ctm": null,
+        "image_boundary": [
+          0.0,
+          0.0,
+          1.5,
+          1.0
+        ],
+        "image_ctm": [
+          1.5,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "column-custom",
+      "repetition": "COLUMN",
+      "ppm": 4,
+      "size": [
+        4,
+        3
+      ],
+      "expected": {
+        "width": 4.0,
+        "height": 3.0,
+        "reflect": "Column",
+        "ctm": null,
+        "image_boundary": [
+          0.0,
+          0.0,
+          4.0,
+          3.0
+        ],
+        "image_ctm": [
+          4.0,
+          0.0,
+          0.0,
+          3.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "row-transform",
+      "repetition": "row",
+      "ppm": 4,
+      "size": [
+        4,
+        3
+      ],
+      "transform": [
+        1,
+        0.25,
+        0.2,
+        1,
+        1,
+        2
+      ],
+      "expected": {
+        "width": 4.0,
+        "height": 3.0,
+        "reflect": "Row",
+        "ctm": "1.0 0.25 0.2 1.0 1.0 2.0",
+        "image_boundary": [
+          0.0,
+          0.0,
+          4.0,
+          3.0
+        ],
+        "image_ctm": [
+          4.0,
+          0.0,
+          0.0,
+          3.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "row-column-affine",
+      "repetition": "Row-CoLuMn",
+      "ppm": 2,
+      "size": [
+        4,
+        3
+      ],
+      "transform": [
+        0.8,
+        0.3,
+        -0.2,
+        1,
+        1,
+        0
+      ],
+      "canvas_ctm": [
+        1,
+        0.1,
+        0.2,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "width": 4.0,
+        "height": 3.0,
+        "reflect": "RowAndColumn",
+        "ctm": "0.8 0.3 -0.2 1.0 1.0 0.0",
+        "image_boundary": [
+          0.0,
+          0.0,
+          4.0,
+          3.0
+        ],
+        "image_ctm": [
+          4.0,
+          0.0,
+          0.0,
+          3.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "fractional-size",
+      "repetition": "repeat",
+      "ppm": 4,
+      "size": [
+        1.2345,
+        0.123456
+      ],
+      "expected": {
+        "width": 1.235,
+        "height": 0.123,
+        "reflect": "Normal",
+        "ctm": null,
+        "image_boundary": [
+          0.0,
+          0.0,
+          1.235,
+          0.123
+        ],
+        "image_ctm": [
+          1.2345,
+          0.0,
+          0.0,
+          0.123456,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "pattern-stroke",
+      "repetition": "repeat",
+      "ppm": 3.78,
+      "size": [
+        4,
+        3
+      ],
+      "stroke": true,
+      "expected": {
+        "width": 4.0,
+        "height": 3.0,
+        "reflect": "Normal",
+        "ctm": null,
+        "image_boundary": [
+          0.0,
+          0.0,
+          4.0,
+          3.0
+        ],
+        "image_ctm": [
+          4.0,
+          0.0,
+          0.0,
+          3.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "mirrored-alpha",
+      "repetition": "repeat",
+      "ppm": 4,
+      "size": [
+        4,
+        3
+      ],
+      "transform": [
+        -1,
+        0,
+        0,
+        1,
+        5,
+        0
+      ],
+      "alpha": 0.5,
+      "expected": {
+        "width": 4.0,
+        "height": 3.0,
+        "reflect": "Normal",
+        "ctm": "-1.0 0.0 0.0 1.0 5.0 0.0",
+        "image_boundary": [
+          0.0,
+          0.0,
+          4.0,
+          3.0
+        ],
+        "image_ctm": [
+          4.0,
+          0.0,
+          0.0,
+          3.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  ],
+  "render_scope": "Java DrawContext writer output; comparisons render both OFDs with Rust, not an independent rasterizer."
+}
