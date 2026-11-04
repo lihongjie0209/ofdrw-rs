@@ -11265,6 +11265,37 @@ pub unsafe extern "C" fn ofd_measure_canvas_text_json(
     })
 }
 
+/// Resolve a canvas font shorthand, reusing a page font or adding a named resource.
+///
+/// JSON requires `style` and accepts optional `font` and `pixels_per_mm` (3.78).
+/// Returns complete font settings suitable for a canvas `set_font` command.
+/// Unknown fields and invalid settings fail before changing document resources.
+/// The caller owns the returned buffer and must free it with `ofd_buffer_free`.
+///
+/// # Safety
+/// `handle` must be live, `request_json` NUL-terminated, and `output` writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_resolve_canvas_font_style_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    request_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let (style, base, pixels_per_mm) = canvas::parse_font_style(input_string(request_json)?)?;
+        let font = document_mut(handle)?
+            .resolve_canvas_font_style(page_index, &style, &base, pixels_per_mm)
+            .map_err(|e| e.to_string())?;
+        output_buffer(
+            serde_json::to_vec(&canvas::font_json(&font)).map_err(|e| e.to_string())?,
+            output,
+        )
+    })
+}
+
 /// Measure logical canvas character areas without changing the document or allocating resources.
 ///
 /// JSON requires `text` and accepts optional `font` settings. Returns logical

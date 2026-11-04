@@ -1088,6 +1088,8 @@ export class Document {
   /** Draw absolute mixed containers on an existing page; never adds pages. */
   drawCanvas(pageIndex: number, boundary: [number, number, number, number], commands: readonly CanvasCommand[]): string[];
   measureCanvasText(pageIndex: number, text: string, font?: CanvasFont): CanvasTextMetrics;
+  /** Resolve a font shorthand, reusing a page font or adding a named resource. */
+  resolveCanvasFontStyle(pageIndex: number, style: string, font?: CanvasFont, pixelsPerMm?: number): CanvasFont;
   measureCanvasTextArea(pageIndex: number, text: string, font?: CanvasFont): CanvasTextAreaMetrics;
   addFixedContainers(pageIndex: number, containers: FixedContainer[]): BoxPlacement[];
   addFlowContainers(documentIndex: number, containers: FlowContainer[], options?: BoxLayoutOptions): BoxLayoutResult;

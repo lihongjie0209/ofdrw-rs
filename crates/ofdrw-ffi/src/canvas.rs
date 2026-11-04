@@ -74,6 +74,48 @@ pub(super) fn parse_measure(source: &str) -> Result<(String, CanvasFont), String
     Ok((request.text, request.font.into_core()?))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FontStyleRequest {
+    style: String,
+    #[serde(default)]
+    font: FontInput,
+    #[serde(default = "default_pixels_per_mm")]
+    pixels_per_mm: f64,
+}
+
+fn default_pixels_per_mm() -> f64 {
+    3.78
+}
+
+pub(super) fn parse_font_style(source: &str) -> Result<(String, CanvasFont, f64), String> {
+    if source.len() > 16 * 1024 * 1024 {
+        return Err("canvas JSON exceeds 16 MiB".into());
+    }
+    let request: FontStyleRequest = serde_json::from_str(source).map_err(|e| e.to_string())?;
+    Ok((
+        request.style,
+        request.font.into_core()?,
+        request.pixels_per_mm,
+    ))
+}
+
+pub(super) fn font_json(font: &CanvasFont) -> serde_json::Value {
+    let align = match font.align {
+        CanvasTextAlign::Start => "start",
+        CanvasTextAlign::End => "end",
+        CanvasTextAlign::Left => "left",
+        CanvasTextAlign::Right => "right",
+        CanvasTextAlign::Center => "center",
+    };
+    serde_json::json!({
+        "font_id": font.font_id, "size": font.size,
+        "letter_spacing": font.letter_spacing, "weight": font.weight,
+        "italic": font.italic, "read_direction": font.read_direction,
+        "char_direction": font.char_direction, "align": align,
+    })
+}
+
 // Empty struct variants reject stray fields on commands without arguments.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -384,6 +426,143 @@ mod tests {
                 .unwrap();
         unsafe { ofd_buffer_free(output) };
         Ok(result)
+    }
+
+    fn resolve_style(
+        handle: *mut OfdDocument,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, i32> {
+        let input = CString::new(request.to_string()).unwrap();
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        let status =
+            unsafe { ofd_resolve_canvas_font_style_json(handle, 0, input.as_ptr(), &mut output) };
+        if status != 0 {
+            assert!(output.data.is_null());
+            return Err(status);
+        }
+        let value =
+            serde_json::from_slice(unsafe { std::slice::from_raw_parts(output.data, output.len) })
+                .unwrap();
+        unsafe { ofd_buffer_free(output) };
+        Ok(value)
+    }
+
+    #[test]
+    fn ffi_font_style_matches_java_cases_and_preserves_existing_resources() {
+        let reference: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ofdrw/tests/fixtures/canvas-font-style-java.json"
+        ))
+        .unwrap();
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(40., 30.).unwrap();
+        let font_data = include_bytes!("../../ofdrw/tests/fixtures/dejavu-sans.ttf");
+        let latin = doc
+            .add_embedded_font("CanvasTest", font_data)
+            .unwrap()
+            .to_string();
+        let chinese = doc
+            .add_embedded_font("宋体", font_data)
+            .unwrap()
+            .to_string();
+        let before = doc.to_bytes().unwrap();
+        let handle = register_document(doc).unwrap();
+        let cases = reference["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 986);
+        for case in cases {
+            let font = resolve_style(
+                handle,
+                &json!({
+                    "style":case["input"], "pixels_per_mm":case["pixels_per_mm"],
+                    "font":{"size":9., "weight":case["base_weight"], "italic":case["base_italic"],
+                    "letter_spacing":0.25, "read_direction":90, "char_direction":270, "align":"end"}
+                }),
+            )
+            .unwrap();
+            let expected = &case["expected"];
+            assert!(
+                (font["size"].as_f64().unwrap() - expected["size"].as_f64().unwrap()).abs() < 1e-12,
+                "{case}"
+            );
+            assert_eq!(font["weight"], expected["weight"], "{case}");
+            assert_eq!(font["italic"], expected["italic"], "{case}");
+            assert_eq!(
+                font["font_id"],
+                if expected["family"] == "宋体" {
+                    chinese.as_str()
+                } else {
+                    latin.as_str()
+                }
+            );
+            assert_eq!(font["letter_spacing"], 0.25);
+            assert_eq!(font["read_direction"], 90);
+            assert_eq!(font["char_direction"], 270);
+            assert_eq!(font["align"], "end");
+        }
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        unsafe { ofd_close(handle) };
+    }
+
+    #[test]
+    fn ffi_font_style_rejects_bad_requests_before_mutating_resources() {
+        let mut doc = OfdDocument::new();
+        doc.add_blank_page(40., 30.).unwrap();
+        let before = doc.to_bytes().unwrap();
+        let handle = register_document(doc).unwrap();
+        for request in [
+            json!({"style":"bold 4mm NewFont", "pixels_per_mm":0}),
+            json!({"style":"0mm NewFont"}),
+            json!({"style":"4mm NewFont", "font":{"align":"invalid"}}),
+            json!({"style":"4mm NewFont", "font":{"size":-1}}),
+            json!({"style":"4mm NewFont", "extra":true}),
+            json!({"style":"4mm NewFont", "font":{"extra":true}}),
+            json!({"style":null}),
+        ] {
+            assert!(resolve_style(handle, &request).is_err(), "{request}");
+        }
+        let input = CString::new(r#"{"style":"4mm NewFont"}"#).unwrap();
+        assert_ne!(
+            unsafe {
+                ofd_resolve_canvas_font_style_json(handle, 0, input.as_ptr(), ptr::null_mut())
+            },
+            0
+        );
+        let mut output = OfdBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        assert_ne!(
+            unsafe { ofd_resolve_canvas_font_style_json(handle, 1, input.as_ptr(), &mut output) },
+            0
+        );
+        assert_ne!(
+            unsafe { ofd_resolve_canvas_font_style_json(handle, 0, ptr::null(), &mut output) },
+            0
+        );
+        let bad_utf8 = [255_u8, 0];
+        assert_ne!(
+            unsafe {
+                ofd_resolve_canvas_font_style_json(handle, 0, bad_utf8.as_ptr().cast(), &mut output)
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { document_ref(handle).unwrap() }.to_bytes().unwrap(),
+            before
+        );
+        let font = resolve_style(handle, &json!({"style":"bold 4mm NewFont"})).unwrap();
+        assert_eq!(font["weight"], 700);
+        assert_eq!(
+            resolve_style(handle, &json!({"style":"bold 4mm NewFont"})).unwrap(),
+            font
+        );
+        unsafe { ofd_close(handle) };
+        assert!(resolve_style(handle, &json!({"style":"4mm NewFont"})).is_err());
     }
 
     #[test]

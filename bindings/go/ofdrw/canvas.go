@@ -212,3 +212,54 @@ func (doc *Document) MeasureCanvasTextArea(pageIndex int, text string, font Canv
 	}
 	return metrics, nil
 }
+
+// ResolveCanvasFontStyle resolves shorthand, adding a named font when needed.
+// pixelsPerMM must be positive; Java defaults to 3.78.
+func (doc *Document) ResolveCanvasFontStyle(
+	pageIndex int,
+	style string,
+	font CanvasFont,
+	pixelsPerMM float64,
+) (CanvasFont, error) {
+	doc.mu.Lock()
+	defer doc.mu.Unlock()
+	if err := doc.requireOpen(); err != nil {
+		return CanvasFont{}, err
+	}
+	if pageIndex < 0 {
+		return CanvasFont{}, errors.New("negative page index")
+	}
+	payload, err := json.Marshal(struct {
+		Style       string     `json:"style"`
+		PixelsPerMM float64    `json:"pixels_per_mm"`
+		Font        CanvasFont `json:"font"`
+	}{Style: style, Font: font, PixelsPerMM: pixelsPerMM})
+	if err != nil {
+		return CanvasFont{}, fmt.Errorf("encode canvas font style: %w", err)
+	}
+	request, err := cString(string(payload))
+	if err != nil {
+		return CanvasFont{}, err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var buffer nativeBuffer
+	if err := nativeError(api.resolveCanvasFontStyle(
+		doc.handle,
+		uintptr(pageIndex),
+		&request[0],
+		&buffer,
+	)); err != nil {
+		return CanvasFont{}, fmt.Errorf("resolve canvas font style: %w", err)
+	}
+	defer api.bufferFree(buffer)
+	data, err := bytesAt(buffer)
+	if err != nil {
+		return CanvasFont{}, err
+	}
+	var metrics CanvasFont
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return CanvasFont{}, fmt.Errorf("decode canvas font style: %w", err)
+	}
+	return metrics, nil
+}
