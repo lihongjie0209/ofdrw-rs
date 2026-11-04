@@ -872,6 +872,9 @@ Rust 开发版本提供 `CanvasUnits::new(pixels_per_mm)` 和默认密度 3.78 �
 参考由 Java2D 的 Area、BasicStroke 和 AffineTransform 直接计算，不调用 Rust；
 在 101.6/304.8 DPI 下使用现有光栅比较阈值，同时检查参考白色内部没有额外绘制，
 并验证 OFD 保存重开像素不变和 PDF 导出可解析。
+Python、Go 和 Node.js 集成测试也执行全部五个场景，在相同的两档分辨率和光栅阈值下
+直接比较独立 Java2D 参考，并验证保存重开、结构引用及调用者命令不被修改。
+测试解码受控的 RGB/RGBA PNG，不增加语言运行时依赖；Node.js 的实际 CI 测试清单包含这些场景。
 固定 Java 原始 DrawContext OFD 一并保留；ImageMaker 对这些文件在仅删除对象 Clips 前后
 输出相同像素，因此不能作为正确裁剪的正向参考。这些结果不代表与完整 Java OFD
 渲染器在任意变换下像素一致。Rust 保留裁剪 CTM，不采用 Java 对旋转椭圆弧仅缩放半径的近似变换。
