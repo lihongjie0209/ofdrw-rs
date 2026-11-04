@@ -1,6 +1,8 @@
 use pdf_writer::types::{FunctionShadingType, MaskType};
 use pdf_writer::{Chunk, Content, Filter, Finish, Name, Ref};
-use usvg::{Paint, Rect, Transform};
+use usvg::{Paint, Rect, SpreadMethod, Transform};
+
+use crate::{ConversionError, Result};
 
 use crate::util::context::Context;
 use crate::util::helper::{bbox_to_non_zero_rect, NameExt, RectExt, StopExt, TransformExt};
@@ -19,6 +21,8 @@ struct GradientProperties {
     shading_type: FunctionShadingType,
     stops: Vec<usvg::Stop>,
     transform: Transform,
+    spread: SpreadMethod,
+    domain: [f32; 2],
 }
 
 impl GradientProperties {
@@ -29,15 +33,99 @@ impl GradientProperties {
                 shading_type: FunctionShadingType::Axial,
                 stops: Vec::from(l.stops()),
                 transform: l.transform(),
+                spread: l.spread_method(),
+                domain: [0., 1.],
             }),
             Paint::RadialGradient(r) => Some(Self {
                 coords: vec![r.fx(), r.fy(), r.fr().get(), r.cx(), r.cy(), r.r().get()],
                 shading_type: FunctionShadingType::Radial,
                 stops: Vec::from(r.stops()),
                 transform: r.transform(),
+                spread: r.spread_method(),
+                domain: [0., 1.],
             }),
             _ => None,
         }
+    }
+
+    fn cover(&mut self, bbox: Rect) -> Result<()> {
+        if self.spread == SpreadMethod::Pad {
+            return Ok(());
+        }
+        let inverse = self
+            .transform
+            .invert()
+            .ok_or(ConversionError::InvalidGradient)?;
+        let mut points = [
+            usvg::tiny_skia_path::Point::from_xy(bbox.left(), bbox.top()),
+            usvg::tiny_skia_path::Point::from_xy(bbox.right(), bbox.top()),
+            usvg::tiny_skia_path::Point::from_xy(bbox.left(), bbox.bottom()),
+            usvg::tiny_skia_path::Point::from_xy(bbox.right(), bbox.bottom()),
+        ];
+        inverse.map_points(&mut points);
+        if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Err(ConversionError::InvalidGradient);
+        }
+        let coords: Vec<_> = self.coords.iter().map(|&v| f64::from(v)).collect();
+        let mut lower = 0_f64;
+        let mut upper = 1_f64;
+        match *coords.as_slice() {
+            [x, y, ex, ey] => {
+                let (dx, dy) = (ex - x, ey - y);
+                let length = dx * dx + dy * dy;
+                if length == 0. {
+                    return Err(ConversionError::InvalidGradient);
+                }
+                for point in points {
+                    let t =
+                        ((f64::from(point.x) - x) * dx + (f64::from(point.y) - y) * dy) / length;
+                    lower = lower.min(t.floor());
+                    upper = upper.max(t.ceil());
+                }
+            }
+            [x, y, radius, ex, ey, er] => {
+                let (dx, dy, dr) = (ex - x, ey - y, er - radius);
+                let a = dx * dx + dy * dy - dr * dr;
+                // SVG's increasing nested circles have convex sublevel sets:
+                // a circle containing the four corners contains the whole box.
+                if dr <= 0. || a >= 0. {
+                    return Err(ConversionError::InvalidGradient);
+                }
+                lower = -radius / dr;
+                for point in points {
+                    let (px, py) = (f64::from(point.x) - x, f64::from(point.y) - y);
+                    let b = -2. * (px * dx + py * dy + radius * dr);
+                    let c = px * px + py * py - radius * radius;
+                    let discriminant = (b * b - 4. * a * c).max(0.);
+                    let q = -0.5 * (b + discriminant.sqrt().copysign(b));
+                    let t = if q == 0. { 0. } else { (q / a).max(c / q) };
+                    upper = upper.max(t.ceil());
+                }
+            }
+            _ => return Err(ConversionError::InvalidGradient),
+        }
+        if !lower.is_finite() || !upper.is_finite() || upper.ceil() - lower.floor() > 16_777_216. {
+            return Err(ConversionError::InvalidGradient);
+        }
+        // Coordinates and domains are PDF real numbers (f32 in pdf-writer).
+        // Keep the radius-zero end exact rather than emitting a negative radius
+        // after rounding a fractional lower domain bound.
+        let mut expanded = Vec::with_capacity(coords.len());
+        let half = coords.len() / 2;
+        for t in [lower, upper] {
+            for i in 0..half {
+                expanded.push((coords[i] + (coords[i + half] - coords[i]) * t) as f32);
+            }
+        }
+        if half == 3 {
+            expanded[2] = 0.;
+        }
+        if expanded.iter().any(|v| !v.is_finite()) {
+            return Err(ConversionError::InvalidGradient);
+        }
+        self.coords = expanded;
+        self.domain = [lower as f32, upper as f32];
+        Ok(())
     }
 }
 
@@ -49,9 +137,17 @@ pub fn create_shading_pattern(
     chunk: &mut Chunk,
     ctx: &mut Context,
     accumulated_transform: &Transform,
-) -> Ref {
-    let properties = GradientProperties::try_from_paint(paint).unwrap();
-    shading_pattern(&properties, chunk, ctx, accumulated_transform)
+    bbox: Rect,
+) -> Result<Ref> {
+    let mut properties =
+        GradientProperties::try_from_paint(paint).ok_or(ConversionError::InvalidGradient)?;
+    properties.cover(bbox)?;
+    Ok(shading_pattern(
+        &properties,
+        chunk,
+        ctx,
+        accumulated_transform,
+    ))
 }
 
 /// Return a soft mask that will render the stop opacities of a gradient into a gray scale
@@ -62,16 +158,18 @@ pub fn create_shading_soft_mask(
     chunk: &mut Chunk,
     ctx: &mut Context,
     bbox: Rect,
-) -> Option<Ref> {
-    let properties = GradientProperties::try_from_paint(paint).unwrap();
+) -> Result<Option<Ref>> {
+    let mut properties =
+        GradientProperties::try_from_paint(paint).ok_or(ConversionError::InvalidGradient)?;
     if properties
         .stops
         .iter()
         .any(|stop| stop.opacity().get() < 1.0)
     {
-        Some(shading_soft_mask(&properties, chunk, ctx, bbox))
+        properties.cover(bbox)?;
+        Ok(Some(shading_soft_mask(&properties, chunk, ctx, bbox)))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -148,7 +246,10 @@ fn shading_function(
     use_opacities: bool,
 ) -> Ref {
     let shading_ref = ctx.alloc_ref();
-    let function_ref = function(&properties.stops, chunk, ctx, use_opacities);
+    let mut function_ref = function(&properties.stops, chunk, ctx, use_opacities);
+    if properties.spread != SpreadMethod::Pad {
+        function_ref = periodic_function(properties, function_ref, chunk, ctx, use_opacities);
+    }
 
     let mut shading = chunk.function_shading(shading_ref);
     shading.shading_type(properties.shading_type);
@@ -160,9 +261,57 @@ fn shading_function(
 
     shading.function(function_ref);
     shading.coords(properties.coords.iter().copied());
+    shading
+        .insert(Name(b"Domain"))
+        .array()
+        .items(properties.domain);
     shading.extend([true, true]);
     shading.finish();
     shading_ref
+}
+
+// Reuse each subtree twice. This retains explicit discontinuities for PDF
+// renderers without writing one copy of every color stop for every period.
+fn periodic_function(
+    properties: &GradientProperties,
+    mut child: Ref,
+    chunk: &mut Chunk,
+    ctx: &mut Context,
+    opacity: bool,
+) -> Ref {
+    let [lower, upper] = properties.domain;
+    let start = lower.floor();
+    let mut width = 1_f32;
+    let range = get_function_range(if opacity { 1 } else { 3 });
+    while width < upper - start || (width == 1. && properties.spread == SpreadMethod::Reflect) {
+        let reference = ctx.alloc_ref();
+        let mut function = chunk.stitching_function(reference);
+        function.domain([0., 2. * width]);
+        function.range(range.iter().copied());
+        function.functions([child, child]);
+        function.bounds([width]);
+        if width == 1. && properties.spread == SpreadMethod::Reflect {
+            function.encode(if start.rem_euclid(2.) == 0. {
+                [0., 1., 1., 0.]
+            } else {
+                [1., 0., 0., 1.]
+            });
+        } else {
+            function.encode([0., width, 0., width]);
+        }
+        function.finish();
+        child = reference;
+        width *= 2.;
+    }
+    let reference = ctx.alloc_ref();
+    let mut function = chunk.stitching_function(reference);
+    function.domain([lower, upper]);
+    function.range(range);
+    function.functions([child]);
+    function.bounds([]);
+    function.encode([lower - start, upper - start]);
+    function.finish();
+    reference
 }
 
 fn function(
@@ -242,6 +391,11 @@ fn stitching_function<const COUNT: usize>(
 
     for window in stops.windows(2) {
         let (first, second) = (&window[0], &window[1]);
+        // Coincident SVG stops are hard transitions, not zero-width PDF
+        // subdomains. Keep the colors on either side of the discontinuity.
+        if first.offset == second.offset {
+            continue;
+        }
         bounds.push(second.offset);
         functions.push(exponential_function(first, second, chunk, ctx));
         encode.extend([0.0, 1.0]);
@@ -278,4 +432,75 @@ fn exponential_function<const COUNT: usize>(
 
 fn get_function_range(count: usize) -> Vec<f32> {
     [0.0, 1.0].repeat(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn properties(coords: &[f32]) -> GradientProperties {
+        GradientProperties {
+            coords: coords.to_vec(),
+            shading_type: FunctionShadingType::Axial,
+            stops: Vec::new(),
+            transform: Transform::identity(),
+            spread: SpreadMethod::Repeat,
+            domain: [0., 1.],
+        }
+    }
+
+    #[test]
+    fn axial_bounds_cover_negative_and_positive_phases() {
+        let mut gradient = properties(&[0., 0., 10., 0.]);
+        gradient
+            .cover(Rect::from_xywh(-5., -2., 20., 4.).unwrap())
+            .unwrap();
+        assert_eq!(
+            (gradient.domain, gradient.coords),
+            ([-1., 2.], vec![-10., 0., 20., 0.])
+        );
+    }
+
+    #[test]
+    fn focal_radius_starts_at_zero_radius_with_fractional_phase() {
+        let mut gradient = properties(&[0., 0., 4., 0., 0., 10.]);
+        gradient
+            .cover(Rect::from_xywh(-10., -10., 20., 20.).unwrap())
+            .unwrap();
+        assert_eq!(
+            (gradient.domain, gradient.coords),
+            ([-2. / 3., 2.], vec![0., 0., 0., 0., 0., 16.])
+        );
+    }
+
+    #[test]
+    fn bounds_are_mapped_into_gradient_coordinates() {
+        let mut gradient = properties(&[0., 0., 10., 0.]);
+        gradient.transform = Transform::from_row(2., 0., 0., 0.5, 3., 4.);
+        gradient
+            .cover(Rect::from_xywh(-7., 3., 40., 2.).unwrap())
+            .unwrap();
+        assert_eq!(gradient.domain, [-1., 2.]);
+    }
+
+    #[test]
+    fn invalid_periodic_geometry_returns_an_error() {
+        for coords in [
+            &[0., 0., 0., 0.][..],
+            &[0., 0., 0., 10., 0., 1.],
+            &[0., 0., 1e-8, 0.],
+        ] {
+            let mut gradient = properties(coords);
+            assert!(matches!(
+                gradient.cover(Rect::from_xywh(0., 0., 20., 20.).unwrap()),
+                Err(ConversionError::InvalidGradient)
+            ));
+        }
+        let mut gradient = properties(&[0., 0., 10., 0.]);
+        gradient.transform = Transform::from_scale(0., 1.);
+        assert!(matches!(
+            gradient.cover(Rect::from_xywh(0., 0., 20., 20.).unwrap()),
+            Err(ConversionError::InvalidGradient)
+        ));
+    }
 }

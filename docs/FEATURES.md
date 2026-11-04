@@ -1713,8 +1713,20 @@ embedded font glyph outlines when `CGTransform` supplies glyph IDs.
 The development PDF exporter also retains the nonzero radial start radius in
 native color and opacity shadings, including strokes and pattern cells. Seven
 round-trip tests inspect both circles and compare independent Poppler renders
-at two resolutions on Linux CI. This requires the unpublished converter
-`ofdrw-svg2pdf 0.13.0-ofdrw.4`; v0.5.0 PDF export still loses the start radius.
+at two resolutions on Linux CI. This requires converter
+`ofdrw-svg2pdf 0.13.0-ofdrw.4` or later; v0.5.0 PDF export still loses the start radius.
+
+Development PDF builds also preserve `Repeat`/`Reflect` for native axial and
+nested radial gradients, with matching color and opacity periods in fills,
+strokes and pattern cells. Negative axial phases, nonzero focal radii,
+padded color stops and hard transitions retain their mapping. The converter
+uses shared native stitching functions, with logarithmic storage in the
+number of periods, and rejects nonfinite geometry or more than 2^24 periods
+because PDF real-number precision cannot retain their phase. Regression tests
+inspect and evaluate the PDF functions and compare two-resolution Poppler and
+Ghostscript renders; hard-stop ramps use 406.4/812.8 DPI to resolve their
+steeper transitions without changing the color or extra-ink thresholds. These changes require converter revision `.5` and are
+absent from published v0.5.0.
 
 Development builds additionally render contracting, equal-radius, non-nested,
 and tangent two-circle fields, including either zero-radius endpoint and an
