@@ -435,6 +435,9 @@ int32_t ofd_add_text_boxes_json(OfdDocument *handle, size_t document_index, cons
 int32_t ofd_draw_canvas_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
 /* Measure text with optional canvas font settings; does not modify the document. */
 int32_t ofd_measure_canvas_text_json(const OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);
+/* Reusable Canvas image pattern: options {repetition?,pixels_per_mm?,image_size?,ctm?}.
+   Returns pattern-style JSON with explicit image CTM; may add a resource, paints nothing. */
+int32_t ofd_create_canvas_pattern_json(OfdDocument *handle, size_t page_index, const uint8_t *data, size_t data_len, const char *format, const char *options_json, OfdBuffer *output);
 /* Resolve {style,font?,pixels_per_mm?}; may add a named font resource.
    Returns full canvas font settings. Free the returned buffer with ofd_buffer_free. */
 int32_t ofd_resolve_canvas_font_style_json(OfdDocument *handle, size_t page_index, const char *request_json, OfdBuffer *output);

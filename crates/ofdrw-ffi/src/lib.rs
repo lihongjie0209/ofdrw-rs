@@ -8653,14 +8653,28 @@ fn parse_pattern_style_json(source: &str) -> Result<PatternStyle, String> {
                     })
                     .transpose()?,
             },
-            "image" => PatternCell::Image {
-                resource_id: cell
+            "image" => {
+                let resource_id = cell
                     .get("resource_id")
                     .and_then(|value| value.as_str())
                     .ok_or("Pattern image cell requires resource_id")?
-                    .to_owned(),
-                boundary: boundary()?,
-            },
+                    .to_owned();
+                let ctm: Option<[f64; 6]> = serde_json::from_value(
+                    cell.get("ctm").cloned().unwrap_or(serde_json::Value::Null),
+                )
+                .map_err(|e| format!("invalid Pattern image CTM: {e}"))?;
+                match ctm {
+                    Some(ctm) => PatternCell::TransformedImage {
+                        resource_id,
+                        boundary: boundary()?,
+                        ctm,
+                    },
+                    None => PatternCell::Image {
+                        resource_id,
+                        boundary: boundary()?,
+                    },
+                }
+            }
             "composite" => PatternCell::Composite {
                 resource_id: cell
                     .get("resource_id")
@@ -11300,6 +11314,40 @@ pub unsafe extern "C" fn ofd_measure_canvas_text_json(
         output_buffer(serde_json::to_vec(&serde_json::json!({
             "width": metrics.width, "first_offset": metrics.first_offset, "offsets": metrics.offsets,
         })).map_err(|e| e.to_string())?, output)
+    })
+}
+
+/// Create a reusable image Canvas pattern without painting a page object.
+///
+/// Options: `repetition` (repeat), `pixels_per_mm` (3.78), `image_size:[w,h]`,
+/// `ctm:[a,b,c,d,e,f]`. Returns pattern-style JSON for fill/stroke drawing.
+/// Invalid options leave the document unchanged. Free output with `ofd_buffer_free`.
+///
+/// # Safety
+/// Handle must be live; data must cover data_len bytes; format/options must be
+/// NUL-terminated UTF-8 strings; output must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn ofd_create_canvas_pattern_json(
+    handle: *mut OfdDocument,
+    page_index: usize,
+    data: *const u8,
+    data_len: usize,
+    format: *const c_char,
+    options_json: *const c_char,
+    output: *mut OfdBuffer,
+) -> i32 {
+    run(|| {
+        if output.is_null() {
+            return Err("output buffer is null".into());
+        }
+        let bytes = canvas::create_pattern(
+            document_mut(handle)?,
+            page_index,
+            input_bytes(data, data_len)?,
+            input_string(format)?,
+            input_string(options_json)?,
+        )?;
+        output_buffer(bytes, output)
     })
 }
 
@@ -23169,3 +23217,6 @@ mod canvas_units_binding_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod canvas_pattern_tests;

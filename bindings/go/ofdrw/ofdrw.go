@@ -331,6 +331,7 @@ type nativeAPI struct {
 	canvasPixelsToMM                func(int32, float64, *float64) int32
 	canvasMMToPixels                func(float64, float64, *int32) int32
 	parseCanvasColor                func(*byte, *nativeBuffer) int32
+	createCanvasPattern             func(uintptr, uintptr, *byte, uintptr, *byte, *byte, *nativeBuffer) int32
 	resolveCanvasFontStyle          func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureCanvasTextArea           func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	addFixedContainers              func(uintptr, uintptr, *byte, *nativeBuffer) int32
@@ -714,6 +715,7 @@ func loadAPI() error {
 			{"ofd_add_text_boxes_json", &api.addTextBoxes},
 			{"ofd_draw_canvas_json", &api.drawCanvas},
 			{"ofd_measure_canvas_text_json", &api.measureCanvasText},
+			{"ofd_create_canvas_pattern_json", &api.createCanvasPattern},
 			{"ofd_resolve_canvas_font_style_json", &api.resolveCanvasFontStyle},
 			{"ofd_measure_canvas_text_area_json", &api.measureCanvasTextArea},
 			{"ofd_add_fixed_containers_json", &api.addFixedContainers},
@@ -1954,9 +1956,11 @@ type GradientFillStyle struct {
 // PatternCell is one path, text, image, or composite in a pattern tile.
 // Set PathStyle for path cells; its fields are encoded alongside the cell fields.
 type PatternCell struct {
-	Kind     string     `json:"kind"`
-	Commands string     `json:"commands,omitempty"`
-	Boundary [4]float64 `json:"boundary"`
+	// Optional image unit-square CTM, independent of Boundary.
+	CTM      *[6]float64 `json:"ctm,omitempty"`
+	Kind     string      `json:"kind"`
+	Commands string      `json:"commands,omitempty"`
+	Boundary [4]float64  `json:"boundary"`
 	*PathStyle
 	Text       string  `json:"text,omitempty"`
 	Size       float64 `json:"size,omitempty"`

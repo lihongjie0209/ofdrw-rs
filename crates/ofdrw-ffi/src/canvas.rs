@@ -116,6 +116,86 @@ pub(super) fn font_json(font: &CanvasFont) -> serde_json::Value {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PatternRequest {
+    repetition: String,
+    pixels_per_mm: f64,
+    image_size: Option<[f64; 2]>,
+    ctm: Option<[f64; 6]>,
+}
+
+impl Default for PatternRequest {
+    fn default() -> Self {
+        Self {
+            repetition: "repeat".into(),
+            pixels_per_mm: 3.78,
+            image_size: None,
+            ctm: None,
+        }
+    }
+}
+
+pub(super) fn create_pattern(
+    document: &mut OfdDocument,
+    page: usize,
+    data: &[u8],
+    format: &str,
+    source: &str,
+) -> Result<Vec<u8>, String> {
+    if source.len() > 16 * 1024 * 1024 {
+        return Err("canvas JSON exceeds 16 MiB".into());
+    }
+    let request: PatternRequest = serde_json::from_str(source).map_err(|e| e.to_string())?;
+    let mut staged = document.clone();
+    let mut pattern = staged
+        .create_canvas_pattern(
+            page,
+            data,
+            format,
+            &request.repetition,
+            request.pixels_per_mm,
+        )
+        .map_err(|e| e.to_string())?;
+    if let Some([width, height]) = request.image_size {
+        pattern
+            .set_image_size(width, height)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(ctm) = request.ctm {
+        pattern.set_transform(ctm).map_err(|e| e.to_string())?;
+    }
+    let style = pattern.as_pattern_style();
+    let cells = style
+        .cells
+        .iter()
+        .map(|cell| match cell {
+            ofdrw::PatternCell::TransformedImage {
+                resource_id,
+                boundary,
+                ctm,
+            } => Ok(serde_json::json!({
+                "kind":"image", "resource_id":resource_id, "boundary":boundary, "ctm":ctm,
+            })),
+            _ => Err("unexpected Canvas pattern cell".to_owned()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let reflect = match style.reflect {
+        ofdrw::PatternReflectMethod::Normal => "normal",
+        ofdrw::PatternReflectMethod::Row => "row",
+        ofdrw::PatternReflectMethod::Column => "column",
+        ofdrw::PatternReflectMethod::RowAndColumn => "row_and_column",
+    };
+    let mut value = serde_json::json!({"width":style.width,"height":style.height,
+        "reflect":reflect,"relative_to":"object","cells":cells});
+    if let Some(ctm) = style.ctm {
+        value["ctm"] = serde_json::json!(ctm);
+    }
+    let output = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    *document = staged;
+    Ok(output)
+}
+
 // Empty struct variants reject stray fields on commands without arguments.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]

@@ -9,6 +9,10 @@ import type { BoxLayoutItem, BoxLayoutOptions, BoxLayoutResult } from '../index'
 import type { FlowTextMetrics, FlowLineMetrics } from '../index';
 
 function exercise(document: Document, source: Document, certificate: Uint8Array, key: Buffer): void {
+  const imagePattern = document.createCanvasPattern(0, certificate, "png", {image_size: [4, 3]});
+  const imageCellMatrix: [number, number, number, number, number, number] = imagePattern.cells[0].ctm;
+  void imageCellMatrix;
+  document.drawCanvas(0, [0, 0, 40, 30], [{type: "set_draw_param", style: {fill_pattern: imagePattern}}]);
   const resolvedCanvasFont = document.resolveCanvasFontStyle(0, "bold 12px Arial", {}, 3.78);
   document.measureCanvasText(0, "Canvas", resolvedCanvasFont);
   const ranges: import('../index').BoxContentRanges[] = [{source_index: 0, ranges: [[0, 5]]}];
