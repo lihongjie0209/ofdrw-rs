@@ -33,10 +33,13 @@ mod pdf_calculator;
 mod pdf_export;
 mod pdf_import;
 mod pdf_link_action;
+mod radial_paint;
+mod radial_pdf;
 #[cfg(test)]
 mod raster_layer_tests;
 mod rtl_semantics;
 mod text_box;
+mod two_circle;
 pub use text_box::TextBox;
 mod text_measurement;
 pub use text_measurement::{FlowLineMetrics, FlowTextMetrics};
@@ -3619,7 +3622,10 @@ impl GradientFillStyle {
                 .iter()
                 .all(|value| value.is_finite())
                 || start_radius < 0.0
-                || end_radius <= start_radius
+                || end_radius < 0.0
+                || (start_radius > 0.0
+                    && start_radius == end_radius
+                    && self.start_point == self.end_point)
                 || !(0.0..1.0).contains(&eccentricity)
             {
                 return Err(OfdError::Invalid("invalid radial gradient geometry".into()));
@@ -4087,6 +4093,7 @@ pub struct OfdDocument {
     next_id: usize,
 }
 
+#[derive(Clone, Copy)]
 struct SvgRenderResources<'a> {
     document_index: usize,
     source_path: &'a str,
@@ -4098,6 +4105,7 @@ struct SvgRenderResources<'a> {
     prefer_image_substitution: bool,
     // PDF export uses the print path; public SVG/PNG keep logical text nodes.
     pdf_semantics: bool,
+    raster_scale: f64,
 }
 
 struct SvgClipGroup {
@@ -4109,6 +4117,7 @@ struct SvgPaintContext<'a, 'b> {
     document: &'a OfdDocument,
     resources: &'a SvgRenderResources<'b>,
     depth: usize,
+    draw_style: &'a ResolvedDrawStyle,
 }
 
 struct ColorResources {
@@ -16987,6 +16996,7 @@ impl OfdDocument {
             embedded_font_families: font_families.as_ref(),
             prefer_image_substitution: options.prefer_image_substitution,
             pdf_semantics,
+            raster_scale: 1.,
         };
         for layer_info in self.page_layers(index)? {
             let source_path = &layer_info.source_path;
@@ -17009,6 +17019,7 @@ impl OfdDocument {
                 embedded_font_families: font_families.as_ref(),
                 prefer_image_substitution: options.prefer_image_substitution,
                 pdf_semantics,
+                raster_scale: 1.,
             };
             let parsed = parse_xml(source_path, self.required_entry(source_path)?)?;
             let layer = parsed
@@ -17652,7 +17663,8 @@ impl OfdDocument {
                     page.id
                 )));
             }
-            let svg = self.page_svg_for_output(page.index, options, true, 0, false)?;
+            let svg =
+                radial_pdf::svg(self.page_svg_for_output(page.index, options, true, 0, false)?)?;
             let mut options = svg2pdf::usvg::Options {
                 fontdb: pdf_system_fonts(),
                 ..svg2pdf::usvg::Options::default()
@@ -18391,6 +18403,15 @@ impl OfdDocument {
                 ))
             }
         };
+        let object_matrix = object
+            .attribute("CTM")
+            .and_then(parse_numbers::<6>)
+            .unwrap_or([1., 0., 0., 1., 0., 0.]);
+        let scaled_resources = SvgRenderResources {
+            raster_scale: resources.raster_scale * radial_paint::magnification(object_matrix),
+            ..*resources
+        };
+        let resources = &scaled_resources;
         let draw_refs: Vec<_> = draw_param_refs(object, inherited_draw_params)
             .into_iter()
             .filter(|id| resources.draw_params.contains_key(&resource_id_key(id)))
@@ -18400,6 +18421,7 @@ impl OfdDocument {
             document: self,
             resources,
             depth,
+            draw_style: &draw_style,
         };
         let transform = svg_transform(x, y, object.attribute("CTM"))?;
         let blend_mode = match object
@@ -33218,23 +33240,24 @@ fn svg_paint(
     let id = format!("ofd-shading-{serial}");
     *serial += 1;
     let radial = is_element(shading, "RadialShd");
+    let mut general_radial = None;
     if radial {
         let eccentricity = svg_number(shading.attribute("Eccentricity"), 0.0)?;
         let start_radius = svg_number(shading.attribute("StartRadius"), 0.0)?;
         let end_radius = svg_number(shading.attribute("EndRadius"), f64::NAN)?;
-        if !end_radius.is_finite() || end_radius <= 0.0 {
+        if !end_radius.is_finite() || end_radius < 0.0 {
             return Err(OfdError::Invalid(
                 "radial gradient has no valid EndRadius".into(),
             ));
         }
-        if !(0.0..1.0).contains(&eccentricity) || start_radius < 0.0 || start_radius >= end_radius {
+        if !(0.0..1.0).contains(&eccentricity) || start_radius < 0.0 {
             return Err(OfdError::Invalid(
-                "radial gradient requires 0 <= Eccentricity < 1 and 0 <= StartRadius < EndRadius"
-                    .into(),
+                "radial gradient requires 0 <= Eccentricity < 1 and nonnegative radii".into(),
             ));
         }
         let angle = svg_number(shading.attribute("Angle"), 0.0)?.to_radians();
         let ratio = (1.0 - eccentricity * eccentricity).sqrt();
+        let mut inverse = [1., 0., 0., 1., 0., 0.];
         let (fx, fy, transform) = if eccentricity == 0.0 {
             (start_x, start_y, String::new())
         } else {
@@ -33248,6 +33271,8 @@ fn svg_paint(
             let fy = end_y + (a * dy - b * dx) / ratio;
             let tx = end_x - a * end_x - b * end_y;
             let ty = end_y - b * end_x - d * end_y;
+            inverse = inverse_matrix([a, b, b, d, tx, ty])
+                .ok_or_else(|| OfdError::Invalid("invalid radial ellipse transform".into()))?;
             if ![fx, fy, tx, ty].iter().all(|value| value.is_finite()) {
                 return Err(OfdError::Limit(
                     "radial gradient exceeds coordinate range".into(),
@@ -33259,9 +33284,23 @@ fn svg_paint(
                 format!(" gradientTransform=\"matrix({a} {b} {b} {d} {tx} {ty})\""),
             )
         };
-        svg.push_str(&format!(
+        if start_radius >= end_radius || (fx - end_x).hypot(fy - end_y) + start_radius >= end_radius
+        {
+            general_radial = Some(radial_paint::RadialPaint {
+                circles: [fx, fy, start_radius, end_x, end_y, end_radius],
+                inverse,
+                spread: match spread {
+                    "repeat" => GradientMapType::Repeat,
+                    "reflect" => GradientMapType::Reflect,
+                    _ => GradientMapType::Direct,
+                },
+                extend: [matches!(extend, "1" | "3"), matches!(extend, "2" | "3")],
+            });
+        } else {
+            svg.push_str(&format!(
             "<defs><radialGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" spreadMethod=\"{spread}\" cx=\"{end_x}\" cy=\"{end_y}\" r=\"{end_radius}\" fx=\"{fx}\" fy=\"{fy}\" fr=\"{start_radius}\"{transform}>"
         ));
+        }
     } else {
         svg.push_str(&format!(
             "<defs><linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" spreadMethod=\"{spread}\" x1=\"{start_x}\" y1=\"{start_y}\" x2=\"{end_x}\" y2=\"{end_y}\">"
@@ -33271,9 +33310,9 @@ fn svg_paint(
         .children()
         .filter(|node| is_ofd_element(*node, "Segment"))
         .collect::<Vec<_>>();
-    if segments.len() < 2 {
+    if segments.len() < 2 || segments.len() > 10_000 {
         return Err(OfdError::Invalid(
-            "gradient requires at least two Segment elements".into(),
+            "gradient requires 2..10000 Segment elements".into(),
         ));
     }
     let mut positions = segments
@@ -33314,6 +33353,20 @@ fn svg_paint(
             }
             left = right;
         }
+    }
+    if let Some(paint) = general_radial {
+        let stops = segments
+            .iter()
+            .zip(&positions)
+            .map(|(segment, position)| {
+                let color = gouraud_color(*segment, "Color", context.resources.colors)?;
+                Ok(radial_paint::Stop {
+                    position: position.unwrap(),
+                    color: color.map(|value| value.round().clamp(0., 255.) as u8),
+                })
+            })
+            .collect::<Result<Vec<_>, OfdError>>()?;
+        return paint.render(context, graphic_object, &stops, &id, svg);
     }
     if spread == "pad" && matches!(extend, "0" | "2") {
         svg.push_str("<stop offset=\"0\" stop-color=\"#000000\" stop-opacity=\"0\"/>");
@@ -33748,7 +33801,17 @@ fn svg_pattern(
             continue;
         }
         has_graphics = true;
-        document.render_svg_object(object, resources, serial, &mut content, depth + 1, &[])?;
+        document.render_svg_object(
+            object,
+            &SvgRenderResources {
+                raster_scale: resources.raster_scale * radial_paint::magnification(matrix),
+                ..*resources
+            },
+            serial,
+            &mut content,
+            depth + 1,
+            &[],
+        )?;
     }
     if !has_graphics {
         if let Some(thumbnail) = cell.attribute("Thumbnail") {

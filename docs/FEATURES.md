@@ -1716,6 +1716,25 @@ round-trip tests inspect both circles and compare independent Poppler renders
 at two resolutions on Linux CI. This requires the unpublished converter
 `ofdrw-svg2pdf 0.13.0-ofdrw.4`; v0.5.0 PDF export still loses the start radius.
 
+Development builds additionally render contracting, equal-radius, non-nested,
+and tangent two-circle fields, including either zero-radius endpoint and an
+empty field when both radii are zero. All four `Extend` combinations and
+direct/repeat/reflect mapping retain their geometry; eccentricity and rotation
+also apply to these fields. Existing gradient fill/stroke and canvas drawing
+interfaces use this behavior without adding C ABI exports. It is absent from
+v0.5.0.
+
+Increasing nested circles retain native SVG/PDF gradients. Other fields use a
+16-pixel/mm RGBA paint tile capped at four million pixels, with object, pattern,
+and composite magnification included in its resolution. The fallback bounds
+circle coordinates and radii to one billion after ellipse normalization.
+Coincident circles with the same positive radius are rejected. OFD shading
+XML and object structure remain unchanged. PDF export paints the tile through
+vector path/text stencils and preserves a selectable text run, avoiding
+reader-dependent tiling offsets in magnified patterns and isolated composites.
+Reference tests use original native PDFs rendered by Ghostscript; Linux CI
+also renders exported PDFs with both Poppler and Ghostscript.
+
 ## SVG 字体与绘制效果
 
 Mapped TrueType and CFF glyphs bake their font matrix into outline geometry,

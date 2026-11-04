@@ -23220,3 +23220,5 @@ mod canvas_units_binding_tests {
 
 #[cfg(test)]
 mod canvas_pattern_tests;
+#[cfg(test)]
+mod general_radial_tests;
