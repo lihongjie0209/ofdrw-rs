@@ -40,6 +40,8 @@ for (const candidate of candidates) {
 const OfdDocument = koffi.pointer('OfdDocument', koffi.opaque());
 const OfdBuffer = koffi.struct('OfdBuffer', { data: 'uint8_t *', len: 'size_t' });
 const api = {
+  canvasPixelsToMm: library.func('int ofd_canvas_pixels_to_mm(int32_t pixels, double pixels_per_mm, _Out_ double *output)'),
+  canvasMmToPixels: library.func('int ofd_canvas_mm_to_pixels(double mm, double pixels_per_mm, _Out_ int32_t *output)'),
   parseCanvasColor: library.func('int ofd_parse_canvas_color_json(str input, _Out_ OfdBuffer *output)'),
   abiVersion: library.func('uint32_t ofd_abi_version(void)'),
   lastError: library.func('str ofd_last_error(void)'),
@@ -2138,10 +2140,28 @@ function createSesSeal(issuerPrivateKey, issuerCertificate, picture, spec, issue
   return ownedBuffer(output);
 }
 
+function canvasPixelsToMm(pixels, pixelsPerMm = 3.78) {
+  if (!Number.isInteger(pixels) || pixels < -2147483648 || pixels > 2147483647) {
+    throw new RangeError('pixels must fit a signed 32-bit integer');
+  }
+  if (typeof pixelsPerMm !== 'number') throw new TypeError('pixelsPerMm must be a number');
+  const output = [0];
+  check(api.canvasPixelsToMm(pixels, pixelsPerMm, output));
+  return output[0];
+}
+
+function canvasMmToPixels(mm, pixelsPerMm = 3.78) {
+  if (typeof mm !== 'number') throw new TypeError('mm must be a number');
+  if (typeof pixelsPerMm !== 'number') throw new TypeError('pixelsPerMm must be a number');
+  const output = [0];
+  check(api.canvasMmToPixels(mm, pixelsPerMm, output));
+  return output[0];
+}
+
 function parseCanvasColor(value) {
   const output = {};
   check(api.parseCanvasColor(utf8(value, 'value'), output));
   return JSON.parse(ownedBuffer(output).toString('utf8'));
 }
 
-module.exports = { Document, OfdError, createSesSeal, parseCanvasColor };
+module.exports = { Document, OfdError, createSesSeal, parseCanvasColor, canvasPixelsToMm, canvasMmToPixels };

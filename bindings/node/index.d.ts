@@ -1,3 +1,7 @@
+/** Convert signed 32-bit Canvas pixels to millimeters; density defaults to 3.78. */
+export function canvasPixelsToMm(pixels: number, pixelsPerMm?: number): number;
+/** Truncate/saturate to signed 32-bit Canvas pixels; NaN becomes zero. */
+export function canvasMmToPixels(mm: number, pixelsPerMm?: number): number;
 export class OfdError extends Error {}
 
 /** Parse Canvas colors; unknown or malformed input returns null. Alpha is a byte. */

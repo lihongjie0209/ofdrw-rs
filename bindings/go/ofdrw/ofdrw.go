@@ -328,6 +328,8 @@ type nativeAPI struct {
 	addFlowBlocks                   func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	drawCanvas                      func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureCanvasText               func(uintptr, uintptr, *byte, *nativeBuffer) int32
+	canvasPixelsToMM                func(int32, float64, *float64) int32
+	canvasMMToPixels                func(float64, float64, *int32) int32
 	parseCanvasColor                func(*byte, *nativeBuffer) int32
 	resolveCanvasFontStyle          func(uintptr, uintptr, *byte, *nativeBuffer) int32
 	measureCanvasTextArea           func(uintptr, uintptr, *byte, *nativeBuffer) int32
@@ -598,6 +600,8 @@ func loadAPI() error {
 			{"ofd_add_ses_signature_with_distids", &api.addSESWithIDs},
 			{"ofd_add_ses_signature_with_stamp_json", &api.addSESWithStamp},
 			{"ofd_create_ses_seal_json", &api.createSESSeal},
+			{"ofd_canvas_pixels_to_mm", &api.canvasPixelsToMM},
+			{"ofd_canvas_mm_to_pixels", &api.canvasMMToPixels},
 			{"ofd_parse_canvas_color_json", &api.parseCanvasColor},
 			{"ofd_get_entry", &api.getEntry}, {"ofd_set_entry", &api.setEntry}, {"ofd_remove_entry", &api.removeEntry},
 			{"ofd_add_text_page", &api.addTextPage}, {"ofd_save", &api.save},
