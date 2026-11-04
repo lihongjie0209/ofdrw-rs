@@ -7,7 +7,7 @@
 以 [Java OFDRW](https://github.com/ofdrw/ofdrw) 为兼容性参考，优先实现包读写、页面对象、资源、布局、渲染和文档转换。
 
 本页对应 **0.5.0**；分发状态见 [Release 工作流](https://github.com/lihongjie0209/ofdrw-rs/actions/workflows/release.yml)。历史版本 [v0.4.0](https://github.com/lihongjie0209/ofdrw-rs/releases/tag/v0.4.0) 的包和标签保持不变。
-下方 0.5.0 安装命令在发布流程完成后可用；候选源码可从 `release/v0.5.0` 分支构建匹配的 Rust 核心与各语言绑定。项目尚未完整替代 Java OFDRW。
+0.5.0 已发布到 crates.io、PyPI、npm，并提供 Go 模块标签及六个平台原生库；[发布与安装验证](https://github.com/lihongjie0209/ofdrw-rs/actions/runs/41396012939)已通过。源码构建请使用 `v0.5.0` 标签匹配各语言绑定。项目尚未完整替代 Java OFDRW。
 完整布局规则、PDF 转换、证书信任验证和 OFD-A 转换仍有未实现部分。
 支持范围及具体限制见 [功能和 API 说明](docs/FEATURES.md)。
 版本变更见 [v0.5.0 说明](docs/RELEASE_NOTES.md)；主分支可按下方步骤从源码构建。
@@ -146,7 +146,7 @@ GitHub Releases 的 native ZIP 中提供 `include/ofdrw.h`、动态库和静态�
 ```sh
 git clone https://github.com/lihongjie0209/ofdrw-rs.git
 cd ofdrw-rs
-git checkout release/v0.5.0
+git checkout v0.5.0
 cargo build --release --locked -p ofdrw-ffi
 ```
 
@@ -197,7 +197,7 @@ Rust 使用 `FlowSpan::placeholder`，Go 使用 `NewPlaceholderSpan`，Python、
 
 ## 向量画布（0.5.0）
 
-开发分支新增有状态画布，支持路径、曲线、变换、保存恢复、裁剪、绘制参数与图片绘制/裁剪。
+0.5.0 提供有状态画布，支持路径、曲线、变换、保存恢复、裁剪、绘制参数与图片绘制/裁剪。
 Rust 使用 `draw_canvas`，C 使用 `ofd_draw_canvas_json`；
 [Python](bindings/python/README.md)、[Go](bindings/go/README.md) 和
 [Node.js / TypeScript](bindings/node/README.md) 均提供原子批量调用示例。
